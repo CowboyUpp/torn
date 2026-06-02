@@ -12,7 +12,7 @@
 (function () {
   'use strict';
 
-  const API_KEY = 'KqA6L7YPwPah9fAh';
+  const API_KEY = 'enter your API key';
   const FACTION_ID = 8085;
   let members = [];
   let maxSkill = 100;
