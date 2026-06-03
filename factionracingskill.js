@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Nuclear Blast — Racing Skills - 3.0
+// @name         Nuclear Blast — Racing Skills -3.2
 // @namespace    torn.com
-// @version      3.0
-// @description  Displays racing skills for all members of faction Nuclear Blast in a centered card popup with fixed static headers, CSV export, efficiency ratios, and an instant light/dark mode switch.
+// @version      3.2
+// @description  High-performance racing dashboard for Nuclear Blast. Features a 60-minute local caching layout, rate-limit backoff, tracking comments, CSV export, efficiency ratios, and dark mode.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
 // @match        https://www.torn.com/loader.php?sid=racing*
@@ -15,7 +15,10 @@
 
   const STORAGE_KEY = 'nb_torn_api_key';
   const THEME_KEY   = 'nb_racing_theme';
+  const CACHE_KEY   = 'nb_racing_data_cache';
+  const TIME_KEY    = 'nb_racing_cache_time';
   const FACTION_ID  = 8085;
+  const CACHE_DURATION = 60 * 60 * 1000; // 60 Minutes in milliseconds
   
   let API_KEY       = localStorage.getItem(STORAGE_KEY) || '';
   let isDarkMode    = localStorage.getItem(THEME_KEY) === 'dark';
@@ -23,7 +26,7 @@
   let maxSkill      = 100;
   let scriptInjected = false;
 
-  const SCRIPT_VERSION = '3.0';
+  const SCRIPT_VERSION = '3.2';
 
   // ── DYNAMIC EXCEL-STYLE FIXED HEADER CSS ─────────────────────────────────
   const style = document.createElement('style');
@@ -35,7 +38,6 @@
     const thColor = isDarkMode ? '#94a3b8' : '#64748b';
     const borderCol = isDarkMode ? '#334155' : '#cbd5e1';
 
-    // Using backticks ensures clean parsing across all environments
     style.textContent = `
       #nb-body-scroll-container { 
         overflow-y: auto !important; 
@@ -62,12 +64,8 @@
         text-align: left !important; 
         border-bottom: 2px solid ${borderCol} !important; 
       } 
-      #nb-racing-table th:first-child { 
-        padding-left: 14px !important; 
-      } 
-      #nb-racing-table th:last-child { 
-        padding-right: 14px !important; 
-      }
+      #nb-racing-table th:first-child { padding-left: 14px !important; } 
+      #nb-racing-table th:last-child { padding-right: 14px !important; }
     `;
   }
 
@@ -106,25 +104,26 @@
 
     const modal = document.createElement('div');
     modal.id = 'nb-racing-overlay';
-    
     applyThemeColors(modal);
 
     let headerHtml = '<div id="nb-header-ui" style="padding:14px; border-bottom:1px solid var(--nb-border); display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:var(--nb-bg-alt);">';
     headerHtml += '<span style="font-size:15px; font-weight:600; color:var(--nb-text);">Nuclear Blast</span>';
-    headerHtml += '<span style="font-size:10px; color:var(--nb-muted); background:var(--nb-badge-bg); border:1px solid var(--nb-border); padding:1px 5px; border-radius:4px; font-weight:normal;">v' + SCRIPT_VERSION + '</span>';
-    headerHtml += '<button id="nb-theme-toggle" title="Toggle Light/Dark mode" style="font-size:13px; background:none; border:none; cursor:pointer; padding:2px 4px; border-radius:4px; touch-action:manipulation;">' + (isDarkMode ? '☀️' : '🌙') + '</button>';
+    headerHtml += '<span style="font-size:10px; color:var(--nb-muted); background:var(--nb-badge-bg); border:1px solid var(--nb-border); padding:1px 5px; border-radius:4px;">v' + SCRIPT_VERSION + '</span>';
+    headerHtml += '<button id="nb-theme-toggle" title="Toggle Light/Dark mode" style="font-size:13px; background:none; border:none; cursor:pointer; padding:2px 4px; border-radius:4px;">' + (isDarkMode ? '☀️' : '🌙') + '</button>';
     headerHtml += '<span id="nb-count" style="font-size:11px; color:var(--nb-text); background:var(--nb-badge-bg); padding:2px 8px; border-radius:20px;">Loading…</span>';
+    headerHtml += '<span id="nb-cache-status" style="font-size:11px; font-weight:600;"></span>';
     headerHtml += '<div style="margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; width:100%; margin-top:8px;">';
     headerHtml += '<input id="nb-search" type="text" placeholder="Search..." style="padding:6px 8px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; flex:2; min-width:100px; background:var(--nb-input-bg); color:var(--nb-text);" />';
-    headerHtml += '<select id="nb-sort" style="padding:6px 6px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; flex:1; background:var(--nb-input-bg); color:var(--nb-text)"><option value="racing_skill">Skill</option><option value="racing_ratio">Ratio %</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="name">Name</option></select>';
+    headerHtml += '<select id="nb-sort" style="padding:6px 6px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; flex:1; background:var(--nb-input-bg); color:var(--nb-text);"><option value="racing_skill">Skill</option><option value="racing_ratio">Ratio %</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="name">Name</option></select>';
     headerHtml += '<select id="nb-dir" style="padding:6px 6px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; background:var(--nb-input-bg); color:var(--nb-text);"><option value="desc">Desc</option><option value="asc">Asc</option></select>';
-    headerHtml += '<button id="nb-change-key" title="Change API key" style="padding:6px 10px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nb-btn-bg); color:var(--nb-text)">🔑</button>';
+    headerHtml += '<button id="nb-sync" title="Force Sync Fresh API Data" style="padding:6px 10px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:#16a34a; color:#fff; font-weight:600;">🔄 Sync</button>';
+    headerHtml += '<button id="nb-change-key" title="Change API key" style="padding:6px 10px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nb-btn-bg); color:var(--nb-text);">🔑</button>';
     headerHtml += '<button id="nb-export" title="Export to Excel CSV" style="padding:6px 12px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nb-btn-accent); color:var(--nb-btn-accent-text); font-weight:600;">📥 Export CSV</button>';
     headerHtml += '<button id="nb-close" style="padding:6px 12px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nb-btn-bg); color:var(--nb-text); font-weight:600;">✕ Close</button>';
     headerHtml += '</div></div>';
     headerHtml += '<div id="nb-stats" style="display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid var(--nb-border); flex-wrap:wrap; background:var(--nb-bg-alt2);"></div>';
-    headerHtml += '<div id="nb-progress" style="text-align:center; font-size:11px; color:#c62828; font-weight:bold; padding:6px 0; background:#fef2f2; border-bottom:1px solid #fee2e2; display:none;"></div>';
-    headerHtml += '<div id="nb-body-scroll-container" style="background:var(--nb-bg);"><div id="nb-body" style="padding:0;"><p style="padding:2rem; text-align:center; color:var(--nb-muted);">Fetching data…</p></div></div>';
+    headerHtml += '<div id="nb-progress" style="text-align:center; font-size:11px; color:#1e40af; font-weight:bold; padding:6px 0; background:#eff6ff; border-bottom:1px solid #bfdbfe; display:none;"></div>';
+    headerHtml += '<div id="nb-body-scroll-container" style="background:var(--nb-bg);"><div id="nb-body" style="padding:0;"><p style="padding:2rem; text-align:center; color:var(--nb-muted);">Loading system data…</p></div></div>';
 
     modal.innerHTML = headerHtml;
     backdrop.appendChild(modal);
@@ -136,8 +135,9 @@
     document.getElementById('nb-search').addEventListener('input', render);
     document.getElementById('nb-sort').addEventListener('change', render);
     document.getElementById('nb-dir').addEventListener('change', render);
-    document.getElementById('nb-change-key').addEventListener('click', () => { showKeySetup(modal, () => fetchData()); });
+    document.getElementById('nb-change-key').addEventListener('click', () => { showKeySetup(modal, () => loadDashboard(true)); });
     document.getElementById('nb-export').addEventListener('click', exportToCSV);
+    document.getElementById('nb-sync').addEventListener('click', () => loadDashboard(true));
     
     document.getElementById('nb-theme-toggle').addEventListener('click', () => {
       isDarkMode = !isDarkMode;
@@ -149,7 +149,7 @@
       updateStatsUI();
     });
 
-    if (!API_KEY) { showKeySetup(modal, () => fetchData()); } else { fetchData(); }
+    if (!API_KEY) { showKeySetup(modal, () => loadDashboard(true)); } else { loadDashboard(false); }
   }
 
   function applyThemeColors(targetElement) {
@@ -205,7 +205,7 @@
       if (search) search.style.display = '';
       if (sort) sort.style.display = '';
       if (dir) dir.style.display = '';
-      body.innerHTML = '<p style="padding:2rem; text-align:center; color:var(--nb-muted);">Fetching data…</p>';
+      body.innerHTML = '<p style="padding:2rem; text-align:center; color:var(--nb-muted);">Preparing connection…</p>';
       members = [];
       onSuccess();
     });
@@ -334,23 +334,64 @@
 
   async function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  async function fetchWithRetry(url, retries = 3) {
+  // ── FORUM COMPLIANT EXPONENTIAL BACKOFF FETCH QUEUE ──────────────────────
+  async function fetchWithRetry(url, retries = 3, initialBackoff = 2000) {
+    let currentDelay = initialBackoff;
     for (let i = 0; i < retries; i++) {
       try {
-        const res = await fetch(url);
+        const trackedUrl = url + '&comment=NB_Racing_v3.2';
+        const res = await fetch(trackedUrl);
         const d   = await res.json();
-        if (d.error && (d.error.code === 5 || d.error.code === 8)) { await delay(2000); continue; }
+        
+        if (d.error && (d.error.code === 5 || d.error.code === 8)) {
+          const prog = document.getElementById('nb-progress');
+          if (prog) prog.textContent = `Rate limited! Cooling down for ${currentDelay / 1000}s...`;
+          await delay(currentDelay);
+          currentDelay *= 2; 
+          continue;
+        }
         return d;
-      } catch(e) { await delay(1000); }
+      } catch(e) { 
+        await delay(1000); 
+      }
     }
     return null;
+  }
+
+  // ── INTELLIGENT ROUTER: LOCAL STORAGE CACHING ENGINE ─────────────────────
+  async function loadDashboard(forceSync = false) {
+    const cachedTime = localStorage.getItem(TIME_KEY);
+    const cachedData = localStorage.getItem(CACHE_KEY);
+    const cacheStatusEl = document.getElementById('nb-cache-status');
+
+    if (!forceSync && cachedTime && cachedData && (Date.now() - cachedTime < CACHE_DURATION)) {
+      members = JSON.parse(cachedData);
+      const countEl = document.getElementById('nb-count');
+      if (countEl) countEl.textContent = members.length + ' members';
+      
+      if (cacheStatusEl) {
+        cacheStatusEl.style.color = '#16a34a';
+        cacheStatusEl.textContent = '⚡ Cached (Instant)';
+      }
+      
+      const skills = members.map(m => m.racing_skill ?? 0);
+      maxSkill = Math.max(...skills, 1);
+      updateStatsUI();
+      render();
+    } else {
+      if (cacheStatusEl) {
+        cacheStatusEl.style.color = '#eab308';
+        cacheStatusEl.textContent = '☁️ Live Syncing';
+      }
+      await fetchData();
+    }
   }
 
   async function fetchData() {
     const factionData = await fetchWithRetry('https://api.torn.com/faction/' + FACTION_ID + '?selections=basic&key=' + API_KEY);
     if (!factionData || factionData.error) {
       const body = document.getElementById('nb-body');
-      if (body) body.innerHTML = '<p style="color:red; padding:1rem;">API error</p>';
+      if (body) body.innerHTML = '<p style="color:red; padding:1rem;">API authentication failure. Check your key.</p>';
       return;
     }
 
@@ -389,6 +430,15 @@
     const skills = members.map(m => m.racing_skill ?? 0);
     maxSkill = Math.max(...skills, 1);
     
+    localStorage.setItem(CACHE_KEY, JSON.stringify(members));
+    localStorage.setItem(TIME_KEY, Date.now().toString());
+    
+    const cacheStatusEl = document.getElementById('nb-cache-status');
+    if (cacheStatusEl) {
+      cacheStatusEl.style.color = '#16a34a';
+      cacheStatusEl.textContent = '⚡ Cached (Instant)';
+    }
+
     updateStatsUI();
     render();
   }
