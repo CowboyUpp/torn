@@ -1,11 +1,12 @@
 // ==UserScript==
-// @name         Nuclear Blast — Racing Skills - 2.7
+// @name         Nuclear Blast — Racing Skills
 // @namespace    torn.com
-// @version      2.7
-// @description  Displays racing skills for all members of faction Nuclear Blast in a centered card popup with perfectly fixed static headers and CSV export functionality
+// @version      2.8
+// @description  Displays racing skills for all members of faction Nuclear Blast in a centered card popup with perfectly fixed static headers, CSV export functionality, and Win/Race efficiency ratios.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
 // @match        https://www.torn.com/loader.php?sid=racing*
+// @license      MIT
 // @grant        none
 // ==/UserScript==
 
@@ -19,11 +20,11 @@
   let maxSkill      = 100;
   let scriptInjected = false;
 
-  const SCRIPT_VERSION = '2.7';
+  const SCRIPT_VERSION = '2.8';
 
   // ── EXCEL-STYLE FIXED HEADER CSS ─────────────────────────────────────────
   const style = document.createElement('style');
-  style.textContent = '#nb-body-scroll-container { overflow-y: auto !important; overflow-x: auto !important; flex: 1 !important; height: 100% !important; position: relative !important; } #nb-racing-table { width: 100% !important; border-collapse: separate !important; border-spacing: 0 !important; font-size: 11px !important; min-width: 550px !important; } #nb-racing-table thead th { position: sticky !important; top: 0 !important; z-index: 999 !important; background-color: #ffffff !important; color: #64748b !important; font-weight: 600 !important; padding: 12px 4px 10px 14px !important; text-align: left !important; border-bottom: 2px solid #cbd5e1 !important; } #nb-racing-table th:first-child { padding-left: 14px !important; } #nb-racing-table th:last-child { padding-right: 14px !important; }';
+  style.textContent = '#nb-body-scroll-container { overflow-y: auto !important; overflow-x: auto !important; flex: 1 !important; height: 100% !important; position: relative !important; } #nb-racing-table { width: 100% !important; border-collapse: separate !important; border-spacing: 0 !important; font-size: 11px !important; min-width: 600px !important; } #nb-racing-table thead th { position: sticky !important; top: 0 !important; z-index: 999 !important; background-color: #ffffff !important; color: #64748b !important; font-weight: 600 !important; padding: 12px 4px 10px 14px !important; text-align: left !important; border-bottom: 2px solid #cbd5e1 !important; } #nb-racing-table th:first-child { padding-left: 14px !important; } #nb-racing-table th:last-child { padding-right: 14px !important; }';
   document.head.appendChild(style);
 
   function init() {
@@ -59,7 +60,7 @@
 
     const modal = document.createElement('div');
     modal.id = 'nb-racing-overlay';
-    modal.style.cssText = 'width: 92vw !important; max-width: 760px !important; height: 75vh !important; max-height: 580px !important; background: #fff !important; color: #111 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.4) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important;';
+    modal.style.cssText = 'width: 92vw !important; max-width: 820px !important; height: 75vh !important; max-height: 580px !important; background: #fff !important; color: #111 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.4) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important;';
 
     let headerHtml = '<div style="padding:14px; border-bottom:1px solid #e5e5e5; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#fcfcfc;">';
     headerHtml += '<span style="font-size:15px; font-weight:600; color:#111;">Nuclear Blast</span>';
@@ -67,7 +68,7 @@
     headerHtml += '<span id="nb-count" style="font-size:11px; background:#e2e8f0; padding:2px 8px; border-radius:20px;">Loading…</span>';
     headerHtml += '<div style="margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; width:100%; margin-top:8px;">';
     headerHtml += '<input id="nb-search" type="text" placeholder="Search..." style="padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:12px; flex:2; min-width:100px;" />';
-    headerHtml += '<select id="nb-sort" style="padding:6px 6px; border:1px solid #ccc; border-radius:6px; font-size:12px; flex:1;"><option value="racing_skill">Skill</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="name">Name</option></select>';
+    headerHtml += '<select id="nb-sort" style="padding:6px 6px; border:1px solid #ccc; border-radius:6px; font-size:12px; flex:1;"><option value="racing_skill">Skill</option><option value="racing_ratio">Ratio %</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="name">Name</option></select>';
     headerHtml += '<select id="nb-dir" style="padding:6px 6px; border:1px solid #ccc; border-radius:6px; font-size:12px;"><option value="desc">Desc</option><option value="asc">Asc</option></select>';
     headerHtml += '<button id="nb-change-key" title="Change API key" style="padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:12px; cursor:pointer; background:#f1f5f9;">🔑</button>';
     headerHtml += '<button id="nb-export" title="Export to Excel CSV" style="padding:6px 12px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; cursor:pointer; background:#e2e8f0; color:#0f172a; font-weight:600;">📥 Export CSV</button>';
@@ -155,7 +156,6 @@
     return '<div style="background:#fff; border:1px solid #e2e8f0; border-radius:6px; padding:6px 10px; min-width:75px; flex:1;"><div style="font-size:10px; color:#64748b; text-transform:uppercase;">' + label + '</div><div style="font-size:15px; font-weight:600; color:#334155;">' + value + '</div></div>';
   }
 
-  // ── SAFE CSV EXPORT LOGIC (NO REGEX EMBEDDED SLASHS) ─────────────────────
   function exportToCSV() {
     if (!members || members.length === 0) return;
 
@@ -172,13 +172,13 @@
       return 0;
     });
 
-    let csvContent = 'Index,User ID,Name,Position,Rank,Racing Skill,Wins,Runs,Points\n';
+    let csvContent = 'Index,User ID,Name,Position,Rank,Racing Skill,Wins,Runs,Ratio %,Points\n';
 
     filtered.forEach((m, index) => {
       const skill = m.racing_skill ?? 0;
       const rk = rankLabel(skill);
-
-      // Clean quotes safely without problematic regex symbols
+      const ratioStr = (m.racing_ratio ?? 0).toFixed(1) + '%';
+      
       const cleanName = m.name.split('"').join('""');
       const cleanPos = (m.position ?? '—').split('"').join('""');
 
@@ -191,6 +191,7 @@
         skill.toFixed(2),
         m.racing_wins ?? 0,
         m.races_entered ?? 0,
+        ratioStr,
         m.racing_points ?? 0
       ];
       csvContent += row.join(',') + '\n';
@@ -225,6 +226,8 @@
       const skill = m.racing_skill ?? 0;
       const pct   = maxSkill > 0 ? Math.round((skill / maxSkill) * 100) : 0;
       const rk    = rankLabel(skill);
+      const ratioStr = (m.racing_ratio ?? 0).toFixed(1) + '%';
+
       let rHtml = '<tr style="border-bottom:1px solid #f1f5f9;">';
       rHtml += '<td style="padding:8px 14px; color:#94a3b8;">' + (i + 1) + '</td>';
       rHtml += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + m.id + '" target="_blank" style="color:#1d6fa4; text-decoration:none; font-weight:600;">' + m.name + '</a></td>';
@@ -233,6 +236,7 @@
       rHtml += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:#e2e8f0; min-width:40px;"><div style="width:' + pct + '%; height:100%; border-radius:3px; background:#378ADD;"></div></div><span style="font-size:11px; color:#475569; min-width:28px; text-align:right;">' + skill.toFixed(2) + '</span></div></td>';
       rHtml += '<td style="padding:8px 4px; color:#475569;">' + (m.racing_wins ?? '—') + '</td>';
       rHtml += '<td style="padding:8px 4px; color:#475569;">' + (m.races_entered ?? '—') + '</td>';
+      rHtml += '<td style="padding:8px 4px; font-weight:600; color:#0f172a;">' + ratioStr + '</td>';
       rHtml += '<td style="padding:8px 14px 8px 4px; color:#475569;">' + (m.racing_points ?? '—') + '</td>';
       rHtml += '</tr>';
       return rHtml;
@@ -240,8 +244,8 @@
 
     const body = document.getElementById('nb-body');
     if (!body) return;
-
-    body.innerHTML = '<table id="nb-racing-table"><thead><tr><th>#</th><th>Member</th><th>Pos</th><th>Rank</th><th>Skill</th><th>Wins</th><th>Runs</th><th>Pts</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    
+    body.innerHTML = '<table id="nb-racing-table"><thead><tr><th>#</th><th>Member</th><th>Pos</th><th>Rank</th><th>Skill</th><th>Wins</th><th>Runs</th><th>Ratio</th><th>Pts</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
   async function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -272,7 +276,7 @@
 
     members = raw.map(([id, m]) => ({
       id, name: m.name, position: m.position,
-      racing_skill: 0, racing_wins: 0, races_entered: 0, racing_points: 0
+      racing_skill: 0, racing_wins: 0, races_entered: 0, racing_ratio: 0, racing_points: 0
     }));
 
     const total = members.length;
@@ -288,6 +292,9 @@
         m.racing_wins   = Number(d.personalstats.raceswon)           || 0;
         m.racing_points = Number(d.personalstats.racingpointsearned)|| 0;
         m.races_entered = Number(d.personalstats.racesentered)      || 0;
+        
+        // Calculate Win-to-Race Efficiency Ratio safely
+        m.racing_ratio  = m.races_entered > 0 ? (m.racing_wins / m.races_entered) * 100 : 0;
       }
       done++;
       if (prog) prog.textContent = 'Fetching Profile Data (' + done + ' / ' + total + ')...';
