@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Nuclear Blast — Racing Skills
+// @name         Nuclear Blast — Racing Skills - 3.0
 // @namespace    torn.com
-// @version      2.8
-// @description  Displays racing skills for all members of faction Nuclear Blast in a centered card popup with perfectly fixed static headers, CSV export functionality, and Win/Race efficiency ratios.
+// @version      3.0
+// @description  Displays racing skills for all members of faction Nuclear Blast in a centered card popup with fixed static headers, CSV export, efficiency ratios, and an instant light/dark mode switch.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
 // @match        https://www.torn.com/loader.php?sid=racing*
@@ -14,18 +14,62 @@
   'use strict';
 
   const STORAGE_KEY = 'nb_torn_api_key';
+  const THEME_KEY   = 'nb_racing_theme';
   const FACTION_ID  = 8085;
+  
   let API_KEY       = localStorage.getItem(STORAGE_KEY) || '';
+  let isDarkMode    = localStorage.getItem(THEME_KEY) === 'dark';
   let members       = [];
   let maxSkill      = 100;
   let scriptInjected = false;
 
-  const SCRIPT_VERSION = '2.8';
+  const SCRIPT_VERSION = '3.0';
 
-  // ── EXCEL-STYLE FIXED HEADER CSS ─────────────────────────────────────────
+  // ── DYNAMIC EXCEL-STYLE FIXED HEADER CSS ─────────────────────────────────
   const style = document.createElement('style');
-  style.textContent = '#nb-body-scroll-container { overflow-y: auto !important; overflow-x: auto !important; flex: 1 !important; height: 100% !important; position: relative !important; } #nb-racing-table { width: 100% !important; border-collapse: separate !important; border-spacing: 0 !important; font-size: 11px !important; min-width: 600px !important; } #nb-racing-table thead th { position: sticky !important; top: 0 !important; z-index: 999 !important; background-color: #ffffff !important; color: #64748b !important; font-weight: 600 !important; padding: 12px 4px 10px 14px !important; text-align: left !important; border-bottom: 2px solid #cbd5e1 !important; } #nb-racing-table th:first-child { padding-left: 14px !important; } #nb-racing-table th:last-child { padding-right: 14px !important; }';
+  style.id = 'nb-dynamic-styles';
   document.head.appendChild(style);
+
+  function updateStyles() {
+    const thBg = isDarkMode ? '#1e293b' : '#ffffff';
+    const thColor = isDarkMode ? '#94a3b8' : '#64748b';
+    const borderCol = isDarkMode ? '#334155' : '#cbd5e1';
+
+    // Using backticks ensures clean parsing across all environments
+    style.textContent = `
+      #nb-body-scroll-container { 
+        overflow-y: auto !important; 
+        overflow-x: auto !important; 
+        flex: 1 !important; 
+        height: 100% !important; 
+        position: relative !important; 
+      } 
+      #nb-racing-table { 
+        width: 100% !important; 
+        border-collapse: separate !important; 
+        border-spacing: 0 !important; 
+        font-size: 11px !important; 
+        min-width: 600px !important; 
+      } 
+      #nb-racing-table thead th { 
+        position: sticky !important; 
+        top: 0 !important; 
+        z-index: 999 !important; 
+        background-color: ${thBg} !important; 
+        color: ${thColor} !important; 
+        font-weight: 600 !important; 
+        padding: 12px 4px 10px 14px !important; 
+        text-align: left !important; 
+        border-bottom: 2px solid ${borderCol} !important; 
+      } 
+      #nb-racing-table th:first-child { 
+        padding-left: 14px !important; 
+      } 
+      #nb-racing-table th:last-child { 
+        padding-right: 14px !important; 
+      }
+    `;
+  }
 
   function init() {
     if (document.getElementById('nb-racing-btn') || scriptInjected) return;
@@ -54,29 +98,33 @@
   observer.observe(document.documentElement, { subtree: true, childList: true });
 
   function openPopup() {
+    updateStyles();
+
     const backdrop = document.createElement('div');
     backdrop.id = 'nb-racing-modal-backdrop';
-    backdrop.style.cssText = 'position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; background: rgba(0, 0, 0, 0.6) !important; z-index: 999998 !important; display: flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; padding: 12px !important;';
+    backdrop.style.cssText = 'position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; background: rgba(0, 0, 0, 0.7) !important; z-index: 999998 !important; display: flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; padding: 12px !important;';
 
     const modal = document.createElement('div');
     modal.id = 'nb-racing-overlay';
-    modal.style.cssText = 'width: 92vw !important; max-width: 820px !important; height: 75vh !important; max-height: 580px !important; background: #fff !important; color: #111 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.4) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important;';
+    
+    applyThemeColors(modal);
 
-    let headerHtml = '<div style="padding:14px; border-bottom:1px solid #e5e5e5; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#fcfcfc;">';
-    headerHtml += '<span style="font-size:15px; font-weight:600; color:#111;">Nuclear Blast</span>';
-    headerHtml += '<span style="font-size:10px; color:#64748b; background:#f1f5f9; border:1px solid #e2e8f0; padding:1px 5px; border-radius:4px; font-weight:normal;">v' + SCRIPT_VERSION + '</span>';
-    headerHtml += '<span id="nb-count" style="font-size:11px; background:#e2e8f0; padding:2px 8px; border-radius:20px;">Loading…</span>';
+    let headerHtml = '<div id="nb-header-ui" style="padding:14px; border-bottom:1px solid var(--nb-border); display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:var(--nb-bg-alt);">';
+    headerHtml += '<span style="font-size:15px; font-weight:600; color:var(--nb-text);">Nuclear Blast</span>';
+    headerHtml += '<span style="font-size:10px; color:var(--nb-muted); background:var(--nb-badge-bg); border:1px solid var(--nb-border); padding:1px 5px; border-radius:4px; font-weight:normal;">v' + SCRIPT_VERSION + '</span>';
+    headerHtml += '<button id="nb-theme-toggle" title="Toggle Light/Dark mode" style="font-size:13px; background:none; border:none; cursor:pointer; padding:2px 4px; border-radius:4px; touch-action:manipulation;">' + (isDarkMode ? '☀️' : '🌙') + '</button>';
+    headerHtml += '<span id="nb-count" style="font-size:11px; color:var(--nb-text); background:var(--nb-badge-bg); padding:2px 8px; border-radius:20px;">Loading…</span>';
     headerHtml += '<div style="margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; width:100%; margin-top:8px;">';
-    headerHtml += '<input id="nb-search" type="text" placeholder="Search..." style="padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:12px; flex:2; min-width:100px;" />';
-    headerHtml += '<select id="nb-sort" style="padding:6px 6px; border:1px solid #ccc; border-radius:6px; font-size:12px; flex:1;"><option value="racing_skill">Skill</option><option value="racing_ratio">Ratio %</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="name">Name</option></select>';
-    headerHtml += '<select id="nb-dir" style="padding:6px 6px; border:1px solid #ccc; border-radius:6px; font-size:12px;"><option value="desc">Desc</option><option value="asc">Asc</option></select>';
-    headerHtml += '<button id="nb-change-key" title="Change API key" style="padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:12px; cursor:pointer; background:#f1f5f9;">🔑</button>';
-    headerHtml += '<button id="nb-export" title="Export to Excel CSV" style="padding:6px 12px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; cursor:pointer; background:#e2e8f0; color:#0f172a; font-weight:600;">📥 Export CSV</button>';
-    headerHtml += '<button id="nb-close" style="padding:6px 12px; border:1px solid #ccc; border-radius:6px; font-size:12px; cursor:pointer; background:#f1f5f9; font-weight:600;">✕ Close</button>';
+    headerHtml += '<input id="nb-search" type="text" placeholder="Search..." style="padding:6px 8px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; flex:2; min-width:100px; background:var(--nb-input-bg); color:var(--nb-text);" />';
+    headerHtml += '<select id="nb-sort" style="padding:6px 6px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; flex:1; background:var(--nb-input-bg); color:var(--nb-text)"><option value="racing_skill">Skill</option><option value="racing_ratio">Ratio %</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="name">Name</option></select>';
+    headerHtml += '<select id="nb-dir" style="padding:6px 6px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; background:var(--nb-input-bg); color:var(--nb-text);"><option value="desc">Desc</option><option value="asc">Asc</option></select>';
+    headerHtml += '<button id="nb-change-key" title="Change API key" style="padding:6px 10px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nb-btn-bg); color:var(--nb-text)">🔑</button>';
+    headerHtml += '<button id="nb-export" title="Export to Excel CSV" style="padding:6px 12px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nb-btn-accent); color:var(--nb-btn-accent-text); font-weight:600;">📥 Export CSV</button>';
+    headerHtml += '<button id="nb-close" style="padding:6px 12px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nb-btn-bg); color:var(--nb-text); font-weight:600;">✕ Close</button>';
     headerHtml += '</div></div>';
-    headerHtml += '<div id="nb-stats" style="display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid #e5e5e5; flex-wrap:wrap; background:#f8fafc;"></div>';
+    headerHtml += '<div id="nb-stats" style="display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid var(--nb-border); flex-wrap:wrap; background:var(--nb-bg-alt2);"></div>';
     headerHtml += '<div id="nb-progress" style="text-align:center; font-size:11px; color:#c62828; font-weight:bold; padding:6px 0; background:#fef2f2; border-bottom:1px solid #fee2e2; display:none;"></div>';
-    headerHtml += '<div id="nb-body-scroll-container"><div id="nb-body" style="padding:0;"><p style="padding:2rem; text-align:center; color:#888;">Fetching data…</p></div></div>';
+    headerHtml += '<div id="nb-body-scroll-container" style="background:var(--nb-bg);"><div id="nb-body" style="padding:0;"><p style="padding:2rem; text-align:center; color:var(--nb-muted);">Fetching data…</p></div></div>';
 
     modal.innerHTML = headerHtml;
     backdrop.appendChild(modal);
@@ -90,8 +138,26 @@
     document.getElementById('nb-dir').addEventListener('change', render);
     document.getElementById('nb-change-key').addEventListener('click', () => { showKeySetup(modal, () => fetchData()); });
     document.getElementById('nb-export').addEventListener('click', exportToCSV);
+    
+    document.getElementById('nb-theme-toggle').addEventListener('click', () => {
+      isDarkMode = !isDarkMode;
+      localStorage.setItem(THEME_KEY, isDarkMode ? 'dark' : 'light');
+      document.getElementById('nb-theme-toggle').textContent = isDarkMode ? '☀️' : '🌙';
+      updateStyles();
+      applyThemeColors(modal);
+      render();
+      updateStatsUI();
+    });
 
     if (!API_KEY) { showKeySetup(modal, () => fetchData()); } else { fetchData(); }
+  }
+
+  function applyThemeColors(targetElement) {
+    if (isDarkMode) {
+      targetElement.style.cssText = 'width: 92vw !important; max-width: 820px !important; height: 75vh !important; max-height: 580px !important; background: #111827 !important; color: #f3f4f6 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.6) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important; --nb-bg: #111827; --nb-bg-alt: #1f2937; --nb-bg-alt2: #1e293b; --nb-text: #f3f4f6; --nb-muted: #9ca3af; --nb-border: #374151; --nb-border-btn: #4b5563; --nb-badge-bg: #374151; --nb-input-bg: #1f2937; --nb-btn-bg: #374151; --nb-btn-accent: #1e40af; --nb-btn-accent-text: #ffffff;';
+    } else {
+      targetElement.style.cssText = 'width: 92vw !important; max-width: 820px !important; height: 75vh !important; max-height: 580px !important; background: #fff !important; color: #111 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.4) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important; --nb-bg: #ffffff; --nb-bg-alt: #fcfcfc; --nb-bg-alt2: #f8fafc; --nb-text: #111111; --nb-muted: #64748b; --nb-border: #e5e5e5; --nb-border-btn: #cccccc; --nb-badge-bg: #e2e8f0; --nb-input-bg: #ffffff; --nb-btn-bg: #f1f5f9; --nb-btn-accent: #e2e8f0; --nb-btn-accent-text: #0f172a;';
+    }
   }
 
   function showKeySetup(modal, onSuccess) {
@@ -110,16 +176,16 @@
 
     const masked = API_KEY ? API_KEY.slice(0, 4) + '•'.repeat(Math.max(0, API_KEY.length - 4)) : '';
 
-    let setupHtml = '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:1rem;">';
-    setupHtml += '<div style="width:100%; max-width:420px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:24px 20px;">';
-    setupHtml += '<div style="font-size:15px; font-weight:600; color:#111; margin-bottom:4px;">Enter your Torn API key</div>';
-    setupHtml += '<div style="font-size:12px; color:#64748b; margin-bottom:16px; line-height:1.5;">Your key is saved locally in your browser and only ever sent to <code style="font-size:11px; background:#e2e8f0; padding:1px 5px; border-radius:4px;">api.torn.com</code>.</div>';
+    let setupHtml = '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:1rem; background:var(--nb-bg);">';
+    setupHtml += '<div style="width:100%; max-width:420px; background:var(--nb-bg-alt2); border:1px solid var(--nb-border); border-radius:10px; padding:24px 20px;">';
+    setupHtml += '<div style="font-size:15px; font-weight:600; color:var(--nb-text); margin-bottom:4px;">Enter your Torn API key</div>';
+    setupHtml += '<div style="font-size:12px; color:var(--nb-muted); margin-bottom:16px; line-height:1.5;">Your key is saved locally in your browser and only ever sent to <code style="font-size:11px; background:var(--nb-badge-bg); color:var(--nb-text); padding:1px 5px; border-radius:4px;">api.torn.com</code>.</div>';
     setupHtml += '<div style="position:relative; display:flex; align-items:center; margin-bottom:8px;">';
-    setupHtml += '<input id="nb-key-input" type="password" placeholder="' + (masked ? 'Current: ' + masked : 'Paste your API key here…') + '" autocomplete="off" style="width:100%; padding:8px 36px 8px 10px; border:1px solid #cbd5e1; border-radius:6px; font-size:13px; box-sizing:border-box; background:#fff; color:#111;" />';
-    setupHtml += '<button id="nb-key-toggle" style="position:absolute; right:8px; background:none; border:none; cursor:pointer; font-size:14px; color:#64748b; padding:0;">👁</button></div>';
+    setupHtml += '<input id="nb-key-input" type="password" placeholder="' + (masked ? 'Current: ' + masked : 'Paste your API key here…') + '" autocomplete="off" style="width:100%; padding:8px 36px 8px 10px; border:1px solid var(--nb-border-btn); border-radius:6px; font-size:13px; box-sizing:border-box; background:var(--nb-input-bg); color:var(--nb-text);" />';
+    setupHtml += '<button id="nb-key-toggle" style="position:absolute; right:8px; background:none; border:none; cursor:pointer; font-size:14px; color:var(--nb-muted); padding:0;">👁</button></div>';
     setupHtml += '<div id="nb-key-error" style="font-size:11px; color:#c62828; margin-bottom:8px; display:none;">Please enter a valid API key.</div>';
     setupHtml += '<div style="display:flex; gap:8px; margin-top:4px;"><button id="nb-key-save" style="flex:1; padding:9px; background:#185FA5; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Save &amp; load data</button>';
-    setupHtml += (API_KEY ? '<button id="nb-key-clear" style="padding:9px 14px; background:#fff; color:#c62828; border:1px solid #fca5a5; border-radius:6px; font-size:13px; cursor:pointer;">Clear</button>' : '');
+    setupHtml += (API_KEY ? '<button id="nb-key-clear" style="padding:9px 14px; background:var(--nb-input-bg); color:#c62828; border:1px solid #fca5a5; border-radius:6px; font-size:13px; cursor:pointer;">Clear</button>' : '');
     setupHtml += '</div></div></div>';
 
     body.innerHTML = setupHtml;
@@ -139,7 +205,7 @@
       if (search) search.style.display = '';
       if (sort) sort.style.display = '';
       if (dir) dir.style.display = '';
-      body.innerHTML = '<p style="padding:2rem; text-align:center; color:#888;">Fetching data…</p>';
+      body.innerHTML = '<p style="padding:2rem; text-align:center; color:var(--nb-muted);">Fetching data…</p>';
       members = [];
       onSuccess();
     });
@@ -149,11 +215,11 @@
     if (s >= 75) return { label: 'Elite',        bg: '#dbeafe', color: '#1e40af' };
     if (s >= 50) return { label: 'Advanced',     bg: '#dcfce7', color: '#166534' };
     if (s >= 25) return { label: 'Intermediate', bg: '#fef9c3', color: '#854d0e' };
-    return              { label: 'Beginner',      bg: '#f3f4f6', color: '#374151' };
+    return              { label: 'Beginner',      bg: (isDarkMode ? '#374151' : '#f3f4f6'), color: (isDarkMode ? '#e5e7eb' : '#374151') };
   }
 
   function statCard(label, value) {
-    return '<div style="background:#fff; border:1px solid #e2e8f0; border-radius:6px; padding:6px 10px; min-width:75px; flex:1;"><div style="font-size:10px; color:#64748b; text-transform:uppercase;">' + label + '</div><div style="font-size:15px; font-weight:600; color:#334155;">' + value + '</div></div>';
+    return '<div style="background:var(--nb-bg); border:1px solid var(--nb-border); border-radius:6px; padding:6px 10px; min-width:75px; flex:1;"><div style="font-size:10px; color:var(--nb-muted); text-transform:uppercase;">' + label + '</div><div style="font-size:15px; font-weight:600; color:var(--nb-text);">' + value + '</div></div>';
   }
 
   function exportToCSV() {
@@ -222,22 +288,27 @@
       return 0;
     });
 
+    const borderStyle = isDarkMode ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
+    const linkColor = isDarkMode ? '#60a5fa' : '#1d6fa4';
+    const metaTextColor = isDarkMode ? '#9ca3af' : '#475569';
+    const boldTextColor = isDarkMode ? '#f3f4f6' : '#0f172a';
+
     const rows = filtered.map((m, i) => {
       const skill = m.racing_skill ?? 0;
       const pct   = maxSkill > 0 ? Math.round((skill / maxSkill) * 100) : 0;
       const rk    = rankLabel(skill);
       const ratioStr = (m.racing_ratio ?? 0).toFixed(1) + '%';
 
-      let rHtml = '<tr style="border-bottom:1px solid #f1f5f9;">';
-      rHtml += '<td style="padding:8px 14px; color:#94a3b8;">' + (i + 1) + '</td>';
-      rHtml += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + m.id + '" target="_blank" style="color:#1d6fa4; text-decoration:none; font-weight:600;">' + m.name + '</a></td>';
-      rHtml += '<td style="padding:8px 4px; color:#475569;">' + (m.position ?? '—') + '</td>';
+      let rHtml = '<tr style="' + borderStyle + '">';
+      rHtml += '<td style="padding:8px 14px; color:var(--nb-muted);">' + (i + 1) + '</td>';
+      rHtml += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + m.id + '" target="_blank" style="color:' + linkColor + '; text-decoration:none; font-weight:600;">' + m.name + '</a></td>';
+      rHtml += '<td style="padding:8px 4px; color:' + metaTextColor + ';">' + (m.position ?? '—') + '</td>';
       rHtml += '<td style="padding:8px 4px;"><span style="background:' + rk.bg + '; color:' + rk.color + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + rk.label + '</span></td>';
-      rHtml += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:#e2e8f0; min-width:40px;"><div style="width:' + pct + '%; height:100%; border-radius:3px; background:#378ADD;"></div></div><span style="font-size:11px; color:#475569; min-width:28px; text-align:right;">' + skill.toFixed(2) + '</span></div></td>';
-      rHtml += '<td style="padding:8px 4px; color:#475569;">' + (m.racing_wins ?? '—') + '</td>';
-      rHtml += '<td style="padding:8px 4px; color:#475569;">' + (m.races_entered ?? '—') + '</td>';
-      rHtml += '<td style="padding:8px 4px; font-weight:600; color:#0f172a;">' + ratioStr + '</td>';
-      rHtml += '<td style="padding:8px 14px 8px 4px; color:#475569;">' + (m.racing_points ?? '—') + '</td>';
+      rHtml += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nb-badge-bg); min-width:40px;"><div style="width:' + pct + '%; height:100%; border-radius:3px; background:#378ADD;"></div></div><span style="font-size:11px; color:' + metaTextColor + '; min-width:28px; text-align:right;">' + skill.toFixed(2) + '</span></div></td>';
+      rHtml += '<td style="padding:8px 4px; color:' + metaTextColor + ';">' + (m.racing_wins ?? '—') + '</td>';
+      rHtml += '<td style="padding:8px 4px; color:' + metaTextColor + ';">' + (m.races_entered ?? '—') + '</td>';
+      rHtml += '<td style="padding:8px 4px; font-weight:600; color:' + boldTextColor + ';">' + ratioStr + '</td>';
+      rHtml += '<td style="padding:8px 14px 8px 4px; color:' + metaTextColor + ';">' + (m.racing_points ?? '—') + '</td>';
       rHtml += '</tr>';
       return rHtml;
     }).join('');
@@ -246,6 +317,19 @@
     if (!body) return;
     
     body.innerHTML = '<table id="nb-racing-table"><thead><tr><th>#</th><th>Member</th><th>Pos</th><th>Rank</th><th>Skill</th><th>Wins</th><th>Runs</th><th>Ratio</th><th>Pts</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function updateStatsUI() {
+    if (members.length === 0) return;
+    const skills = members.map(m => m.racing_skill ?? 0);
+    const withSkill = skills.filter(s => s > 0);
+    const avg = withSkill.length ? (withSkill.reduce((a, b) => a + b, 0) / withSkill.length).toFixed(2) : 0;
+    const top = Math.max(...skills).toFixed(2);
+
+    const statsEl = document.getElementById('nb-stats');
+    if (statsEl) {
+      statsEl.innerHTML = statCard('Total', members.length) + statCard('Top', top) + statCard('Avg', avg) + statCard('Active', withSkill.length);
+    }
   }
 
   async function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -293,7 +377,6 @@
         m.racing_points = Number(d.personalstats.racingpointsearned)|| 0;
         m.races_entered = Number(d.personalstats.racesentered)      || 0;
         
-        // Calculate Win-to-Race Efficiency Ratio safely
         m.racing_ratio  = m.races_entered > 0 ? (m.racing_wins / m.races_entered) * 100 : 0;
       }
       done++;
@@ -305,14 +388,8 @@
 
     const skills = members.map(m => m.racing_skill ?? 0);
     maxSkill = Math.max(...skills, 1);
-    const withSkill = skills.filter(s => s > 0);
-    const avg = withSkill.length ? (withSkill.reduce((a, b) => a + b, 0) / withSkill.length).toFixed(2) : 0;
-    const top = Math.max(...skills).toFixed(2);
-
-    const statsEl = document.getElementById('nb-stats');
-    if (statsEl) {
-      statsEl.innerHTML = statCard('Total', members.length) + statCard('Top', top) + statCard('Avg', avg) + statCard('Active', withSkill.length);
-    }
+    
+    updateStatsUI();
     render();
   }
 
