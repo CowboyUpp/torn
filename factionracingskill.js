@@ -8,6 +8,8 @@
 // @match        https://www.torn.com/loader.php?sid=racing*
 // @license      MIT
 // @grant        none
+// @downloadURL https://update.greasyfork.org/scripts/580869/Nuclear%20Blast%20%E2%80%94%20Racing%20Skills%20-32.user.js
+// @updateURL https://update.greasyfork.org/scripts/580869/Nuclear%20Blast%20%E2%80%94%20Racing%20Skills%20-32.meta.js
 // ==/UserScript==
 
 (function () {
@@ -29,9 +31,10 @@
   const SCRIPT_VERSION = '3.2';
 
   // ── DYNAMIC EXCEL-STYLE FIXED HEADER CSS ─────────────────────────────────
+  const styleTarget = document.head || document.documentElement;
   const style = document.createElement('style');
   style.id = 'nb-dynamic-styles';
-  document.head.appendChild(style);
+  styleTarget.appendChild(style);
 
   function updateStyles() {
     const thBg = isDarkMode ? '#1e293b' : '#ffffff';
@@ -195,6 +198,18 @@
       inp.type = inp.type === 'password' ? 'text' : 'password';
     });
 
+    // Fix Bug 4: Clear button event listener was missing
+    const clearBtn = document.getElementById('nb-key-clear');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        API_KEY = '';
+        localStorage.removeItem(STORAGE_KEY);
+        document.getElementById('nb-key-input').value = '';
+        document.getElementById('nb-key-input').placeholder = 'Paste your API key here…';
+        clearBtn.remove();
+      });
+    }
+
     document.getElementById('nb-key-save').addEventListener('click', () => {
       const inp = document.getElementById('nb-key-input');
       const val = inp.value.trim();
@@ -211,11 +226,16 @@
     });
   }
 
+  // ── UPDATED RANK LABELS ───────────────────────────────────────────────────
   function rankLabel(s) {
-    if (s >= 75) return { label: 'Elite',        bg: '#dbeafe', color: '#1e40af' };
-    if (s >= 50) return { label: 'Advanced',     bg: '#dcfce7', color: '#166534' };
-    if (s >= 25) return { label: 'Intermediate', bg: '#fef9c3', color: '#854d0e' };
-    return              { label: 'Beginner',      bg: (isDarkMode ? '#374151' : '#f3f4f6'), color: (isDarkMode ? '#e5e7eb' : '#374151') };
+    if (s >= 100)      return { label: 'Champion',       bg: '#ffd700', color: '#78350f' };
+    if (s >= 90)       return { label: 'Getaway-Driver', bg: '#fce7f3', color: '#9d174d' };
+    if (s >= 75)       return { label: 'Wannabe-Champ',  bg: '#ede9fe', color: '#5b21b6' };
+    if (s >= 50)       return { label: 'Advanced',       bg: '#dbeafe', color: '#1e40af' };
+    if (s >= 25)       return { label: 'Intermediate',   bg: '#dcfce7', color: '#166534' };
+    if (s >= 15)       return { label: 'Beginner',       bg: '#fef9c3', color: '#854d0e' };
+    if (s >= 5)        return { label: 'Uber-Driver',    bg: '#ffedd5', color: '#9a3412' };
+    return               { label: 'Pedestrian',         bg: (isDarkMode ? '#374151' : '#f3f4f6'), color: (isDarkMode ? '#e5e7eb' : '#374151') };
   }
 
   function statCard(label, value) {
@@ -244,21 +264,12 @@
       const skill = m.racing_skill ?? 0;
       const rk = rankLabel(skill);
       const ratioStr = (m.racing_ratio ?? 0).toFixed(1) + '%';
-      
       const cleanName = m.name.split('"').join('""');
       const cleanPos = (m.position ?? '—').split('"').join('""');
-
       const row = [
-        index + 1,
-        m.id,
-        '"' + cleanName + '"',
-        '"' + cleanPos + '"',
-        rk.label,
-        skill.toFixed(2),
-        m.racing_wins ?? 0,
-        m.races_entered ?? 0,
-        ratioStr,
-        m.racing_points ?? 0
+        index + 1, m.id, '"' + cleanName + '"', '"' + cleanPos + '"',
+        rk.label, skill.toFixed(2), m.racing_wins ?? 0,
+        m.races_entered ?? 0, ratioStr, m.racing_points ?? 0
       ];
       csvContent += row.join(',') + '\n';
     });
@@ -315,7 +326,6 @@
 
     const body = document.getElementById('nb-body');
     if (!body) return;
-    
     body.innerHTML = '<table id="nb-racing-table"><thead><tr><th>#</th><th>Member</th><th>Pos</th><th>Rank</th><th>Skill</th><th>Wins</th><th>Runs</th><th>Ratio</th><th>Pts</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
@@ -325,7 +335,6 @@
     const withSkill = skills.filter(s => s > 0);
     const avg = withSkill.length ? (withSkill.reduce((a, b) => a + b, 0) / withSkill.length).toFixed(2) : 0;
     const top = Math.max(...skills).toFixed(2);
-
     const statsEl = document.getElementById('nb-stats');
     if (statsEl) {
       statsEl.innerHTML = statCard('Total', members.length) + statCard('Top', top) + statCard('Avg', avg) + statCard('Active', withSkill.length);
@@ -337,22 +346,22 @@
   // ── FORUM COMPLIANT EXPONENTIAL BACKOFF FETCH QUEUE ──────────────────────
   async function fetchWithRetry(url, retries = 3, initialBackoff = 2000) {
     let currentDelay = initialBackoff;
+    // Fix Bug 2: safe comment append
+    const trackedUrl = url + (url.includes('?') ? '&' : '?') + 'comment=NB_Racing_v3.2';
     for (let i = 0; i < retries; i++) {
       try {
-        const trackedUrl = url + '&comment=NB_Racing_v3.2';
         const res = await fetch(trackedUrl);
         const d   = await res.json();
-        
         if (d.error && (d.error.code === 5 || d.error.code === 8)) {
           const prog = document.getElementById('nb-progress');
           if (prog) prog.textContent = `Rate limited! Cooling down for ${currentDelay / 1000}s...`;
           await delay(currentDelay);
-          currentDelay *= 2; 
+          currentDelay *= 2;
           continue;
         }
         return d;
-      } catch(e) { 
-        await delay(1000); 
+      } catch(e) {
+        await delay(1000);
       }
     }
     return null;
@@ -364,17 +373,17 @@
     const cachedData = localStorage.getItem(CACHE_KEY);
     const cacheStatusEl = document.getElementById('nb-cache-status');
 
-    if (!forceSync && cachedTime && cachedData && (Date.now() - cachedTime < CACHE_DURATION)) {
+    // Fix Bug 1: cast cachedTime to Number
+    if (!forceSync && cachedTime && cachedData && (Date.now() - Number(cachedTime) < CACHE_DURATION)) {
       members = JSON.parse(cachedData);
       const countEl = document.getElementById('nb-count');
       if (countEl) countEl.textContent = members.length + ' members';
-      
       if (cacheStatusEl) {
         cacheStatusEl.style.color = '#16a34a';
         cacheStatusEl.textContent = '⚡ Cached (Instant)';
       }
-      
       const skills = members.map(m => m.racing_skill ?? 0);
+      // Fix Bug 5: consistent maxSkill fallback
       maxSkill = Math.max(...skills, 1);
       updateStatsUI();
       render();
@@ -413,11 +422,10 @@
       const m = members[i];
       const d = await fetchWithRetry('https://api.torn.com/user/' + m.id + '?selections=personalstats&key=' + API_KEY);
       if (d && d.personalstats) {
-        m.racing_skill  = Number(d.personalstats.racingskill)          || 0;
-        m.racing_wins   = Number(d.personalstats.raceswon)           || 0;
-        m.racing_points = Number(d.personalstats.racingpointsearned)|| 0;
-        m.races_entered = Number(d.personalstats.racesentered)      || 0;
-        
+        m.racing_skill  = Number(d.personalstats.racingskill)         || 0;
+        m.racing_wins   = Number(d.personalstats.raceswon)            || 0;
+        m.racing_points = Number(d.personalstats.racingpointsearned)  || 0;
+        m.races_entered = Number(d.personalstats.racesentered)        || 0;
         m.racing_ratio  = m.races_entered > 0 ? (m.racing_wins / m.races_entered) * 100 : 0;
       }
       done++;
@@ -428,11 +436,12 @@
     if (prog) prog.style.display = 'none';
 
     const skills = members.map(m => m.racing_skill ?? 0);
+    // Fix Bug 5: consistent maxSkill fallback
     maxSkill = Math.max(...skills, 1);
-    
+
     localStorage.setItem(CACHE_KEY, JSON.stringify(members));
     localStorage.setItem(TIME_KEY, Date.now().toString());
-    
+
     const cacheStatusEl = document.getElementById('nb-cache-status');
     if (cacheStatusEl) {
       cacheStatusEl.style.color = '#16a34a';
