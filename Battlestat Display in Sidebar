@@ -1,0 +1,95 @@
+// ==UserScript==
+// @name         HOF Battle Stat Rank
+// @namespace    torn.com
+// @version      1.9
+// @description  Shows your battle stat rank inside the HOF nav button, styled like the Jail counter
+// @author       You
+// @match        https://www.torn.com/*
+// @license      MIT
+// @grant        GM_getValue
+// @grant        GM_setValue
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const CACHE_KEY = 'hof_battlescore_rank';
+    const CACHE_TTL = 60 * 60 * 1000;
+
+    function scrapeAndCache() {
+        if (!location.href.includes('sid=hof')) return;
+
+        let attempts = 0;
+        const iv = setInterval(() => {
+            attempts++;
+
+            // Use contains selector instead of starts-with
+            const boxes = document.querySelectorAll('[class*="infoBox"]');
+            console.log('[HOF Rank] infoBox elements found:', boxes.length);
+
+            for (const box of boxes) {
+                const text = box.textContent;
+                if (!text.toLowerCase().includes('battle stats')) continue;
+                console.log('[HOF Rank] Found battle stats box:', text.slice(0, 50));
+                const match = text.match(/#(\d[\d,]*)/);
+                if (match) {
+                    const rank = parseInt(match[1].replace(/,/g, ''), 10);
+                    GM_setValue(CACHE_KEY, JSON.stringify({ rank, ts: Date.now() }));
+                    console.log('[HOF Rank] Cached rank:', rank);
+                    clearInterval(iv);
+                    injectBadge(rank);
+                    return;
+                }
+            }
+
+            if (attempts > 60) {
+                clearInterval(iv);
+                console.warn('[HOF Rank] Gave up after 60 attempts');
+            }
+        }, 300);
+    }
+
+    function injectBadge(rank) {
+        let attempts = 0;
+        const iv = setInterval(() => {
+            attempts++;
+            const link = document.querySelector('#nav-hall_of_fame a');
+            if (link) {
+                clearInterval(iv);
+                if (link.querySelector('.hof-rank-badge')) return;
+                const badge = document.createElement('span');
+                badge.className = 'amount___p8QZX hof-rank-badge';
+                badge.style.color = '#ff9a00';
+                badge.style.marginLeft = '5px';
+                badge.textContent = `#${rank.toLocaleString()}`;
+                link.appendChild(badge);
+                console.log('[HOF Rank] Badge injected:', badge.textContent);
+            }
+            if (attempts > 50) clearInterval(iv);
+        }, 300);
+    }
+
+    function loadCached() {
+        const cached = JSON.parse(GM_getValue(CACHE_KEY, 'null'));
+        if (cached && Date.now() - cached.ts < CACHE_TTL) {
+            console.log('[HOF Rank] Loading cached rank:', cached.rank);
+            injectBadge(cached.rank);
+        } else {
+            console.log('[HOF Rank] No cache — visit HOF page to populate');
+        }
+    }
+
+    let lastUrl = location.href;
+    new MutationObserver(() => {
+        if (location.href !== lastUrl) {
+            lastUrl = location.href;
+            document.querySelector('.hof-rank-badge')?.remove();
+            loadCached();
+            scrapeAndCache();
+        }
+    }).observe(document.body, { childList: true, subtree: true });
+
+    console.log('[HOF Rank] Script started v1.9');
+    loadCached();
+    scrapeAndCache();
+})();
