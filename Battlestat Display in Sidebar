@@ -1,12 +1,13 @@
 // ==UserScript==
-// @name         HOF Battle Stat Rank 2.1
+// @name         HOF Battle Stat Rank
 // @namespace    torn.com
-// @version      2.1
+// @version      2.2
 // @description  Shows your battle stat rank inside the HOF nav button, styled like the Jail counter
-// @author       You
+// @author       cowboyup
 // @match        https://www.torn.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @run-at       document-idle
 // CHANGELOG
 // v1.0 - Initial release. Fetched battle stat rank via Torn API v1 (personalstats).
@@ -21,20 +22,34 @@
 // v1.9 - Fixed nav ID from #nav-hof to #nav-hall_of_fame (confirmed via console).
 // v2.0 - Added hidden iframe auto-scrape on cache expiry. No longer requires
 //        manually visiting the HOF page. Fully automatic rank refresh every hour.
-// v2.1 - Fixed unsafe JSON.parse on cache
+// v2.1 - Fixed unsafe JSON.parse on cache.
+// v2.2 - Fixed GM_setValue(null) not clearing cache; now uses GM_deleteValue.
+//        Added @grant GM_deleteValue to metadata.
+//        Removed duplicate scrapeCurrentPage() call on HOF SPA navigation.
+//        Badge removal on nav change now clears all instances via querySelectorAll.
+//        injectBadge now cancels any previous in-flight interval before starting a new one.
+//        Dropped hashed Torn class (amount___p8QZX) from badge className — will break on redeploy.
+//        Added isScraping guard to prevent iframe spam on repeated cache misses.
+//        Extracted shared extractRankFromDOM() helper used by both iframe and page scrapers.
+//        Failed scrape now writes a 55-minute cooldown timestamp to avoid re-triggering every click.
+//        Reduced iframe max attempts from 80 to 45 (~15s timeout).
 // ==/UserScript==
-
+ 
 (function () {
     'use strict';
-
+ 
     const CACHE_KEY = 'hof_battlescore_rank';
-    const CACHE_TTL = 60 * 60 * 1000; // 1 hour
-
+    const CACHE_TTL = 60 * 60 * 1000;       // 1 hour
+    const SCRAPE_COOLDOWN = 55 * 60 * 1000; // 55 min cooldown after failed scrape
+ 
+    let isScraping = false;
+    let injectBadgeIntervalId = null;
+ 
     // ── Safe cache getter ─────────────────────────────────────────────────────
     function getCachedRank() {
         const raw = GM_getValue(CACHE_KEY);
         if (!raw) return null;
-
+ 
         try {
             const cached = JSON.parse(raw);
             if (cached && typeof cached.rank === 'number' &&
@@ -43,113 +58,129 @@
             }
         } catch (e) {
             console.warn('[HOF Rank] Cache corrupted, clearing it');
-            GM_setValue(CACHE_KEY, null);
+            GM_deleteValue(CACHE_KEY);
         }
         return null;
     }
-
+ 
     function saveRank(rank) {
         GM_setValue(CACHE_KEY, JSON.stringify({ rank, ts: Date.now() }));
+        isScraping = false;
     }
-
+ 
+    // ── Shared DOM rank extractor ─────────────────────────────────────────────
+    function extractRankFromDOM(root) {
+        const boxes = root.querySelectorAll('[class*="infoBox"]');
+        for (const box of boxes) {
+            if (!box.textContent.toLowerCase().includes('battle stats')) continue;
+            const match = box.textContent.match(/#(\d[\d,]*)/);
+            if (match) {
+                return parseInt(match[1].replace(/,/g, ''), 10);
+            }
+        }
+        return null;
+    }
+ 
     // ── Scrape rank from a hidden iframe ──────────────────────────────────────
     function scrapeViaIframe() {
+        if (isScraping) return;
+        isScraping = true;
+ 
         console.log('[HOF Rank] Loading HOF page in hidden iframe...');
-
-        // Remove any existing iframe
+ 
         document.querySelector('#hof-rank-iframe')?.remove();
-
+ 
         const iframe = document.createElement('iframe');
         iframe.id = 'hof-rank-iframe';
         iframe.src = 'https://www.torn.com/page.php?sid=hof';
         iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
         document.body.appendChild(iframe);
-
+ 
         let attempts = 0;
-        const maxAttempts = 80; // slightly reduced + better timing
-
+        const maxAttempts = 45; // ~15 seconds at 350ms
+ 
         const iv = setInterval(() => {
             attempts++;
             try {
                 const doc = iframe.contentDocument || iframe.contentWindow?.document;
                 if (!doc || doc.readyState !== 'complete') return;
-
-                const boxes = doc.querySelectorAll('[class*="infoBox"]');
-                for (const box of boxes) {
-                    const text = box.textContent.toLowerCase();
-                    if (!text.includes('battle stats')) continue;
-
-                    const match = box.textContent.match(/#(\d[\d,]*)/);
-                    if (match) {
-                        const rank = parseInt(match[1].replace(/,/g, ''), 10);
-                        saveRank(rank);
-                        console.log('[HOF Rank] Auto-scraped rank via iframe:', rank);
-                        clearInterval(iv);
-                        iframe.remove();
-                        injectBadge(rank);
-                        return;
-                    }
+ 
+                const rank = extractRankFromDOM(doc);
+                if (rank !== null) {
+                    saveRank(rank);
+                    console.log('[HOF Rank] Auto-scraped rank via iframe:', rank);
+                    clearInterval(iv);
+                    iframe.remove();
+                    injectBadge(rank);
+                    return;
                 }
             } catch (e) {
                 // Ignore cross-origin or rendering issues during load
             }
-
+ 
             if (attempts > maxAttempts) {
                 clearInterval(iv);
                 iframe.remove();
-                console.warn('[HOF Rank] iframe scrape timed out');
+                isScraping = false;
+                // Write a 55-min cooldown so a failed scrape doesn't re-trigger on every click
+                GM_setValue(CACHE_KEY, JSON.stringify({ rank: null, ts: Date.now() - (CACHE_TTL - SCRAPE_COOLDOWN) }));
+                console.warn('[HOF Rank] iframe scrape timed out — cooldown active for ~5 min');
             }
         }, 350);
     }
-
+ 
     // ── Scrape from current page if already on HOF ────────────────────────────
     function scrapeCurrentPage() {
         if (!location.href.includes('sid=hof')) return;
-
+ 
         let attempts = 0;
         const iv = setInterval(() => {
             attempts++;
-            const boxes = document.querySelectorAll('[class*="infoBox"]');
-            for (const box of boxes) {
-                const text = box.textContent.toLowerCase();
-                if (!text.includes('battle stats')) continue;
-
-                const match = box.textContent.match(/#(\d[\d,]*)/);
-                if (match) {
-                    const rank = parseInt(match[1].replace(/,/g, ''), 10);
-                    saveRank(rank);
-                    console.log('[HOF Rank] Scraped rank from current page:', rank);
-                    clearInterval(iv);
-                    injectBadge(rank);
-                    return;
-                }
+            const rank = extractRankFromDOM(document);
+            if (rank !== null) {
+                saveRank(rank);
+                console.log('[HOF Rank] Scraped rank from current page:', rank);
+                clearInterval(iv);
+                injectBadge(rank);
+                return;
             }
             if (attempts > 50) clearInterval(iv);
         }, 350);
     }
-
+ 
     // ── Inject badge into nav ─────────────────────────────────────────────────
     function injectBadge(rank) {
+        // Cancel any previous in-flight injection attempt
+        if (injectBadgeIntervalId !== null) {
+            clearInterval(injectBadgeIntervalId);
+            injectBadgeIntervalId = null;
+        }
+ 
         let attempts = 0;
-        const iv = setInterval(() => {
+        injectBadgeIntervalId = setInterval(() => {
             attempts++;
-            const link = document.querySelector('#nav-hall_of_fame a, #nav-hof a'); // more resilient
+            const link = document.querySelector('#nav-hall_of_fame a, #nav-hof a');
             if (link) {
-                clearInterval(iv);
+                clearInterval(injectBadgeIntervalId);
+                injectBadgeIntervalId = null;
+ 
                 // Prevent duplicate badges
                 if (link.querySelector('.hof-rank-badge')) return;
-
+ 
                 const badge = document.createElement('span');
-                badge.className = 'amount___p8QZX hof-rank-badge';
+                badge.className = 'hof-rank-badge';
                 badge.style.cssText = 'color: #ff9a00; margin-left: 5px; font-weight: bold;';
                 badge.textContent = `#${rank.toLocaleString()}`;
                 link.appendChild(badge);
                 console.log('[HOF Rank] Badge injected:', badge.textContent);
             }
-            if (attempts > 40) clearInterval(iv);
+            if (attempts > 40) {
+                clearInterval(injectBadgeIntervalId);
+                injectBadgeIntervalId = null;
+            }
         }, 300);
     }
-
+ 
     // ── Load cache or trigger auto-scrape ─────────────────────────────────────
     function init() {
         const cachedRank = getCachedRank();
@@ -165,25 +196,25 @@
             }
         }
     }
-
+ 
     // ── Debounced SPA navigation handler ──────────────────────────────────────
     let lastUrl = location.href;
     const observer = new MutationObserver(() => {
         if (location.href !== lastUrl) {
             lastUrl = location.href;
-            document.querySelector('.hof-rank-badge')?.remove();
+ 
+            // Remove all badge instances (not just first)
+            document.querySelectorAll('.hof-rank-badge').forEach(el => el.remove());
+ 
+            // init() handles scrapeCurrentPage() internally when on HOF —
+            // no need for a second setTimeout call here
             init();
-
-            // Only scrape current page if we landed on HOF
-            if (location.href.includes('sid=hof')) {
-                setTimeout(scrapeCurrentPage, 800);
-            }
         }
     });
-
+ 
     observer.observe(document.body, { childList: true, subtree: true });
-
+ 
     // ── Boot ──────────────────────────────────────────────────────────────────
-    console.log('[HOF Rank] Script started v2.1');
+    console.log('[HOF Rank] Script started v2.2');
     init();
 })();
