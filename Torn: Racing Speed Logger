@@ -29,7 +29,7 @@
 //           strictly gates init and teardown via tornAjax and #racingupdatesnew.
 // v1.2.0 - Fix track name parsing: use parts.pop() so hyphens in track names
 //           don't corrupt the lap count or currentTrack string.
-// v1.1.0 - Removed external @require dependency (lugburz_lib); inlined tornAjax().
+// v1.1.0 - Removed clutter); inlined tornAjax().
 // v1.0.0 - Initial release: real-time speed, session top, lifetime records per
 //           track, expandable log table, CSV export, clear-all.
 
