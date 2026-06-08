@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn: Racing Speed Logger test
+// @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.7
+// @version      1.5.8
 // @description  Real-time speed display + lifetime top speed log per track with CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -10,35 +10,19 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @grant        unsafeWindow
+// @downloadURL https://update.greasyfork.org/scripts/581655/Torn%3A%20Racing%20Speed%20Logger.user.js
+// @updateURL https://update.greasyfork.org/scripts/581655/Torn%3A%20Racing%20Speed%20Logger.meta.js
 // ==/UserScript==
 //
 // Changelog:
-// v1.5.7 - Fix GreasyFork compilation error: Flattened multiline string templates 
-//          to resolve unexpected token/end-of-input parser issues.
+// v1.5.8 - Fix DOM parsing: Reverted layout strings to safely joined arrays to 
+//          ensure flawless DOM injection while maintaining GreasyFork validation.
+// v1.5.7 - Attempted GreasyFork lint bypass via string compression.
 // v1.5.6 - Fix over-aggressive SPA teardown: tornAjax else-branch was firing on 
 //          every unrelated background XHR (chats, notifications), killing the 
 //          intervals. Removed destructive fallback; script now handles lifecycle 
 //          gracefully inside the observer. Added unsafeWindow macro to explicitly 
 //          bind Torn's global jQuery instances.
-// v1.5.5 - Fix init timing: .ready() fired before Torn's React had rendered
-//           #racingdetails. Now uses MutationObserver to watch for the element
-//           appearing asynchronously, so startSpeedLoop() reliably fires.
-// v1.5.4 - Fix race title selector: was matching "Current car" heading instead
-//           of the actual race title. Now targets div.title-black.t-overflow
-//           which is the element containing "Speedway - 1 lap - Race started".
-// v1.5.3 - Fix speed never recording: guard against NaN from m-hide completion
-//           element (read textContent directly, ignore CSS visibility); skip
-//           speed <= 0 so a zero-read on first tick never writes a 0.00 record.
-// v1.5.2 - Improve table readability: lighter cell text (#ddd), bolder/brighter
-//           headers (#999 + bold), larger font (11px) and more padding in both
-//           the lobby panel and in-race widget tables.
-// v1.5.1 - Restyle "Download CSV" and "Clear all" as proper buttons with
-//           visible borders, padding and hover states in both the lobby
-//           panel and the in-race widget.
-// v1.5.0 - Add lobby panel: "▼ Top Speeds Log" button injected into
-//           #racingAdditionalContainer so the log and CSV download are
-//           accessible in the racing lobby without being in an active race.
-//           Fixed missing CSS for lobby footer buttons.
 
 'use strict';
 
@@ -49,7 +33,7 @@ const $ = unsafeWindow.$;
 function tornAjax(callback) {
     $(document).ajaxComplete((event, xhr, settings) => {
         if (xhr.readyState > 3 && xhr.status === 200) {
-            if (settings.url.includes('sid=racing')) {
+            if (settings.url && settings.url.includes('sid=racing')) {
                 callback();
             }
         }
@@ -100,49 +84,66 @@ function updateRecord(trackName, speed) {
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────────
-GM_addStyle(`
-    #rslogWrapper { font-family: 'Courier New', Courier, monospace; font-size: 11px; padding: 6px 10px; margin: 4px 0; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; }
-    #rslogSpeedRow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-    #rslogSpeed { font-size: 22px; font-weight: bold; color: #fff200; letter-spacing: 1px; min-width: 100px; display: inline-block; }
-    #rslogSessionTop { color: #aaa; font-size: 10px; }
-    #rslogSessionTopVal { color: #ff9900; font-weight: bold; }
-    #rslogNewRecord { display: none; color: #00ff88; font-weight: bold; font-size: 10px; animation: rslogPulse 0.6s ease-in-out 3; }
-    @keyframes rslogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
-    #rslogToggle { cursor: pointer; color: #888; font-size: 10px; text-decoration: underline; margin-left: auto; user-select: none; }
-    #rslogToggle:hover { color: #fff200; }
-    #rslogPanel { display: none; margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }
-    #rslogPanel table { width: 100%; border-collapse: collapse; font-size: 11px; }
-    #rslogPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
-    #rslogPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; }
-    #rslogPanel tr.rslogCurrentTrack td { color: #fff200; }
-    #rslogPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; }
-    #rslogCsvBtn { display: inline-block; margin-top: 8px; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: 'Courier New', Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; }
-    #rslogCsvBtn:hover { background: #3a3a00; color: #fff200; }
-    #rslogClearBtn { display: inline-block; margin-top: 8px; margin-left: 6px; padding: 5px 12px; background: #1a0000; border: 1px solid #882222; border-radius: 4px; color: #cc4444; font-family: 'Courier New', Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; transition: background 0.15s; }
-    #rslogClearBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }
-    #rslogLobbyBtn { display: inline-block; margin: 6px 10px 0; padding: 3px 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff200; font-family: 'Courier New', Courier, monospace; font-size: 10px; cursor: pointer; user-select: none; }
-    #rslogLobbyBtn:hover { border-color: #fff200; }
-    #rslogLobbyPanel { display: none; font-family: 'Courier New', Courier, monospace; font-size: 11px; margin: 4px 10px 8px; padding: 6px 10px; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; }
-    #rslogLobbyPanel table { width: 100%; border-collapse: collapse; font-size: 11px; }
-    #rslogLobbyPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
-    #rslogLobbyPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; }
-    #rslogLobbyPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; }
-    #rslogLobbyFooter { margin-top: 7px; display: flex; gap: 8px; align-items: center; }
-    #rslogLobbyCsvBtn { display: inline-block; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: 'Courier New', Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; }
-    #rslogLobbyCsvBtn:hover { background: #3a3a00; color: #fff200; }
-    #rslogLobbyClearBtn { display: inline-block; padding: 5px 12px; background: #1a0000; border: 1px solid #882222; border-radius: 4px; color: #cc4444; font-family: 'Courier New', Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; transition: background 0.15s; }
-    #rslogLobbyClearBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }
-`);
+GM_addStyle([
+    '#rslogWrapper { font-family: "Courier New", Courier, monospace; font-size: 11px; padding: 6px 10px; margin: 4px 0; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; }',
+    '#rslogSpeedRow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }',
+    '#rslogSpeed { font-size: 22px; font-weight: bold; color: #fff200; letter-spacing: 1px; min-width: 100px; display: inline-block; }',
+    '#rslogSessionTop { color: #aaa; font-size: 10px; }',
+    '#rslogSessionTopVal { color: #ff9900; font-weight: bold; }',
+    '#rslogNewRecord { display: none; color: #00ff88; font-weight: bold; font-size: 10px; animation: rslogPulse 0.6s ease-in-out 3; }',
+    '@keyframes rslogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }',
+    '#rslogToggle { cursor: pointer; color: #888; font-size: 10px; text-decoration: underline; margin-left: auto; user-select: none; }',
+    '#rslogToggle:hover { color: #fff200; }',
+    '#rslogPanel { display: none; margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }',
+    '#rslogPanel table { width: 100%; border-collapse: collapse; font-size: 11px; }',
+    '#rslogPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }',
+    '#rslogPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; }',
+    '#rslogPanel tr.rslogCurrentTrack td { color: #fff200; }',
+    '#rslogPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; }',
+    '#rslogCsvBtn { display: inline-block; margin-top: 8px; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; }',
+    '#rslogCsvBtn:hover { background: #3a3a00; color: #fff200; }',
+    '#rslogClearBtn { display: inline-block; margin-top: 8px; margin-left: 6px; padding: 5px 12px; background: #1a0000; border: 1px solid #882222; border-radius: 4px; color: #cc4444; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; transition: background 0.15s; }',
+    '#rslogClearBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }',
+    '#rslogLobbyBtn { display: inline-block; margin: 6px 10px 0; padding: 3px 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; cursor: pointer; user-select: none; }',
+    '#rslogLobbyBtn:hover { border-color: #fff200; }',
+    '#rslogLobbyPanel { display: none; font-family: "Courier New", Courier, monospace; font-size: 11px; margin: 4px 10px 8px; padding: 6px 10px; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; }',
+    '#rslogLobbyPanel table { width: 100%; border-collapse: collapse; font-size: 11px; }',
+    '#rslogLobbyPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }',
+    '#rslogLobbyPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; }',
+    '#rslogLobbyPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; }',
+    '#rslogLobbyFooter { margin-top: 7px; display: flex; gap: 8px; align-items: center; }',
+    '#rslogLobbyCsvBtn { display: inline-block; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; }',
+    '#rslogLobbyCsvBtn:hover { background: #3a3a00; color: #fff200; }',
+    '#rslogLobbyClearBtn { display: inline-block; padding: 5px 12px; background: #1a0000; border: 1px solid #882222; border-radius: 4px; color: #cc4444; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; transition: background 0.15s; }',
+    '#rslogLobbyClearBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }'
+].join('\n'));
 
 // ─── UI ────────────────────────────────────────────────────────────────────────
 function injectWidget() {
     if ($('#rslogWrapper').length > 0) return;
 
-    const html = '<div id="rslogWrapper"><div id="rslogSpeedRow"><span id="rslogSpeed">–.– mph</span><span id="rslogSessionTop">Session top: <span id="rslogSessionTopVal">0.00</span> mph</span><span id="rslogNewRecord">★ NEW RECORD</span><span id="rslogToggle">▼ Top speeds</span></div><div id="rslogPanel"><table id="rslogTable"><thead><tr><th>Track</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogTableBody"></tbody></table><a id="rslogCsvBtn" href="#">⬇ Download CSV</a><span id="rslogClearBtn">✕ Clear all</span></div></div>';
+    const html = [
+        '<div id="rslogWrapper">',
+        '    <div id="rslogSpeedRow">',
+        '        <span id="rslogSpeed">–.– mph</span>',
+        '        <span id="rslogSessionTop">Session top: <span id="rslogSessionTopVal">0.00</span> mph</span>',
+        '        <span id="rslogNewRecord">★ NEW RECORD</span>',
+        '        <span id="rslogToggle">▼ Top speeds</span>',
+        '    </div>',
+        '    <div id="rslogPanel">',
+        '        <table id="rslogTable">',
+        '            <thead><tr><th>Track</th><th>Top Speed</th><th>Date</th></tr></thead>',
+        '            <tbody id="rslogTableBody"></tbody>',
+        '        </table>',
+        '        <a id="rslogCsvBtn" href="#">⬇ Download CSV</a>',
+        '        <span id="rslogClearBtn">✕ Clear all</span>',
+        '    </div>',
+        '</div>'
+    ].join('\n');
 
     if ($('#racingdetails').length > 0) {
         $('#racingdetails').after(html);
-    } else {
+    } else if ($('#racingupdatesnew').length > 0) {
         $('#racingupdatesnew').prepend(html);
     }
 
@@ -188,13 +189,13 @@ function renderLogTable() {
 
     for (const [track, data] of entries) {
         const isCurrent = (track === currentTrack);
-        tbody.append(`
-            <tr class="${isCurrent ? 'rslogCurrentTrack' : ''}">
-                <td>${escapeHtml(track)}</td>
-                <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
-                <td>${data.date}</td>
-            </tr>
-        `);
+        tbody.append(
+            '<tr class="' + (isCurrent ? 'rslogCurrentTrack' : '') + '">' +
+            '    <td>' + escapeHtml(track) + '</td>' +
+            '    <td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
+            '    <td>' + data.date + '</td>' +
+            '</tr>'
+        );
     }
 }
 
@@ -202,7 +203,7 @@ function downloadCsv() {
     const log = getSpeedLog();
     let csv   = 'Track,Top Speed (mph),Date\n';
     for (const [track, data] of Object.entries(log)) {
-        csv += `"${track.replace(/"/g, '""')}",${data.topSpeed.toFixed(2)},${data.date}\n`;
+        csv += '"' + track.replace(/"/g, '""') + '",' + data.topSpeed.toFixed(2) + ',' + data.date + '\n';
     }
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url  = URL.createObjectURL(blob);
@@ -268,14 +269,25 @@ function injectLobbyPanel() {
     if ($('#rslogLobbyBtn').length > 0) return;
 
     const btn = '<button id="rslogLobbyBtn">▼ Top Speeds Log</button>';
-    const panel = '<div id="rslogLobbyPanel"><table><thead><tr><th>Track</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogLobbyTableBody"></tbody></table><div id="rslogLobbyFooter"><a id="rslogLobbyCsvBtn" href="#">⬇ Download CSV</a><span id="rslogLobbyClearBtn">✕ Clear all</span></div></div>';
+    const panel = [
+        '<div id="rslogLobbyPanel">',
+        '    <table>',
+        '        <thead><tr><th>Track</th><th>Top Speed</th><th>Date</th></tr></thead>',
+        '        <tbody id="rslogLobbyTableBody"></tbody>',
+        '    </table>',
+        '    <div id="rslogLobbyFooter">',
+        '        <a id="rslogLobbyCsvBtn" href="#">⬇ Download CSV</a>',
+        '        <span id="rslogLobbyClearBtn">✕ Clear all</span>',
+        '    </div>',
+        '</div>'
+    ].join('\n');
 
     $('#racingAdditionalContainer').prepend(panel).prepend(btn);
 
     $('#rslogLobbyBtn').on('click', function () {
-        const panel = $('#rslogLobbyPanel');
-        const wasOpen = panel.is(':visible');
-        panel.toggle();
+        const panelEl = $('#rslogLobbyPanel');
+        const wasOpen = panelEl.is(':visible');
+        panelEl.toggle();
         $(this).text(wasOpen ? '▼ Top Speeds Log' : '▲ Top Speeds Log');
         if (!wasOpen) renderLobbyTable();
     });
@@ -293,8 +305,6 @@ function injectLobbyPanel() {
     });
 }
 
-// ─── Render functions ──────────────────────────────────────────────────────────
-// Custom logic formatting for user speed tracking metrics table
 function renderLobbyTable() {
     const log     = getSpeedLog();
     const tbody   = $('#rslogLobbyTableBody');
@@ -308,13 +318,13 @@ function renderLobbyTable() {
     }
 
     for (const [track, data] of entries) {
-        tbody.append(`
-            <tr>
-                <td>${escapeHtml(track)}</td>
-                <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
-                <td>${data.date}</td>
-            </tr>
-        `);
+        tbody.append(
+            '<tr>' +
+            '    <td>' + escapeHtml(track) + '</td>' +
+            '    <td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
+            '    <td>' + data.date + '</td>' +
+            '</tr>'
+        );
     }
 }
 
@@ -357,5 +367,5 @@ tornAjax(() => {
     init();
 });
 
-// Run execution frame components safely on deployment lifecycle load phase loop
+// Run initial execution
 init();
