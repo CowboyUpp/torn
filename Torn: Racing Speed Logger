@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
-// @namespace    cowboyup.racing_speed_log
+// @namespace    https://greasyfork.org/users/cowboyup
 // @version      1.4.0
 // @description  Real-time speed display + lifetime top speed log per track with CSV export. No external dependencies.
 // @author       cowboyup
-// @license      MIT
+// @license      MIT; https://opensource.org/licenses/MIT
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -19,7 +19,7 @@
 //           strictly gates init and teardown via tornAjax and #racingupdatesnew.
 // v1.2.0 - Fix track name parsing: use parts.pop() so hyphens in track names
 //           don't corrupt the lap count or currentTrack string.
-// v1.1.0 - Removed clutter; inlined tornAjax().
+// v1.1.0 - Removed external @require dependency (lugburz_lib); inlined tornAjax().
 // v1.0.0 - Initial release: real-time speed, session top, lifetime records per
 //           track, expandable log table, CSV export, clear-all.
 
