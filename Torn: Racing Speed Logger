@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.4.0
+// @version      1.5.2
 // @description  Real-time speed display + lifetime top speed log per track with CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -12,6 +12,16 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.5.2 - Improve table readability: lighter cell text (#ddd), bolder/brighter
+//           headers (#999 + bold), larger font (11px) and more padding in both
+//           the lobby panel and in-race widget tables.
+// v1.5.1 - Restyle "Download CSV" and "Clear all" as proper buttons with
+//           visible borders, padding and hover states in both the lobby
+//           panel and the in-race widget.
+// v1.5.0 - Add lobby panel: "▼ Top Speeds Log" button injected into
+//           #racingAdditionalContainer so the log and CSV download are
+//           accessible in the racing lobby without being in an active race.
+//           Fixed missing CSS for lobby footer buttons.
 // v1.4.0 - Fix tornAjax: page param was always "loader"/"page" (cut at .php),
 //           making the cleanup else-branch dead code. Now passes isRacingXhr
 //           bool (url.includes("sid=racing")) so cleanup fires correctly.
@@ -19,7 +29,7 @@
 //           strictly gates init and teardown via tornAjax and #racingupdatesnew.
 // v1.2.0 - Fix track name parsing: use parts.pop() so hyphens in track names
 //           don't corrupt the lap count or currentTrack string.
-// v1.1.0 - Removed clutter; inlined tornAjax().
+// v1.1.0 - Removed external @require dependency (lugburz_lib); inlined tornAjax().
 // v1.0.0 - Initial release: real-time speed, session top, lifetime records per
 //           track, expandable log table, CSV export, clear-all.
 
@@ -146,21 +156,21 @@ GM_addStyle(`
     #rslogPanel table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 10px;
+        font-size: 11px;
     }
     #rslogPanel th {
-        color: #666;
+        color: #999;
         text-align: left;
-        padding: 2px 6px;
-        border-bottom: 1px solid #2a2a2a;
-        font-weight: normal;
+        padding: 4px 8px;
+        border-bottom: 1px solid #333;
+        font-weight: bold;
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
     #rslogPanel td {
-        padding: 3px 6px;
-        color: #bbb;
-        border-bottom: 1px solid #1c1c1c;
+        padding: 4px 8px;
+        color: #ddd;
+        border-bottom: 1px solid #222;
     }
     #rslogPanel tr.rslogCurrentTrack td {
         color: #fff200;
@@ -171,33 +181,133 @@ GM_addStyle(`
     }
     #rslogCsvBtn {
         display: inline-block;
-        margin-top: 7px;
-        padding: 2px 8px;
-        background: #222;
-        border: 1px solid #444;
-        border-radius: 3px;
-        color: #aaa;
+        margin-top: 8px;
+        padding: 5px 12px;
+        background: #2a2a00;
+        border: 1px solid #fff200;
+        border-radius: 4px;
+        color: #fff200;
+        font-family: 'Courier New', Courier, monospace;
         font-size: 10px;
+        font-weight: bold;
         cursor: pointer;
         text-decoration: none;
+        transition: background 0.15s;
     }
     #rslogCsvBtn:hover {
-        border-color: #fff200;
+        background: #3a3a00;
         color: #fff200;
     }
     #rslogClearBtn {
         display: inline-block;
-        margin-top: 7px;
-        margin-left: 8px;
-        padding: 2px 8px;
+        margin-top: 8px;
+        margin-left: 6px;
+        padding: 5px 12px;
         background: #1a0000;
-        border: 1px solid #440000;
-        border-radius: 3px;
-        color: #886666;
+        border: 1px solid #882222;
+        border-radius: 4px;
+        color: #cc4444;
+        font-family: 'Courier New', Courier, monospace;
         font-size: 10px;
+        font-weight: bold;
         cursor: pointer;
+        transition: background 0.15s;
     }
     #rslogClearBtn:hover {
+        background: #2a0000;
+        border-color: #ff4444;
+        color: #ff4444;
+    }
+
+    /* ── Lobby panel ── */
+    #rslogLobbyBtn {
+        display: inline-block;
+        margin: 6px 10px 0;
+        padding: 3px 10px;
+        background: #1a1a1a;
+        border: 1px solid #444;
+        border-radius: 3px;
+        color: #fff200;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 10px;
+        cursor: pointer;
+        user-select: none;
+    }
+    #rslogLobbyBtn:hover { border-color: #fff200; }
+
+    #rslogLobbyPanel {
+        display: none;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 11px;
+        margin: 4px 10px 8px;
+        padding: 6px 10px;
+        background: linear-gradient(135deg, #111 0%, #1a1a1a 100%);
+        border: 1px solid #333;
+        border-radius: 4px;
+        color: #ccc;
+    }
+    #rslogLobbyPanel table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+    }
+    #rslogLobbyPanel th {
+        color: #999;
+        text-align: left;
+        padding: 4px 8px;
+        border-bottom: 1px solid #333;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    #rslogLobbyPanel td {
+        padding: 4px 8px;
+        color: #ddd;
+        border-bottom: 1px solid #222;
+    }
+    #rslogLobbyPanel td.rslogTopSpeed {
+        color: #ff9900;
+        font-weight: bold;
+    }
+    #rslogLobbyFooter {
+        margin-top: 7px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+    #rslogLobbyCsvBtn {
+        display: inline-block;
+        padding: 5px 12px;
+        background: #2a2a00;
+        border: 1px solid #fff200;
+        border-radius: 4px;
+        color: #fff200;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 10px;
+        font-weight: bold;
+        cursor: pointer;
+        text-decoration: none;
+        transition: background 0.15s;
+    }
+    #rslogLobbyCsvBtn:hover {
+        background: #3a3a00;
+        color: #fff200;
+    }
+    #rslogLobbyClearBtn {
+        display: inline-block;
+        padding: 5px 12px;
+        background: #1a0000;
+        border: 1px solid #882222;
+        border-radius: 4px;
+        color: #cc4444;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 10px;
+        font-weight: bold;
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+    #rslogLobbyClearBtn:hover {
+        background: #2a0000;
         border-color: #ff4444;
         color: #ff4444;
     }
@@ -345,6 +455,83 @@ function startSpeedLoop() {
     }, POLL_MS);
 }
 
+// ─── Lobby panel ───────────────────────────────────────────────────────────────
+function injectLobbyPanel() {
+    if ($('#rslogLobbyBtn').length > 0) return;
+
+    const btn = '<button id="rslogLobbyBtn">▼ Top Speeds Log</button>';
+    const panel = `
+        <div id="rslogLobbyPanel">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Track</th>
+                        <th>Top Speed</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody id="rslogLobbyTableBody"></tbody>
+            </table>
+            <div id="rslogLobbyFooter">
+                <a id="rslogLobbyCsvBtn" href="#">⬇ Download CSV</a>
+                <span id="rslogLobbyClearBtn">✕ Clear all</span>
+            </div>
+        </div>
+    `;
+
+    // Prepend button + panel to the racing additional container
+    $('#racingAdditionalContainer').prepend(panel).prepend(btn);
+
+    $('#rslogLobbyBtn').on('click', function () {
+        const panel = $('#rslogLobbyPanel');
+        const wasOpen = panel.is(':visible');
+        panel.toggle();
+        $(this).text(wasOpen ? '▼ Top Speeds Log' : '▲ Top Speeds Log');
+        if (!wasOpen) renderLobbyTable();
+    });
+
+    $('#rslogLobbyCsvBtn').on('click', function (e) {
+        e.preventDefault();
+        downloadCsv();
+    });
+
+    $('#rslogLobbyClearBtn').on('click', function () {
+        if (confirm('Clear all saved top speed records?')) {
+            saveSpeedLog({});
+            renderLobbyTable();
+        }
+    });
+}
+
+function renderLobbyTable() {
+    const log     = getSpeedLog();
+    const tbody   = $('#rslogLobbyTableBody');
+    tbody.empty();
+
+    const entries = Object.entries(log).sort((a, b) => b[1].topSpeed - a[1].topSpeed);
+
+    if (entries.length === 0) {
+        tbody.append('<tr><td colspan="3" style="color:#555;padding:6px;">No records yet — complete a race first.</td></tr>');
+        return;
+    }
+
+    for (const [track, data] of entries) {
+        tbody.append(`
+            <tr>
+                <td>${escapeHtml(track)}</td>
+                <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
+                <td>${data.date}</td>
+            </tr>
+        `);
+    }
+}
+
+function initLobby() {
+    if ($('#racingAdditionalContainer').length < 1) return;
+    if ($('#racingdetails').length > 0) return;  // in a race, skip lobby panel
+    injectLobbyPanel();
+}
+
 // ─── Init ──────────────────────────────────────────────────────────────────────
 function init() {
     if ($('#racingdetails').length < 1) return;
@@ -357,6 +544,7 @@ function init() {
 tornAjax((isRacingXhr) => {
     if (isRacingXhr) {
         $('#racingupdatesnew').ready(init);
+        $('#racingAdditionalContainer').ready(initLobby);
     } else {
         maybeClear();
     }
@@ -364,3 +552,4 @@ tornAjax((isRacingXhr) => {
 
 // Initial page load
 $('#racingupdatesnew').ready(init);
+$('#racingAdditionalContainer').ready(initLobby);
