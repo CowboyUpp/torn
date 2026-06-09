@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.16
+// @version      1.6.17
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,6 +15,8 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.6.17 - Replace car name text with small car image thumbnail in log tables.
+//           parseCarImg() reads src from .car-selected .torn-item sidebar image.
 // v1.6.16 - Fix car name: title is on span.img not img element;
 //           correct selector is .car-selected .img[title].
 // v1.6.15 - Fix car name: replaced multi-strategy window object guessing with a
@@ -79,7 +81,7 @@ let last_compl      = -1.0;
 let speedInterval   = 0;
 let sessionTopSpeed = 0;
 let currentTrack    = '';
-let currentCar      = 'Unknown';
+let currentCar      = '';
 
 // ─── Interval helpers ──────────────────────────────────────────────────────────
 function maybeClear() {
@@ -107,7 +109,7 @@ function updateRecord(trackName, speed, carName) {
     if (!existing || rounded > existing.topSpeed) {
         log[trackName] = {
             topSpeed: rounded,
-            car:  carName || 'Unknown',
+            car:  carName || '',
             date: new Date().toISOString().split('T')[0]
         };
         saveSpeedLog(log);
@@ -133,7 +135,8 @@ GM_addStyle(
     '#rslogPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; } ' +
     '#rslogPanel tr.rslogCurrentTrack td { color: #fff200; } ' +
     '#rslogPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; } ' +
-    '#rslogPanel td.rslogCar { color: #a8a8a8; } ' +
+    '#rslogPanel td.rslogCar { width: 42px; padding: 2px 4px; } ' +
+    '#rslogPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; } ' +
     '#rslogCsvBtn { display: inline-block; margin-top: 8px; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; } ' +
     '#rslogCsvBtn:hover { background: #3a3a00; color: #fff200; } ' +
     '#rslogClearBtn { display: inline-block; margin-top: 8px; margin-left: 6px; padding: 5px 12px; background: #1a0000; border: 1px solid #882222; border-radius: 4px; color: #cc4444; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; transition: background 0.15s; } ' +
@@ -145,7 +148,8 @@ GM_addStyle(
     '#rslogLobbyPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; } ' +
     '#rslogLobbyPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; } ' +
     '#rslogLobbyPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; } ' +
-    '#rslogLobbyPanel td.rslogCar { color: #a8a8a8; } ' +
+    '#rslogLobbyPanel td.rslogCar { width: 42px; padding: 2px 4px; } ' +
+    '#rslogLobbyPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; } ' +
     '#rslogLobbyFooter { margin-top: 7px; display: flex; gap: 8px; align-items: center; } ' +
     '#rslogLobbyCsvBtn { display: inline-block; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; } ' +
     '#rslogLobbyCsvBtn:hover { background: #3a3a00; color: #fff200; } ' +
@@ -221,7 +225,7 @@ function renderLogTable() {
         tbody.append(
             '<tr class="' + (isCurrent ? 'rslogCurrentTrack' : '') + '">' +
             '<td>' + escapeHtml(track) + '</td>' +
-            '<td class="rslogCar">' + escapeHtml(data.car || 'Unknown') + '</td>' +
+            '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
             '<td>' + data.date + '</td>' +
             '</tr>'
@@ -234,7 +238,7 @@ function downloadCsv() {
     let csv   = 'Track,Car,Top Speed (mph),Date\n';
     for (const [track, data] of Object.entries(log)) {
         csv += '"' + track.replace(/"/g, '""') + '",' +
-               '"' + (data.car || 'Unknown').replace(/"/g, '""') + '",' +
+               '"' + (data.car || '').replace(/"/g, '""') + '",' +
                data.topSpeed.toFixed(2) + ',' +
                data.date + '\n';
     }
@@ -250,15 +254,13 @@ function downloadCsv() {
 // ─── Car name ──────────────────────────────────────────────────────────────────
 // Read the title attribute from the car image in the "Current car" sidebar.
 // Torn always sets this to the canonical car name e.g. title="Volt GT".
-function parseCarName() {
-    // Car name is in title attribute of span.img inside .car-selected
-    // e.g. <span class="img" title="Mercia SLR">
-    const span = document.querySelector('.car-selected .img[title]');
-    if (span) {
-        const title = span.getAttribute('title');
-        if (title && title.length > 1) return title.trim();
+function parseCarImg() {
+    // Returns small image src for the current car from sidebar
+    const img = document.querySelector('.car-selected .torn-item');
+    if (img && img.src) {
+        return img.src.replace('/large.png', '/small.png');
     }
-    return currentCar !== 'Unknown' ? currentCar : 'Unknown';
+    return '';
 }
 
 // ─── Speed polling ─────────────────────────────────────────────────────────────
@@ -289,8 +291,8 @@ function startSpeedLoop() {
         const compl      = getCompletion();
 
         // Update car name each tick (stays stable once found)
-        const foundCar = parseCarName();
-        if (foundCar && foundCar !== 'Unknown') currentCar = foundCar;
+        const foundCar = parseCarImg();
+        if (foundCar) currentCar = foundCar;
 
         if (isNaN(compl) || isNaN(laps) || isNaN(len)) return;
 
@@ -369,7 +371,7 @@ function renderLobbyTable() {
         tbody.append(
             '<tr>' +
             '<td>' + escapeHtml(track) + '</td>' +
-            '<td class="rslogCar">' + escapeHtml(data.car || 'Unknown') + '</td>' +
+            '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
             '<td>' + data.date + '</td>' +
             '</tr>'
