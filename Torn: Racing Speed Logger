@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.14
-// @description  lifetime top speed log per track with canonical Torn car type tracked and CSV export. No external dependencies.
+// @version      1.6.16
+// @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
 // @match        https://www.torn.com/*
@@ -10,28 +10,54 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @grant        unsafeWindow
+// @downloadURL  https://update.greasyfork.org/scripts/581655/Torn%3A%20Racing%20Speed%20Logger.user.js
+// @updateURL    https://update.greasyfork.org/scripts/581655/Torn%3A%20Racing%20Speed%20Logger.meta.js
 // ==/UserScript==
 //
 // Changelog:
-// v1.6.14 - Enhanced Parser Integration: Incorporated multi-tier flexible property checking for engine arrays and global DOM image processing.
-// v1.6.13 - Engine Data Target Patch: Replaced DOM scraping logic with global window driver data matrix queries to bypass layout structural drops.
-// v1.6.12 - Syntax Hotfix: Resolved Uncaught SyntaxError due to unexpected string continuation tokens.
-// v1.6.11 - Changelog Restoration: Restored complete historical version history logs.
-// v1.6.10 - Metadata Correction: Synchronized the internal file logging header notes.
-// v1.6.9  - Official Model Scraper Integration: Rewrote layout targeting to capture 
-//           Torn's built-in canonical vehicle names, filtering out custom user naming entries.
+// v1.6.16 - Fix car name: title is on span.img not img element;
+//           correct selector is .car-selected .img[title].
+// v1.6.15 - Fix car name: replaced multi-strategy window object guessing with a
+//           direct title attribute read from .car-selected sidebar img — reliable
+//           and always present during a race (e.g. title="Volt GT").
+// v1.6.14 - Enhanced Parser Integration: multi-tier flexible property checking for
+//           engine arrays and global DOM image processing.
+// v1.6.13 - Engine Data Target Patch: replaced DOM scraping with global window
+//           driver data matrix queries.
+// v1.6.12 - Syntax Hotfix: resolved Uncaught SyntaxError from string continuation.
+// v1.6.11 - Changelog Restoration: restored complete historical version history.
+// v1.6.10 - Metadata Correction: synchronized internal file logging header notes.
+// v1.6.9  - Official Model Scraper Integration: rewrote layout targeting to capture
+//           Torn's canonical vehicle names.
 // v1.6.8  - Highlighted self-row blueprint.
-// v1.6.7  - Deep State Architecture Scraping: Added memory fallback targeting window.initialData 
-//           and active global racing arrays to read car text directly from the engine source.
-// v1.6.6  - Strict String Literal Fix: Removed all raw literal newline symbols (\n) from inside 
-//           the concatenated style and HTML string blocks to completely prevent evaluation token crashes.
-// v1.6.5  - Total ES5 String Sanitation: Replaced all remaining HTML array structures.
-// v1.6.0  - Added lifetime top speed log per track with car type tracked and CSV export features.
-// v1.0.0  - Initial release: Real-time speed display logging.
+// v1.6.7  - Deep State Architecture Scraping: added memory fallback targeting
+//           window.initialData and active global racing arrays.
+// v1.6.6  - Strict String Literal Fix: removed raw literal newlines from style/HTML
+//           string blocks.
+// v1.6.5  - Total ES5 String Sanitation: replaced all remaining HTML array structures.
+// v1.6.0  - Added lifetime top speed log per track with car type tracked and CSV export.
+// v1.5.5  - Fix init timing: MutationObserver watches for #racingdetails appearing
+//           asynchronously so startSpeedLoop() reliably fires.
+// v1.5.4  - Fix race title selector: target div.title-black.t-overflow (race title)
+//           not div.title-black (matches "Current car" heading).
+// v1.5.3  - Fix speed never recording: guard NaN from m-hide completion element;
+//           skip speed <= 0 so first tick never writes a 0.00 record.
+// v1.5.2  - Improve table readability: lighter cell text, bolder headers, larger
+//           font and more padding in both lobby and in-race tables.
+// v1.5.1  - Restyle Download CSV and Clear all as proper buttons.
+// v1.5.0  - Add lobby panel: Top Speeds Log button in #racingAdditionalContainer
+//           accessible outside of an active race.
+// v1.4.0  - Fix tornAjax: page param was always "loader"/"page"; now passes
+//           isRacingXhr bool via url.includes("sid=racing").
+// v1.3.0  - Script loads on all torn.com pages (required for SPA); gates init
+//           and teardown via tornAjax and #racingupdatesnew.
+// v1.2.0  - Fix track name parsing: use parts.pop() so hyphens in track names
+//           don't corrupt lap count or currentTrack string.
+// v1.1.0  - Removed external @require dependency (lugburz_lib); inlined tornAjax().
+// v1.0.0  - Initial release: real-time speed display logging.
 
 'use strict';
 
-// Ensure $ uses Torn's jQuery
 const $ = unsafeWindow.$;
 
 // ─── Torn AJAX hook ────────────────────────────────────────────────────────────
@@ -49,11 +75,11 @@ function tornAjax(callback) {
 const POLL_MS = 1000;
 
 // ─── State ─────────────────────────────────────────────────────────────────────
-let last_compl    = -1.0;
-let speedInterval = 0;
+let last_compl      = -1.0;
+let speedInterval   = 0;
 let sessionTopSpeed = 0;
-let currentTrack  = '';
-let currentCar    = 'Unknown';
+let currentTrack    = '';
+let currentCar      = 'Unknown';
 
 // ─── Interval helpers ──────────────────────────────────────────────────────────
 function maybeClear() {
@@ -81,7 +107,7 @@ function updateRecord(trackName, speed, carName) {
     if (!existing || rounded > existing.topSpeed) {
         log[trackName] = {
             topSpeed: rounded,
-            car: carName || 'Unknown',
+            car:  carName || 'Unknown',
             date: new Date().toISOString().split('T')[0]
         };
         saveSpeedLog(log);
@@ -131,21 +157,22 @@ GM_addStyle(
 function injectWidget() {
     if ($('#rslogWrapper').length > 0) return;
 
-    const html = '<div id="rslogWrapper"> ' +
-        '    <div id="rslogSpeedRow"> ' +
-        '        <span id="rslogSpeed">–.– mph</span> ' +
-        '        <span id="rslogSessionTop">Session top: <span id="rslogSessionTopVal">0.00</span> mph</span> ' +
-        '        <span id="rslogNewRecord">★ NEW RECORD</span> ' +
-        '        <span id="rslogToggle">▼ Top speeds</span> ' +
-        '    </div> ' +
-        '    <div id="rslogPanel"> ' +
-        '        <table id="rslogTable"> ' +
-        '            <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead> ' +
-        '            <tbody id="rslogTableBody"></tbody> ' +
-        '        </table> ' +
-        '        <a id="rslogCsvBtn" href="#">⬇ Download CSV</a> ' +
-        '        <span id="rslogClearBtn">✕ Clear all</span> ' +
-        '    </div> ' +
+    const html =
+        '<div id="rslogWrapper">' +
+        '  <div id="rslogSpeedRow">' +
+        '    <span id="rslogSpeed">–.– mph</span>' +
+        '    <span id="rslogSessionTop">Session top: <span id="rslogSessionTopVal">0.00</span> mph</span>' +
+        '    <span id="rslogNewRecord">★ NEW RECORD</span>' +
+        '    <span id="rslogToggle">▼ Top speeds</span>' +
+        '  </div>' +
+        '  <div id="rslogPanel">' +
+        '    <table id="rslogTable">' +
+        '      <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead>' +
+        '      <tbody id="rslogTableBody"></tbody>' +
+        '    </table>' +
+        '    <a id="rslogCsvBtn" href="#">⬇ Download CSV</a>' +
+        '    <span id="rslogClearBtn">✕ Clear all</span>' +
+        '  </div>' +
         '</div>';
 
     if ($('#racingdetails').length > 0) {
@@ -155,7 +182,7 @@ function injectWidget() {
     }
 
     $('#rslogToggle').on('click', function () {
-        const panel = $('#rslogPanel');
+        const panel  = $('#rslogPanel');
         const wasOpen = panel.is(':visible');
         panel.toggle();
         $(this).text(wasOpen ? '▼ Top speeds' : '▲ Top speeds');
@@ -177,33 +204,26 @@ function injectWidget() {
 
 function escapeHtml(str) {
     if (!str) return '';
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function renderLogTable() {
-    const log     = getSpeedLog();
-    const tbody   = $('#rslogTableBody');
+    const log    = getSpeedLog();
+    const tbody  = $('#rslogTableBody');
     tbody.empty();
-
     const entries = Object.entries(log).sort((a, b) => b[1].topSpeed - a[1].topSpeed);
-
     if (entries.length === 0) {
         tbody.append('<tr><td colspan="4" style="color:#555;padding:6px;">No records yet.</td></tr>');
         return;
     }
-
     for (const [track, data] of entries) {
         const isCurrent = (track === currentTrack);
-        const carName = data.car || 'Unknown';
         tbody.append(
             '<tr class="' + (isCurrent ? 'rslogCurrentTrack' : '') + '">' +
-            '    <td>' + escapeHtml(track) + '</td>' +
-            '    <td class="rslogCar">' + escapeHtml(carName) + '</td>' +
-            '    <td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
-            '    <td>' + data.date + '</td>' +
+            '<td>' + escapeHtml(track) + '</td>' +
+            '<td class="rslogCar">' + escapeHtml(data.car || 'Unknown') + '</td>' +
+            '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
+            '<td>' + data.date + '</td>' +
             '</tr>'
         );
     }
@@ -213,8 +233,10 @@ function downloadCsv() {
     const log = getSpeedLog();
     let csv   = 'Track,Car,Top Speed (mph),Date\n';
     for (const [track, data] of Object.entries(log)) {
-        const carName = data.car || 'Unknown';
-        csv += '"' + track.replace(/"/g, '""') + '","' + carName.replace(/"/g, '""') + '",' + data.topSpeed.toFixed(2) + ',' + data.date + '\n';
+        csv += '"' + track.replace(/"/g, '""') + '",' +
+               '"' + (data.car || 'Unknown').replace(/"/g, '""') + '",' +
+               data.topSpeed.toFixed(2) + ',' +
+               data.date + '\n';
     }
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url  = URL.createObjectURL(blob);
@@ -225,61 +247,25 @@ function downloadCsv() {
     URL.revokeObjectURL(url);
 }
 
+// ─── Car name ──────────────────────────────────────────────────────────────────
+// Read the title attribute from the car image in the "Current car" sidebar.
+// Torn always sets this to the canonical car name e.g. title="Volt GT".
+function parseCarName() {
+    // Car name is in title attribute of span.img inside .car-selected
+    // e.g. <span class="img" title="Mercia SLR">
+    const span = document.querySelector('.car-selected .img[title]');
+    if (span) {
+        const title = span.getAttribute('title');
+        if (title && title.length > 1) return title.trim();
+    }
+    return currentCar !== 'Unknown' ? currentCar : 'Unknown';
+}
+
 // ─── Speed polling ─────────────────────────────────────────────────────────────
 function getCompletion() {
     const el = document.querySelector('li.pd-completion');
     if (!el) return NaN;
     return parseFloat(el.textContent.replace('%', '').trim());
-}
-
-function parseCarName() {
-    try {
-        // Strategy 1: Global engine data matrices
-        const gData = unsafeWindow.initialData || 
-                     (unsafeWindow.racingData && unsafeWindow.racingData.initialData) ||
-                     unsafeWindow.raceData;
-                     
-        if (gData) {
-            let drivers = gData.drivers || gData.activeDrivers || gData.racers;
-            if (drivers && Array.isArray(drivers)) {
-                const selfDriver = drivers.find(d => 
-                    d.isSelf || 
-                    d.is_self || 
-                    d.playerID == unsafeWindow.userID || 
-                    d.userId == unsafeWindow.userID
-                );
-                if (selfDriver && (selfDriver.carName || selfDriver.car)) {
-                    return (selfDriver.carName || selfDriver.car).replace(/\b\w/g, c => c.toUpperCase());
-                }
-            }
-        }
-
-        // Strategy 2: Window-level fallback array
-        if (unsafeWindow.drivers && Array.isArray(unsafeWindow.drivers)) {
-            const match = unsafeWindow.drivers.find(d => 
-                d.isSelf || d.is_self || d.userId == unsafeWindow.userID
-            );
-            if (match && (match.carName || match.car)) {
-                return (match.carName || match.car).replace(/\b\w/g, c => c.toUpperCase());
-            }
-        }
-
-        // Strategy 3: Target user active row images specifically to ensure self-matching
-        const activeUserRow = $('#racingdetails').find('.bold, tr:has(.bold), li:has(.bold), [class*="racerRow-"]');
-        const carImg = activeUserRow.length ? activeUserRow.find('img[src*="/images/cars/"]') : $('#racingdetails img[src*="/images/cars/"], .race-car img[src*="/images/cars/"]');
-        
-        if (carImg.length) {
-            const src = carImg.first().attr('src');
-            const fileName = src.split('/').pop().split('.')[0];
-            const model = fileName.replace(/_/g, ' ');
-            if (model.length > 2) {
-                return model.replace(/\b\w/g, c => c.toUpperCase());
-            }
-        }
-    } catch (e) {
-        console.debug('[Racing Speed Logger] Car name parse error:', e);
-    }
-    return currentCar !== 'Unknown' ? currentCar : 'Unknown';
 }
 
 function startSpeedLoop() {
@@ -291,8 +277,9 @@ function startSpeedLoop() {
             return;
         }
 
-        const titleEl   = document.querySelector('div.title-black.t-overflow');
-        const titleText = titleEl ? titleEl.textContent.trim() : '';
+        // Race title is in div.title-black.t-overflow, not the "Current car" heading
+        const titleEl    = document.querySelector('div.title-black.t-overflow');
+        const titleText  = titleEl ? titleEl.textContent.trim() : '';
         const cleanTitle = titleText.replace(/\s*-\s*(Race started|Race finished|Waiting.*|Cancelled.*)$/i, '').trim();
         const parts      = cleanTitle.split(' - ');
         const lapString  = parts.pop();
@@ -300,12 +287,10 @@ function startSpeedLoop() {
         currentTrack     = parts.join(' - ').trim();
         const len        = parseFloat(trackInfo.attr('data-length'));
         const compl      = getCompletion();
-        
-        // Scraping execution cycle
+
+        // Update car name each tick (stays stable once found)
         const foundCar = parseCarName();
-        if (foundCar && foundCar !== 'Unknown') {
-            currentCar = foundCar;
-        }
+        if (foundCar && foundCar !== 'Unknown') currentCar = foundCar;
 
         if (isNaN(compl) || isNaN(laps) || isNaN(len)) return;
 
@@ -335,16 +320,17 @@ function startSpeedLoop() {
 function injectLobbyPanel() {
     if ($('#rslogLobbyBtn').length > 0) return;
 
-    const btn = '<button id="rslogLobbyBtn">▼ Top Speeds Log</button>';
-    const panel = '<div id="rslogLobbyPanel"> ' +
-        '    <table> ' +
-        '        <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead> ' +
-        '        <tbody id="rslogLobbyTableBody"></tbody> ' +
-        '    </table> ' +
-        '    <div id="rslogLobbyFooter"> ' +
-        '        <a id="rslogLobbyCsvBtn" href="#">⬇ Download CSV</a> ' +
-        '        <span id="rslogLobbyClearBtn">✕ Clear all</span> ' +
-        '    </div> ' +
+    const btn   = '<button id="rslogLobbyBtn">▼ Top Speeds Log</button>';
+    const panel =
+        '<div id="rslogLobbyPanel">' +
+        '  <table>' +
+        '    <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead>' +
+        '    <tbody id="rslogLobbyTableBody"></tbody>' +
+        '  </table>' +
+        '  <div id="rslogLobbyFooter">' +
+        '    <a id="rslogLobbyCsvBtn" href="#">⬇ Download CSV</a>' +
+        '    <span id="rslogLobbyClearBtn">✕ Clear all</span>' +
+        '  </div>' +
         '</div>';
 
     $('#racingAdditionalContainer').prepend(panel).prepend(btn);
@@ -371,25 +357,21 @@ function injectLobbyPanel() {
 }
 
 function renderLobbyTable() {
-    const log     = getSpeedLog();
-    const tbody   = $('#rslogLobbyTableBody');
+    const log    = getSpeedLog();
+    const tbody  = $('#rslogLobbyTableBody');
     tbody.empty();
-
     const entries = Object.entries(log).sort((a, b) => b[1].topSpeed - a[1].topSpeed);
-
     if (entries.length === 0) {
         tbody.append('<tr><td colspan="4" style="color:#555;padding:6px;">No records yet — complete a race first.</td></tr>');
         return;
     }
-
     for (const [track, data] of entries) {
-        const carName = data.car || 'Unknown';
         tbody.append(
             '<tr>' +
-            '    <td>' + escapeHtml(track) + '</td>' +
-            '    <td class="rslogCar">' + escapeHtml(carName) + '</td>' +
-            '    <td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
-            '    <td>' + data.date + '</td>' +
+            '<td>' + escapeHtml(track) + '</td>' +
+            '<td class="rslogCar">' + escapeHtml(data.car || 'Unknown') + '</td>' +
+            '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
+            '<td>' + data.date + '</td>' +
             '</tr>'
         );
     }
@@ -403,6 +385,7 @@ function initLobby() {
 
 // ─── Init ──────────────────────────────────────────────────────────────────────
 let _raceObserver = null;
+
 function watchForRaceStart() {
     if (_raceObserver) return;
     _raceObserver = new MutationObserver(() => {
@@ -430,10 +413,5 @@ function init() {
     watchForRaceStart();
 }
 
-// Hook into Ajax triggers
-tornAjax(() => {
-    init();
-});
-
-// Run initial execution
+tornAjax(() => { init(); });
 init();
