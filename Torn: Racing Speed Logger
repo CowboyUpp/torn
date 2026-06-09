@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.18
+// @version      1.6.19
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,6 +15,8 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.6.19 - Per-car records: storage key changed to "track|carId" so each
+//           car gets its own top speed entry per track.
 // v1.6.18 - Cap speed at 400 mph to filter lap-wrap spikes where completion
 //           delta briefly goes huge as the percentage resets between laps.
 // v1.6.17 - Replace car name text with small car image thumbnail in log tables.
@@ -104,15 +106,22 @@ function saveSpeedLog(log) {
     GM_setValue('torn_top_speeds', JSON.stringify(log));
 }
 
-function updateRecord(trackName, speed, carName) {
+function carKey(carImg) {
+    const m = (carImg || '').match(/items\/([0-9]+)\//);
+    return m ? m[1] : 'unknown';
+}
+
+function updateRecord(trackName, speed, carImg) {
     const log     = getSpeedLog();
     const rounded = parseFloat(speed.toFixed(2));
-    const existing = log[trackName];
+    const key     = trackName + '|' + carKey(carImg);
+    const existing = log[key];
     if (!existing || rounded > existing.topSpeed) {
-        log[trackName] = {
+        log[key] = {
+            track:    trackName,
             topSpeed: rounded,
-            car:  carName || '',
-            date: new Date().toISOString().split('T')[0]
+            car:      carImg || '',
+            date:     new Date().toISOString().split('T')[0]
         };
         saveSpeedLog(log);
         return true;
@@ -222,11 +231,12 @@ function renderLogTable() {
         tbody.append('<tr><td colspan="4" style="color:#555;padding:6px;">No records yet.</td></tr>');
         return;
     }
-    for (const [track, data] of entries) {
-        const isCurrent = (track === currentTrack);
+    for (const [key, data] of entries) {
+        const trackName = data.track || key.split('|')[0];
+        const isCurrent = (trackName === currentTrack);
         tbody.append(
             '<tr class="' + (isCurrent ? 'rslogCurrentTrack' : '') + '">' +
-            '<td>' + escapeHtml(track) + '</td>' +
+            '<td>' + escapeHtml(trackName) + '</td>' +
             '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
             '<td>' + data.date + '</td>' +
@@ -238,8 +248,9 @@ function renderLogTable() {
 function downloadCsv() {
     const log = getSpeedLog();
     let csv   = 'Track,Car,Top Speed (mph),Date\n';
-    for (const [track, data] of Object.entries(log)) {
-        csv += '"' + track.replace(/"/g, '""') + '",' +
+    for (const [key, data] of Object.entries(log)) {
+        const trackName = data.track || key.split('|')[0];
+        csv += '"' + trackName.replace(/"/g, '""') + '",' +
                '"' + (data.car || '').replace(/"/g, '""') + '",' +
                data.topSpeed.toFixed(2) + ',' +
                data.date + '\n';
@@ -370,10 +381,11 @@ function renderLobbyTable() {
         tbody.append('<tr><td colspan="4" style="color:#555;padding:6px;">No records yet — complete a race first.</td></tr>');
         return;
     }
-    for (const [track, data] of entries) {
+    for (const [key, data] of entries) {
+        const trackName = data.track || key.split('|')[0];
         tbody.append(
             '<tr>' +
-            '<td>' + escapeHtml(track) + '</td>' +
+            '<td>' + escapeHtml(trackName) + '</td>' +
             '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
             '<td>' + data.date + '</td>' +
