@@ -15,55 +15,37 @@
 // ==/UserScript==
 //
 // Changelog:
-// v1.6.21 - Add canvas firework burst on new record: 60 particles with
-//           gravity, fade and race-themed colors.
-// v1.6.20 - Make NEW RECORD flash bigger (36px + green glow) so it's hard to miss.
-// v1.6.19 - Per-car records: storage key changed to "track|carId" so each
-//           car gets its own top speed entry per track.
-// v1.6.18 - Cap speed at 400 mph to filter lap-wrap spikes where completion
-//           delta briefly goes huge as the percentage resets between laps.
-// v1.6.17 - Replace car name text with small car image thumbnail in log tables.
-//           parseCarImg() reads src from .car-selected .torn-item sidebar image.
-// v1.6.16 - Fix car name: title is on span.img not img element;
-//           correct selector is .car-selected .img[title].
-// v1.6.15 - Fix car name: replaced multi-strategy window object guessing with a
-//           direct title attribute read from .car-selected sidebar img — reliable
-//           and always present during a race (e.g. title="Volt GT").
-// v1.6.14 - Enhanced Parser Integration: multi-tier flexible property checking for
-//           engine arrays and global DOM image processing.
-// v1.6.13 - Engine Data Target Patch: replaced DOM scraping with global window
-//           driver data matrix queries.
-// v1.6.12 - Syntax Hotfix: resolved Uncaught SyntaxError from string continuation.
-// v1.6.11 - Changelog Restoration: restored complete historical version history.
-// v1.6.10 - Metadata Correction: synchronized internal file logging header notes.
-// v1.6.9  - Official Model Scraper Integration: rewrote layout targeting to capture
-//           Torn's canonical vehicle names.
-// v1.6.8  - Highlighted self-row blueprint.
-// v1.6.7  - Deep State Architecture Scraping: added memory fallback targeting
-//           window.initialData and active global racing arrays.
-// v1.6.6  - Strict String Literal Fix: removed raw literal newlines from style/HTML
-//           string blocks.
-// v1.6.5  - Total ES5 String Sanitation: replaced all remaining HTML array structures.
-// v1.6.0  - Added lifetime top speed log per track with car type tracked and CSV export.
-// v1.5.5  - Fix init timing: MutationObserver watches for #racingdetails appearing
-//           asynchronously so startSpeedLoop() reliably fires.
-// v1.5.4  - Fix race title selector: target div.title-black.t-overflow (race title)
-//           not div.title-black (matches "Current car" heading).
-// v1.5.3  - Fix speed never recording: guard NaN from m-hide completion element;
-//           skip speed <= 0 so first tick never writes a 0.00 record.
-// v1.5.2  - Improve table readability: lighter cell text, bolder headers, larger
-//           font and more padding in both lobby and in-race tables.
-// v1.5.1  - Restyle Download CSV and Clear all as proper buttons.
-// v1.5.0  - Add lobby panel: Top Speeds Log button in #racingAdditionalContainer
-//           accessible outside of an active race.
-// v1.4.0  - Fix tornAjax: page param was always "loader"/"page"; now passes
-//           isRacingXhr bool via url.includes("sid=racing").
-// v1.3.0  - Script loads on all torn.com pages (required for SPA); gates init
-//           and teardown via tornAjax and #racingupdatesnew.
-// v1.2.0  - Fix track name parsing: use parts.pop() so hyphens in track names
-//           don't corrupt lap count or currentTrack string.
-// v1.1.0  - Removed external @require dependency (lugburz_lib); inlined tornAjax().
-// v1.0.0  - Initial release: real-time speed display logging.
+// v1.6.21 - Added a firework burst when you hit a new record. Also made the
+//           ★ NEW RECORD text much bigger so you actually notice it.
+// v1.6.19 - Each car now gets its own record per track, so your Colina and
+//           your NSX on Mudpit are tracked separately.
+// v1.6.18 - Fixed a bug where a single bad reading could log something crazy
+//           like 760 mph. Speeds above 400 mph are now ignored.
+// v1.6.17 - Replaced the car name text with the actual car image in the log.
+//           Much easier to recognise at a glance.
+// v1.6.16 - Fixed car detection. Was looking at the wrong element — now reads
+//           the right one and actually finds your car.
+// v1.6.15 - Simplified how the car name is read. Previous approach was
+//           overengineered and kept failing.
+// v1.6.0  - Added the full log table with car, speed and date. Also added
+//           CSV export and the lobby panel under Statistics.
+// v1.5.5  - Fixed a timing issue where the speed loop sometimes didn't start
+//           because the race elements hadn't loaded yet.
+// v1.5.4  - Fixed the wrong heading being read for the track name — it was
+//           picking up "Current car" instead of the actual race title.
+// v1.5.3  - Fixed records not saving. Zero and negative speeds are now ignored
+//           so a bad first reading can't corrupt the log.
+// v1.5.2  - Made the log table easier to read — bigger text, brighter colours.
+// v1.5.1  - Made the Download CSV and Clear all look like actual buttons.
+// v1.5.0  - Added the Top Speeds Log panel to the racing lobby so you can
+//           check your records without being in a race.
+// v1.4.0  - Fixed a bug where navigating away from racing didn't stop the
+//           speed loop properly.
+// v1.3.0  - Narrowed when the script runs so it only does anything on the
+//           racing pages.
+// v1.2.0  - Fixed track names with hyphens in them breaking the lap count.
+// v1.1.0  - Removed the dependency on an external library.
+// v1.0.0  - First release. Real-time speed display during races.
 
 'use strict';
 
