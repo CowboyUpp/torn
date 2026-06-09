@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.19
+// @version      1.6.21
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,6 +15,9 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.6.21 - Add canvas firework burst on new record: 60 particles with
+//           gravity, fade and race-themed colors.
+// v1.6.20 - Make NEW RECORD flash bigger (36px + green glow) so it's hard to miss.
 // v1.6.19 - Per-car records: storage key changed to "track|carId" so each
 //           car gets its own top speed entry per track.
 // v1.6.18 - Cap speed at 400 mph to filter lap-wrap spikes where completion
@@ -136,7 +139,7 @@ GM_addStyle(
     '#rslogSpeed { font-size: 22px; font-weight: bold; color: #fff200; letter-spacing: 1px; min-width: 100px; display: inline-block; } ' +
     '#rslogSessionTop { color: #aaa; font-size: 10px; } ' +
     '#rslogSessionTopVal { color: #ff9900; font-weight: bold; } ' +
-    '#rslogNewRecord { display: none; color: #00ff88; font-weight: bold; font-size: 10px; animation: rslogPulse 0.6s ease-in-out 3; } ' +
+    '#rslogNewRecord { display: none; color: #00ff88; font-weight: bold; font-size: 36px; text-shadow: 0 0 12px #00ff88; animation: rslogPulse 0.6s ease-in-out 3; } ' +
     '@keyframes rslogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } } ' +
     '#rslogToggle { cursor: pointer; color: #888; font-size: 10px; text-decoration: underline; margin-left: auto; user-select: none; } ' +
     '#rslogToggle:hover { color: #fff200; } ' +
@@ -276,6 +279,72 @@ function parseCarImg() {
     return '';
 }
 
+
+// ─── Firework burst ────────────────────────────────────────────────────────────
+function launchFirework() {
+    const el = document.getElementById('rslogNewRecord');
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const cx   = rect.left + rect.width / 2;
+    const cy   = rect.top  + rect.height / 2;
+
+    const canvas  = document.createElement('canvas');
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+    Object.assign(canvas.style, {
+        position:      'fixed',
+        top:           '0',
+        left:          '0',
+        pointerEvents: 'none',
+        zIndex:        '999999'
+    });
+    document.body.appendChild(canvas);
+
+    const ctx      = canvas.getContext('2d');
+    const colors   = ['#00ff88', '#fff200', '#ff9900', '#ffffff', '#00cfff'];
+    const particles = [];
+    const COUNT    = 60;
+
+    for (let i = 0; i < COUNT; i++) {
+        const angle  = (Math.PI * 2 / COUNT) * i + Math.random() * 0.3;
+        const speed  = 3 + Math.random() * 6;
+        particles.push({
+            x:    cx,
+            y:    cy,
+            vx:   Math.cos(angle) * speed,
+            vy:   Math.sin(angle) * speed,
+            alpha: 1,
+            size: 2 + Math.random() * 3,
+            color: colors[Math.floor(Math.random() * colors.length)]
+        });
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let alive = false;
+        for (const p of particles) {
+            if (p.alpha <= 0) continue;
+            alive = true;
+            p.x     += p.vx;
+            p.y     += p.vy;
+            p.vy    += 0.12; // gravity
+            p.alpha -= 0.018;
+            ctx.globalAlpha = Math.max(0, p.alpha);
+            ctx.fillStyle   = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        if (alive) {
+            requestAnimationFrame(draw);
+        } else {
+            canvas.remove();
+        }
+    }
+    requestAnimationFrame(draw);
+}
+
 // ─── Speed polling ─────────────────────────────────────────────────────────────
 function getCompletion() {
     const el = document.querySelector('li.pd-completion');
@@ -323,6 +392,7 @@ function startSpeedLoop() {
 
                 if (updateRecord(currentTrack, speed, currentCar)) {
                     $('#rslogNewRecord').stop(true, true).show().delay(2000).fadeOut(500);
+                    launchFirework();
                     if ($('#rslogPanel').is(':visible')) renderLogTable();
                 }
             }
