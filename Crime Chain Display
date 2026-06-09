@@ -1,0 +1,472 @@
+// ==UserScript==
+// @name         Crime Chain Tracker
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      1.0.0
+// @description  Tracks your crime chain live across all Crimes 2.0 sub-menus.
+// @author       cowboyup
+// @match        https://www.torn.com/page.php?sid=crimes*
+// @run-at       document-idle
+// @license      MIT; https://opensource.org/licenses/MIT
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @connect      api.torn.com
+// ==/UserScript==
+
+// =============================================================================
+// CHANGELOG
+// =============================================================================
+// 4.3.2 — UI Text Adjustment
+//   - Increased font size of the inner-ring chain count from 10px to 12px for clarity.
+//   - Adjusted positioning slightly to keep alignment precise.
+// =============================================================================
+
+(function () {
+    'use strict';
+
+    // =========================================================================
+    // CONFIG
+    // =========================================================================
+    const STORAGE_KEY_CHAIN  = 'cct_chain_v4';
+    const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
+    const USE_API            = true;
+    const CHAIN_CAP_DISPLAY  = 100;
+
+    // =========================================================================
+    // STATE
+    // =========================================================================
+    let chain      = parseInt(GM_getValue(STORAGE_KEY_CHAIN, '0'), 10) || 0;
+    let observer   = null;
+
+    // =========================================================================
+    // STORAGE
+    // =========================================================================
+    function saveChain() {
+        if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY_CHAIN, String(chain));
+    }
+
+    function getApiKey() {
+        return typeof GM_getValue === 'function' ? GM_getValue(STORAGE_KEY_APIKEY, '') : '';
+    }
+
+    function saveApiKey(key) {
+        const sanitized = key.replace(/\s+/g, '');
+        if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY_APIKEY, sanitized);
+        return sanitized;
+    }
+
+    // =========================================================================
+    // OUTCOME LOGIC (DOM Monitoring)
+    // =========================================================================
+    const RE_CRITICAL = /critical/i;
+    const RE_FAIL     = /fail|bust/i;
+    const RE_SUCCESS  = /success/i;
+
+    function applyOutcome(text) {
+        if (!text) return;
+        const t = text.toLowerCase();
+
+        if (RE_CRITICAL.test(t)) {
+            chain = 0;
+        } else if (RE_FAIL.test(t)) {
+            chain = chain > 0 ? Math.floor(chain / 2) : 0;
+        } else if (RE_SUCCESS.test(t)) {
+            chain++;
+        } else {
+            return;
+        }
+
+        saveChain();
+        render();
+    }
+
+    // =========================================================================
+    // UI ELEMENTS & INJECTION
+    // =========================================================================
+    function injectCSS() {
+        if (document.querySelector('#cct-global-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'cct-global-styles';
+        style.textContent = `
+            #cct-root {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                margin-left: 12px;
+                vertical-align: middle;
+                font-family: inherit;
+                position: relative;
+            }
+
+            #cct-widget {
+                display: inline-flex;
+                align-items: center;
+                gap: 7px;
+                padding: 3px 9px 3px 4px;
+                border-radius: 20px;
+                background: rgba(255,255,255,0.07);
+                border: 1px solid rgba(255,255,255,0.12);
+                cursor: default;
+                user-select: none;
+            }
+
+            #cct-ring-wrap {
+                position: relative;
+                width: 28px;
+                height: 28px;
+                flex-shrink: 0;
+            }
+
+            #cct-ring-wrap svg {
+                transform: rotate(-90deg);
+            }
+
+            #cct-ring-bg {
+                fill: none;
+                stroke: rgba(255,255,255,0.10);
+                stroke-width: 3;
+            }
+
+            #cct-ring-arc {
+                fill: none;
+                stroke-width: 3;
+                stroke-linecap: round;
+                transition: stroke-dashoffset 0.4s ease, stroke 0.4s ease;
+            }
+
+            #cct-ring-label {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: -0.5px;
+                pointer-events: none;
+                line-height: 1;
+            }
+
+            #cct-text {
+                display: flex;
+                flex-direction: column;
+                gap: 0px;
+                line-height: 1.15;
+            }
+
+            #cct-label {
+                font-size: 9px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.07em;
+                opacity: 0.4;
+                color: inherit;
+            }
+
+            #cct-status {
+                font-size: 11px;
+                font-weight: 600;
+                color: inherit;
+                opacity: 0.8;
+            }
+
+            @keyframes cct-flash {
+                0%   { opacity: 1; }
+                40%  { opacity: 0.25; }
+                100% { opacity: 0.8; }
+            }
+
+            #cct-status.cct-flash {
+                animation: cct-flash 0.35s ease;
+            }
+
+            #cct-gear {
+                font-size: 13px;
+                opacity: 0.35;
+                cursor: pointer;
+                line-height: 1;
+                transition: opacity 0.15s;
+                background: none;
+                border: none;
+                color: inherit;
+                padding: 0 2px;
+            }
+
+            #cct-gear:hover { opacity: 0.75; }
+
+            #cct-api-popover {
+                display: none;
+                position: absolute;
+                top: calc(100% + 6px);
+                left: 0;
+                z-index: 9999;
+                padding: 10px 12px;
+                border-radius: 8px;
+                background: #1e1e1e;
+                border: 1px solid rgba(255,255,255,0.15);
+                box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+                white-space: nowrap;
+                flex-direction: column;
+                gap: 8px;
+                font-size: 12px;
+                color: #ccc;
+            }
+
+            #cct-api-popover.cct-open {
+                display: flex;
+            }
+
+            #cct-api-popover label {
+                font-size: 10px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.07em;
+                opacity: 0.5;
+                color: inherit;
+            }
+
+            #cct-api-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+
+            #cct-api-input {
+                width: 170px;
+                padding: 4px 7px;
+                font-size: 12px;
+                border-radius: 5px;
+                border: 1px solid rgba(255,255,255,0.15);
+                background: rgba(255,255,255,0.06);
+                color: inherit;
+                outline: none;
+            }
+
+            #cct-api-input:focus {
+                border-color: rgba(255,255,255,0.4);
+            }
+
+            #cct-api-save {
+                padding: 4px 9px;
+                font-size: 11px;
+                border-radius: 5px;
+                border: 1px solid rgba(255,255,255,0.18);
+                background: rgba(255,255,255,0.08);
+                color: inherit;
+                cursor: pointer;
+                transition: background 0.15s;
+                white-space: nowrap;
+            }
+
+            #cct-api-save:hover { background: rgba(255,255,255,0.16); }
+
+            #cct-api-hint {
+                font-size: 10px;
+                opacity: 0.45;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    const RADIUS = 10;
+    const CIRC   = 2 * Math.PI * RADIUS;
+
+    function chainColor(n) {
+        if (n < 30) return '#00ff66';
+        if (n < 60) return '#ffaa00';
+        return '#ff3344';
+    }
+
+    function statusText(n) {
+        if (n === 0)   return 'No active chain';
+        if (n < 10)    return 'Building…';
+        if (n < 30)    return 'On a roll';
+        if (n < 60)    return 'Hot streak';
+        return 'Unstoppable';
+    }
+
+    function renderWidget() {
+        if (document.querySelector('#cct-root')) return;
+
+        const root = document.querySelector('.crimes-app');
+        if (!root) return;
+
+        const anchor =
+            root.querySelector('[class*=\"heading\"]') ||
+            root.querySelector('[class*=\"appHeader\"]') ||
+            root.querySelector('h4');
+
+        if (!anchor) return;
+
+        const key = getApiKey();
+        const el = document.createElement('span');
+        el.id = 'cct-root';
+
+        el.innerHTML = `
+            <div id="cct-widget">
+                <div id="cct-ring-wrap">
+                    <svg width="28" height="28" viewBox="0 0 28 28">
+                        <circle id="cct-ring-bg"  cx="14" cy="14" r="${RADIUS}"/>
+                        <circle id="cct-ring-arc" cx="14" cy="14" r="${RADIUS}"
+                            stroke-dasharray="${CIRC}"
+                            stroke-dashoffset="${CIRC}"
+                            stroke="#00ff66"/>
+                    </svg>
+                    <div id="cct-ring-label">0</div>
+                </div>
+                <div id="cct-text">
+                    <div id="cct-label">Crime Chain</div>
+                    <div id="cct-status">No active chain</div>
+                </div>
+            </div>
+            ${USE_API ? `
+            <button id="cct-gear" title="API key settings">⚙</button>
+            <div id="cct-api-popover">
+                <label>Public API Key</label>
+                <div id="cct-api-row">
+                    <input id="cct-api-input" type="password" placeholder="your public key"
+                        value="${key}" spellcheck="false" autocomplete="off"/>
+                    <button id="cct-api-save">Save Key</button>
+                </div>
+                <span id="cct-api-hint">${key ? '✓ Running' : 'Enter a key or leave blank for offline session tracking'}</span>
+            </div>` : ''}
+        `;
+
+        anchor.appendChild(el);
+
+        if (USE_API) {
+            const gear     = el.querySelector('#cct-gear');
+            const popover  = el.querySelector('#cct-api-popover');
+
+            gear.addEventListener('click', (e) => {
+                e.stopPropagation();
+                popover.classList.toggle('cct-open');
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!el.contains(e.target)) popover.classList.remove('cct-open');
+            });
+
+            el.querySelector('#cct-api-save').addEventListener('click', async () => {
+                const input = el.querySelector('#cct-api-input');
+                const hint  = el.querySelector('#cct-api-hint');
+                const cleanKey = saveApiKey(input.value);
+
+                if (!cleanKey) {
+                    hint.textContent = 'Using offline session tracker mode';
+                    return;
+                }
+
+                hint.textContent = 'Verifying with Torn...';
+                try {
+                    await verifyPublicAPI(cleanKey);
+                    hint.textContent = '✓ authenticated successfully';
+                } catch (e) {
+                    hint.textContent = 'Using offline session mode (API bypassed)';
+                }
+            });
+        }
+
+        render();
+    }
+
+    function render() {
+        const arc    = document.querySelector('#cct-ring-arc');
+        const label  = document.querySelector('#cct-ring-label');
+        const status = document.querySelector('#cct-status');
+        if (!arc || !label || !status) return;
+
+        const pct    = Math.min(chain / CHAIN_CAP_DISPLAY, 1);
+        const offset = CIRC * (1 - pct);
+        const color  = chainColor(chain);
+
+        arc.style.strokeDashoffset = offset;
+        arc.style.stroke           = color;
+        label.textContent          = chain;
+        label.style.color          = color;
+
+        status.textContent = statusText(chain);
+
+        status.classList.remove('cct-flash');
+        void status.offsetWidth;
+        status.classList.add('cct-flash');
+    }
+
+    // =========================================================================
+    // DOM OBSERVER (Binds to active sub-panels dynamically)
+    // =========================================================================
+    function startDOMObserver() {
+        if (observer) observer.disconnect();
+
+        const root = document.querySelector('.crimes-app');
+        if (!root) return;
+
+        observer = new MutationObserver((mutations) => {
+            if (!document.querySelector('#cct-root')) {
+                renderWidget();
+            }
+
+            for (const m of mutations) {
+                for (const node of m.addedNodes) {
+                    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+                    const targetNode = node.matches('[class*=\"result\"],[class*=\"outcome\"],[class*=\"message\"],[class*=\"notification\"]')
+                        ? node
+                        : node.querySelector('[class*=\"result\"],[class*=\"outcome\"],[class*=\"message\"],[class*=\"notification\"]');
+
+                    if (targetNode) {
+                        applyOutcome(targetNode.textContent);
+                    }
+                }
+            }
+        });
+
+        observer.observe(root, { childList: true, subtree: true });
+    }
+
+    async function verifyPublicAPI(key) {
+        const url = `https://api.torn.com/user/?selections=crimes&key=${key}`;
+        const res  = await fetch(url);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.error);
+        render();
+    }
+
+    // =========================================================================
+    // SPA ROUTING RE-SYNC ENGINE
+    // =========================================================================
+    function runSyncLoop() {
+        renderWidget();
+        startDOMObserver();
+    }
+
+    // =========================================================================
+    // INIT
+    // =========================================================================
+    async function waitForApp(timeout = 15000) {
+        const t = Date.now();
+        while (Date.now() - t < timeout) {
+            const el = document.querySelector('.crimes-app');
+            if (el) return el;
+            await new Promise(r => setTimeout(r, 250));
+        }
+        return null;
+    }
+
+    async function init() {
+        injectCSS();
+
+        const app = await waitForApp();
+        if (!app) return;
+
+        runSyncLoop();
+
+        window.addEventListener('hashchange', () => {
+            setTimeout(runSyncLoop, 150);
+        });
+
+        console.log(`[CCT v4.3.2] Text sizing enhanced.`);
+    }
+
+    init();
+
+})();
