@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.22
+// @version      1.6.23
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,6 +15,11 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.6.23 - Fixed best lap not recording. Two bugs: the split timer was only
+//           started after the first lap boundary (so 1-lap races got nothing
+//           and all races lost the first lap), and the final lap was not
+//           captured when completion hit 100%. Now the timer seeds on the
+//           first valid reading and the finish line is treated as a boundary.
 // v1.6.22 - Added a Best Lap column to both the in-race and lobby log tables.
 //           Lap time is measured with wall-clock splits: each time completion
 //           crosses a full-lap boundary the delta since the previous crossing
@@ -82,7 +87,6 @@ let currentCar      = '';
 // Lap timing state — reset each time the speed loop starts
 let lapCount        = 0;    // how many full laps have been completed this session
 let lastLapSplit    = 0;    // Date.now() when the previous lap boundary was crossed
-let totalLaps       = NaN;  // total laps in the current race
 
 // ─── Interval helpers ──────────────────────────────────────────────────────────
 function maybeClear() {
@@ -93,7 +97,6 @@ function maybeClear() {
         speedInterval   = 0;
         lapCount        = 0;
         lastLapSplit    = 0;
-        totalLaps       = NaN;
     }
 }
 
@@ -399,30 +402,29 @@ function startSpeedLoop() {
         if (isNaN(compl) || isNaN(laps) || isNaN(len)) return;
 
         // ── Lap boundary detection ────────────────────────────────────────────
-        // totalLaps is set once per race start (when lapCount is still 0).
-        if (isNaN(totalLaps) || totalLaps !== laps) {
-            totalLaps = laps;
+        // Seed the split timer on the very first valid reading so lap 1 is
+        // timed from the moment we start observing, not skipped entirely.
+        if (last_compl < 0 && !isNaN(compl)) {
+            lastLapSplit = Date.now();
         }
 
-        // A lap is complete each time compl crosses a multiple of (100 / laps).
-        // We detect this by comparing the integer lap index before and after.
-        // last_compl >= 0 guard ensures we have a valid previous reading.
         if (last_compl >= 0) {
-            const lapSize          = 100 / laps;
-            const prevLapIndex     = Math.floor(last_compl / lapSize);
-            const currLapIndex     = Math.floor(compl      / lapSize);
+            const lapSize      = 100 / laps;
+            const prevLapIndex = Math.floor(last_compl / lapSize);
+            // Clamp so 100% doesn't produce index == laps (out of range)
+            const currLapIndex = Math.min(Math.floor(compl / lapSize), laps - 1);
 
-            // Ignore the wrap-around when compl resets from ~100 back to ~0
-            if (currLapIndex > prevLapIndex && compl > last_compl) {
-                const now = Date.now();
-                if (lastLapSplit > 0) {
-                    // We have a valid prior split — calculate the lap time
-                    const lapMs = now - lastLapSplit;
-                    // Sanity bounds: ignore anything under 5 s or over 30 min
-                    if (lapMs >= 5000 && lapMs <= 1800000) {
-                        updateRecord(currentTrack, 0, currentCar, lapMs);
-                        if ($('#rslogPanel').is(':visible')) renderLogTable();
-                    }
+            // Also treat race finish (compl >= 100) as the final boundary.
+            const raceFinished = (compl >= 100 && last_compl < 100);
+            const lapCrossed   = (currLapIndex > prevLapIndex && compl > last_compl);
+
+            if (lapCrossed || raceFinished) {
+                const now   = Date.now();
+                const lapMs = now - lastLapSplit;
+                // Sanity bounds: ignore anything under 5 s or over 30 min
+                if (lastLapSplit > 0 && lapMs >= 5000 && lapMs <= 1800000) {
+                    updateRecord(currentTrack, 0, currentCar, lapMs);
+                    if ($('#rslogPanel').is(':visible')) renderLogTable();
                 }
                 lastLapSplit = now;
                 lapCount++;
