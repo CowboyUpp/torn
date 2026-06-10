@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.23
+// @version      1.6.23-debug
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -399,6 +399,10 @@ function startSpeedLoop() {
         const foundCar = parseCarImg();
         if (foundCar) currentCar = foundCar;
 
+        // ── DEBUG (remove after diagnosis) ────────────────────────────────────
+        console.log('[RSLog]', { titleText, cleanTitle, lapString, laps, len, compl, last_compl, lastLapSplit, lapCount });
+        // ─────────────────────────────────────────────────────────────────────
+
         if (isNaN(compl) || isNaN(laps) || isNaN(len)) return;
 
         // ── Lap boundary detection ────────────────────────────────────────────
@@ -421,6 +425,7 @@ function startSpeedLoop() {
             if (lapCrossed || raceFinished) {
                 const now   = Date.now();
                 const lapMs = now - lastLapSplit;
+                console.log('[RSLog] LAP BOUNDARY', { lapCrossed, raceFinished, lapMs, lastLapSplit });
                 // Sanity bounds: ignore anything under 5 s or over 30 min
                 if (lastLapSplit > 0 && lapMs >= 5000 && lapMs <= 1800000) {
                     updateRecord(currentTrack, 0, currentCar, lapMs);
