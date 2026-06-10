@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.25
+// @version      1.6.27
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,6 +15,13 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.6.27 - Fixed duplicate entries in the log. The speed loop and the best
+//           lap parser were deriving the track name differently — the speed
+//           loop correctly stripped the lap count, the AJAX parser left it in
+//           (e.g. "Speedway - 1 lap" vs "Speedway"). Both now use a shared
+//           normalizeTrackName() that handles variable whitespace around the
+//           dash. A one-time migration merges any existing split entries.
+// v1.6.26 - Fixed date not updating when a new best lap is set.
 // v1.6.25 - Car images in the log table now show the proper Torn car name as a
 //           tooltip (hover over the image). Lookup table covers all 50 racing
 //           cars, sourced from wiki.torn.com/wiki/Cars. No API key needed.
@@ -192,6 +199,7 @@ function updateBestLap(trackName, carImg, bestLapMs) {
     if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, date: new Date().toISOString().split('T')[0] };
     if (!log[key].bestLapMs || bestLapMs < log[key].bestLapMs) {
         log[key].bestLapMs = bestLapMs;
+        log[key].date = new Date().toISOString().split('T')[0];
         saveSpeedLog(log);
     }
 }
@@ -203,6 +211,47 @@ function formatLapTime(ms) {
     const s   = Math.floor((ms % 60000) / 1000);
     const dec = Math.floor((ms % 1000) / 100); // tenths
     return m + 'm ' + String(s).padStart(2, '0') + '.' + dec + 's';
+}
+
+// ─── Track name normalisation ─────────────────────────────────────────────────
+// The race title looks like "Speedway                            - 100 laps - Race started"
+// The separator around the lap count uses variable whitespace, so we can't
+// reliably split on ' - '. Instead strip everything from the last occurrence
+// of whitespace + digits + " lap" onward, then trim.
+function normalizeTrackName(titleText) {
+    return (titleText || '')
+        .replace(/\s*-\s*(Race started|Race finished|Waiting.*|Cancelled.*)$/i, '')
+        .replace(/\s*-\s*\d+\s+laps?\s*$/i, '')
+        .trim();
+}
+
+// ─── Storage migration ─────────────────────────────────────────────────────────
+// Old entries may have track names like "Speedway                            - 1 lap".
+// On first run after this version we normalise all stored keys.
+function migrateSpeedLog() {
+    const log     = getSpeedLog();
+    const migrated = {};
+    let changed   = false;
+    for (const [key, data] of Object.entries(log)) {
+        const [rawTrack, carId] = key.split('|');
+        const cleanTrack = normalizeTrackName(rawTrack);
+        const newKey     = cleanTrack + '|' + (carId || '');
+        if (newKey !== key) changed = true;
+        if (!migrated[newKey]) {
+            migrated[newKey] = Object.assign({}, data, { track: cleanTrack });
+        } else {
+            // Merge: keep best of each field
+            if ((data.topSpeed || 0) > (migrated[newKey].topSpeed || 0)) {
+                migrated[newKey].topSpeed = data.topSpeed;
+            }
+            if (data.bestLapMs && (!migrated[newKey].bestLapMs || data.bestLapMs < migrated[newKey].bestLapMs)) {
+                migrated[newKey].bestLapMs = data.bestLapMs;
+            }
+            migrated[newKey].track = cleanTrack;
+        }
+    }
+    if (changed) saveSpeedLog(migrated);
+    return migrated;
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────────
@@ -433,6 +482,7 @@ function launchFirework() {
 
 function parseBestLapFromResponse(data) {
     try {
+        const status = data && data.timeData && data.timeData.status;
         if (!data || !data.timeData || data.timeData.status < 3) return;
         const cars         = data.raceData && data.raceData.cars;
         const trackData    = data.raceData && data.raceData.trackData;
@@ -444,11 +494,9 @@ function parseBestLapFromResponse(data) {
         if (!encoded) return;
 
         const trackIntervals = trackData.intervals.length;
-        // atob is equivalent to the Lugburz decode64 for clean base64
         const decoded  = atob(encoded);
         const intervals = decoded.split(',').map(Number);
 
-        // Need at least one complete lap worth of intervals
         if (intervals.length < trackIntervals) return;
 
         const completedLaps = Math.floor(intervals.length / trackIntervals);
@@ -460,18 +508,12 @@ function parseBestLapFromResponse(data) {
             }
             if (lapTime > 0) bestLapSec = Math.min(bestLapSec, lapTime);
         }
-
         if (bestLapSec === Infinity) return;
         const bestLapMs = Math.round(bestLapSec * 1000);
 
-        // currentTrack / currentCar may not be set yet if the speed loop
-        // hasn't ticked. Read them fresh from the DOM as fallback.
         const trackEl   = document.querySelector('div.title-black.t-overflow');
         const trackText = trackEl ? trackEl.textContent.trim() : '';
-        const clean     = trackText.replace(/\s*-\s*(Race started|Race finished|Waiting.*|Cancelled.*)$/i, '').trim();
-        const parts     = clean.split(' - ');
-        parts.pop(); // remove lap count
-        const trackName = parts.join(' - ').trim() || currentTrack;
+        const trackName = normalizeTrackName(trackText) || currentTrack;
         const carImg    = parseCarImg() || currentCar;
         if (!trackName || !carImg) return;
 
@@ -479,7 +521,6 @@ function parseBestLapFromResponse(data) {
         if ($('#rslogPanel').is(':visible')) renderLogTable();
         if ($('#rslogLobbyPanel').is(':visible')) renderLobbyTable();
     } catch (e) {
-        // fail silently — best lap is a nice-to-have
     }
 }
 
@@ -501,11 +542,10 @@ function startSpeedLoop() {
 
         const titleEl    = document.querySelector('div.title-black.t-overflow');
         const titleText  = titleEl ? titleEl.textContent.trim() : '';
-        const cleanTitle = titleText.replace(/\s*-\s*(Race started|Race finished|Waiting.*|Cancelled.*)$/i, '').trim();
-        const parts      = cleanTitle.split(' - ');
-        const lapString  = parts.pop();
-        const laps       = parseFloat(lapString);
-        currentTrack     = parts.join(' - ').trim();
+        // Extract lap count from title before stripping it
+        const lapMatch   = titleText.match(/-(\s*)(\d+)\s+laps?/i);
+        const laps       = lapMatch ? parseFloat(lapMatch[2]) : NaN;
+        currentTrack     = normalizeTrackName(titleText);
         const len        = parseFloat(trackInfo.attr('data-length'));
         const compl      = getCompletion();
 
@@ -628,6 +668,7 @@ function watchForRaceStart() {
 }
 
 function init() {
+    migrateSpeedLog();
     if (document.getElementById('racingdetails') && !document.getElementById('rslogWrapper')) {
         injectWidget();
         startSpeedLoop();
