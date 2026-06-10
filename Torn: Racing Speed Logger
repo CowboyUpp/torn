@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.24
+// @version      1.6.25
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,6 +15,9 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.6.25 - Car images in the log table now show the proper Torn car name as a
+//           tooltip (hover over the image). Lookup table covers all 50 racing
+//           cars, sourced from wiki.torn.com/wiki/Cars. No API key needed.
 // v1.6.24 - Completely reworked best lap detection. Wall-clock polling was
 //           fundamentally unreliable. The game's own AJAX response already
 //           contains all lap interval data in encoded form (same source the
@@ -106,6 +109,64 @@ function saveSpeedLog(log) {
 function carKey(carImg) {
     const m = (carImg || '').match(/items\/([0-9]+)\//);
     return m ? m[1] : 'unknown';
+}
+
+// Torn car names keyed by item ID — sourced from wiki.torn.com/wiki/Cars
+const CAR_NAMES = {
+    '77':  'Tabata RM2',
+    '78':  'Edomondo NSX',
+    '79':  'Echo Quadrato',
+    '80':  'Bavaria M5',
+    '81':  'Bavaria Z8',
+    '82':  'Chevalier CZ06',
+    '83':  'Dart Rampager',
+    '84':  'Knight Firebrand',
+    '85':  'Volt GT',
+    '86':  'Invader H3',
+    '87':  'Echo S4',
+    '88':  'Edomondo IR',
+    '89':  'Edomondo ACD',
+    '90':  'Edomondo Localé',
+    '91':  'Verpestung Insecta',
+    '92':  'Chevalier CVR',
+    '93':  'Volt MNG',
+    '94':  'Trident',
+    '95':  'Oceania SS',
+    '494': 'Limoen Saxon',
+    '495': 'Nano Pioneer',
+    '496': 'Vita Bravo',
+    '497': 'Zaibatsu Macro',
+    '498': 'Çagoutte 10-6',
+    '499': 'Papani Colé',
+    '500': 'Bedford Racer',
+    '501': 'Stålhög 860',
+    '502': 'Alpha Milano 156',
+    '503': 'Bavaria X5',
+    '504': 'Coche Basurero',
+    '505': 'Bedford Nova',
+    '506': 'Verpestung Sport',
+    '507': 'Echo S3',
+    '508': 'Volt RS',
+    '509': 'Edomondo S2',
+    '510': 'Nano Cavalier',
+    '511': 'Colina Tanprice',
+    '512': 'Cosmos EX',
+    '513': 'Yotsuhada EVX',
+    '514': 'Sturmfahrt 111',
+    '515': 'Tsubasa Impressor',
+    '516': 'Wington GGU',
+    '517': 'Weston Marlin 177',
+    '518': 'Echo R8',
+    '519': 'Stormatti Casteon',
+    '520': 'Lolo 458',
+    '521': 'Lambrini Torobravo',
+    '522': 'Veloria LFA',
+    '523': 'Mercia SLR',
+    '524': 'Zaibatsu GT-R',
+};
+
+function carName(carImg) {
+    return CAR_NAMES[carKey(carImg)] || null;
 }
 
 // Returns true if a new top speed was set.
@@ -254,7 +315,7 @@ function renderLogTable() {
         tbody.append(
             '<tr class="' + (isCurrent ? 'rslogCurrentTrack' : '') + '">' +
             '<td>' + escapeHtml(trackName) + '</td>' +
-            '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
+            '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="' + (carName(data.car) || 'Unknown car') + '">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
             '<td class="rslogBestLap">' + formatLapTime(data.bestLapMs) + '</td>' +
             '<td>' + data.date + '</td>' +
@@ -531,7 +592,7 @@ function renderLobbyTable() {
         tbody.append(
             '<tr>' +
             '<td>' + escapeHtml(trackName) + '</td>' +
-            '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
+            '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="' + (carName(data.car) || 'Unknown car') + '">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
             '<td class="rslogBestLap">' + formatLapTime(data.bestLapMs) + '</td>' +
             '<td>' + data.date + '</td>' +
