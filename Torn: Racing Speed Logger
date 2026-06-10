@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.23-debug
+// @version      1.6.24
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,18 +15,13 @@
 // ==/UserScript==
 //
 // Changelog:
-// v1.6.23 - Fixed best lap not recording. Two bugs: the split timer was only
-//           started after the first lap boundary (so 1-lap races got nothing
-//           and all races lost the first lap), and the final lap was not
-//           captured when completion hit 100%. Now the timer seeds on the
-//           first valid reading and the finish line is treated as a boundary.
-// v1.6.22 - Added a Best Lap column to both the in-race and lobby log tables.
-//           Lap time is measured with wall-clock splits: each time completion
-//           crosses a full-lap boundary the delta since the previous crossing
-//           is recorded. The best (shortest) time for the current track+car
-//           combo is saved alongside the top speed. Resolution is ±1 s because
-//           the poller runs every second. The very first lap boundary after
-//           page load is skipped (no prior split to diff against).
+// v1.6.24 - Completely reworked best lap detection. Wall-clock polling was
+//           fundamentally unreliable. The game's own AJAX response already
+//           contains all lap interval data in encoded form (same source the
+//           Lugburz Racing Enhancements script uses). We now parse that
+//           response directly: decode the base64 interval array, sum each
+//           lap's intervals, and take the minimum. Accurate to the millisecond
+//           and available immediately when the race starts.
 // v1.6.21 - Added a firework burst when you hit a new record. Also made the
 //           ★ NEW RECORD text much bigger so you actually notice it.
 // v1.6.19 - Each car now gets its own record per track, so your Colina and
@@ -68,6 +63,11 @@ function tornAjax(callback) {
     $(document).ajaxComplete((event, xhr, settings) => {
         if (xhr.readyState > 3 && xhr.status === 200) {
             if (settings.url && settings.url.includes('sid=racing')) {
+                // Parse best lap from the raw response before calling init
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    parseBestLapFromResponse(data);
+                } catch (e) { /* not valid JSON or race data not present */ }
                 callback();
             }
         }
@@ -84,10 +84,6 @@ let sessionTopSpeed = 0;
 let currentTrack    = '';
 let currentCar      = '';
 
-// Lap timing state — reset each time the speed loop starts
-let lapCount        = 0;    // how many full laps have been completed this session
-let lastLapSplit    = 0;    // Date.now() when the previous lap boundary was crossed
-
 // ─── Interval helpers ──────────────────────────────────────────────────────────
 function maybeClear() {
     if (speedInterval !== 0) {
@@ -95,8 +91,6 @@ function maybeClear() {
         last_compl      = -1.0;
         sessionTopSpeed = 0;
         speedInterval   = 0;
-        lapCount        = 0;
-        lastLapSplit    = 0;
     }
 }
 
@@ -115,46 +109,39 @@ function carKey(carImg) {
 }
 
 // Returns true if a new top speed was set.
-function updateRecord(trackName, speed, carImg, bestLapMs) {
-    const log      = getSpeedLog();
-    const rounded  = parseFloat(speed.toFixed(2));
-    const key      = trackName + '|' + carKey(carImg);
-    const existing = log[key];
-
-    let changed = false;
-
-    if (!existing || rounded > existing.topSpeed) {
-        if (!existing) {
-            log[key] = { track: trackName, topSpeed: rounded, car: carImg || '', date: new Date().toISOString().split('T')[0] };
-        } else {
-            log[key].topSpeed = rounded;
-            log[key].date     = new Date().toISOString().split('T')[0];
-        }
-        changed = true;
+function updateTopSpeed(trackName, speed, carImg) {
+    const log     = getSpeedLog();
+    const rounded = parseFloat(speed.toFixed(2));
+    const key     = trackName + '|' + carKey(carImg);
+    if (!log[key] || rounded > log[key].topSpeed) {
+        if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0 };
+        log[key].topSpeed = rounded;
+        log[key].date     = new Date().toISOString().split('T')[0];
+        saveSpeedLog(log);
+        return true;
     }
+    return false;
+}
 
-    // Update best lap independently — a faster lap is always saved regardless
-    // of whether the top speed improved.
-    if (bestLapMs > 0) {
-        if (!log[key]) {
-            log[key] = { track: trackName, topSpeed: rounded, car: carImg || '', date: new Date().toISOString().split('T')[0] };
-        }
-        if (!existing || !existing.bestLapMs || bestLapMs < existing.bestLapMs) {
-            log[key].bestLapMs = bestLapMs;
-        }
+// Saves best lap if it improves on the stored record. No return value needed.
+function updateBestLap(trackName, carImg, bestLapMs) {
+    if (!bestLapMs || bestLapMs <= 0) return;
+    const log = getSpeedLog();
+    const key = trackName + '|' + carKey(carImg);
+    if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, date: new Date().toISOString().split('T')[0] };
+    if (!log[key].bestLapMs || bestLapMs < log[key].bestLapMs) {
+        log[key].bestLapMs = bestLapMs;
+        saveSpeedLog(log);
     }
-
-    saveSpeedLog(log);
-    return changed;
 }
 
 // ─── Lap time formatting ───────────────────────────────────────────────────────
 function formatLapTime(ms) {
     if (!ms || ms <= 0) return '–';
-    const totalSec = Math.round(ms / 1000);
-    const m = Math.floor(totalSec / 60);
-    const s = totalSec % 60;
-    return m + 'm ' + String(s).padStart(2, '0') + 's';
+    const m   = Math.floor(ms / 60000);
+    const s   = Math.floor((ms % 60000) / 1000);
+    const dec = Math.floor((ms % 1000) / 100); // tenths
+    return m + 'm ' + String(s).padStart(2, '0') + '.' + dec + 's';
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────────
@@ -370,6 +357,71 @@ function launchFirework() {
     requestAnimationFrame(draw);
 }
 
+// ─── Best lap from AJAX response ──────────────────────────────────────────────
+// Torn encodes each driver's full interval data as a base64 string in the
+// racing AJAX response. We decode it, sum per-lap intervals, and take the
+// minimum — exactly the same approach as the Lugburz Racing Enhancements
+// script, which is where this data source was identified.
+//
+// data.raceData.cars        — { playerName: base64string, ... }
+// data.raceData.trackData.intervals — array of interval definitions (length = segments per lap)
+// data.laps                 — total laps in the race
+// data.user.playername      — the current player's name
+// data.timeData.status      — 3+ means race is running or finished (data available)
+// Interval values are in seconds; we convert to ms for storage.
+
+function parseBestLapFromResponse(data) {
+    try {
+        if (!data || !data.timeData || data.timeData.status < 3) return;
+        const cars         = data.raceData && data.raceData.cars;
+        const trackData    = data.raceData && data.raceData.trackData;
+        const playerName   = data.user && data.user.playername;
+        const totalLaps    = data.laps;
+        if (!cars || !trackData || !playerName || !totalLaps) return;
+
+        const encoded = cars[playerName];
+        if (!encoded) return;
+
+        const trackIntervals = trackData.intervals.length;
+        // atob is equivalent to the Lugburz decode64 for clean base64
+        const decoded  = atob(encoded);
+        const intervals = decoded.split(',').map(Number);
+
+        // Need at least one complete lap worth of intervals
+        if (intervals.length < trackIntervals) return;
+
+        const completedLaps = Math.floor(intervals.length / trackIntervals);
+        let bestLapSec = Infinity;
+        for (let i = 0; i < completedLaps; i++) {
+            let lapTime = 0;
+            for (let j = 0; j < trackIntervals; j++) {
+                lapTime += intervals[i * trackIntervals + j];
+            }
+            if (lapTime > 0) bestLapSec = Math.min(bestLapSec, lapTime);
+        }
+
+        if (bestLapSec === Infinity) return;
+        const bestLapMs = Math.round(bestLapSec * 1000);
+
+        // currentTrack / currentCar may not be set yet if the speed loop
+        // hasn't ticked. Read them fresh from the DOM as fallback.
+        const trackEl   = document.querySelector('div.title-black.t-overflow');
+        const trackText = trackEl ? trackEl.textContent.trim() : '';
+        const clean     = trackText.replace(/\s*-\s*(Race started|Race finished|Waiting.*|Cancelled.*)$/i, '').trim();
+        const parts     = clean.split(' - ');
+        parts.pop(); // remove lap count
+        const trackName = parts.join(' - ').trim() || currentTrack;
+        const carImg    = parseCarImg() || currentCar;
+        if (!trackName || !carImg) return;
+
+        updateBestLap(trackName, carImg, bestLapMs);
+        if ($('#rslogPanel').is(':visible')) renderLogTable();
+        if ($('#rslogLobbyPanel').is(':visible')) renderLobbyTable();
+    } catch (e) {
+        // fail silently — best lap is a nice-to-have
+    }
+}
+
 // ─── Speed polling ─────────────────────────────────────────────────────────────
 function getCompletion() {
     const el = document.querySelector('li.pd-completion');
@@ -399,42 +451,7 @@ function startSpeedLoop() {
         const foundCar = parseCarImg();
         if (foundCar) currentCar = foundCar;
 
-        // ── DEBUG (remove after diagnosis) ────────────────────────────────────
-        console.log('[RSLog]', { titleText, cleanTitle, lapString, laps, len, compl, last_compl, lastLapSplit, lapCount });
-        // ─────────────────────────────────────────────────────────────────────
-
         if (isNaN(compl) || isNaN(laps) || isNaN(len)) return;
-
-        // ── Lap boundary detection ────────────────────────────────────────────
-        // Seed the split timer on the very first valid reading so lap 1 is
-        // timed from the moment we start observing, not skipped entirely.
-        if (last_compl < 0 && !isNaN(compl)) {
-            lastLapSplit = Date.now();
-        }
-
-        if (last_compl >= 0) {
-            const lapSize      = 100 / laps;
-            const prevLapIndex = Math.floor(last_compl / lapSize);
-            // Clamp so 100% doesn't produce index == laps (out of range)
-            const currLapIndex = Math.min(Math.floor(compl / lapSize), laps - 1);
-
-            // Also treat race finish (compl >= 100) as the final boundary.
-            const raceFinished = (compl >= 100 && last_compl < 100);
-            const lapCrossed   = (currLapIndex > prevLapIndex && compl > last_compl);
-
-            if (lapCrossed || raceFinished) {
-                const now   = Date.now();
-                const lapMs = now - lastLapSplit;
-                console.log('[RSLog] LAP BOUNDARY', { lapCrossed, raceFinished, lapMs, lastLapSplit });
-                // Sanity bounds: ignore anything under 5 s or over 30 min
-                if (lastLapSplit > 0 && lapMs >= 5000 && lapMs <= 1800000) {
-                    updateRecord(currentTrack, 0, currentCar, lapMs);
-                    if ($('#rslogPanel').is(':visible')) renderLogTable();
-                }
-                lastLapSplit = now;
-                lapCount++;
-            }
-        }
 
         // ── Speed calculation ─────────────────────────────────────────────────
         if (last_compl >= 0) {
@@ -448,7 +465,7 @@ function startSpeedLoop() {
                     $('#rslogSessionTopVal').text(speed.toFixed(2));
                 }
 
-                if (updateRecord(currentTrack, speed, currentCar, 0)) {
+                if (updateTopSpeed(currentTrack, speed, currentCar)) {
                     $('#rslogNewRecord').stop(true, true).show().delay(2000).fadeOut(500);
                     launchFirework();
                     if ($('#rslogPanel').is(':visible')) renderLogTable();
