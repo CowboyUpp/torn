@@ -9,7 +9,7 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @grant        unsafeWindow
-// lizense       MIT
+// @license      MIT
 // ==/UserScript==
 
 'use strict';
