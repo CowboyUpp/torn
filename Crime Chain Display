@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.0.0
+// @version      4.4.0
 // @description  Tracks your crime chain live across all Crimes 2.0 sub-menus.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -10,13 +10,22 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      api.torn.com
+// @downloadURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.user.js
+// @updateURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.meta.js
 // ==/UserScript==
 
 // =============================================================================
 // CHANGELOG
 // =============================================================================
+// 4.4.0 — Light / Dark Mode Toggle
+//   - Added ☀️/🌙 theme toggle button next to the gear icon.
+//   - Dark mode: existing neon palette preserved (#00ff66 / #ffaa00 / #ff3344).
+//   - Light mode: readable non-neon palette (#16a34a / #d97706 / #dc2626).
+//   - Widget surface, popover, text, and ring track adapt to the active theme.
+//   - Theme persisted via GM_setValue (key: cct_theme_v4).
+// -----------------------------------------------------------------------------
 // 4.3.2 — UI Text Adjustment
-//   - Increased font size of the inner-ring chain count from 10px to 12px for clarity.
+//   - Increased font size of the inner-ring chain count from 10px to 12px.
 //   - Adjusted positioning slightly to keep alignment precise.
 // =============================================================================
 
@@ -28,14 +37,16 @@
     // =========================================================================
     const STORAGE_KEY_CHAIN  = 'cct_chain_v4';
     const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
+    const STORAGE_KEY_THEME  = 'cct_theme_v4';
     const USE_API            = true;
     const CHAIN_CAP_DISPLAY  = 100;
 
     // =========================================================================
     // STATE
     // =========================================================================
-    let chain      = parseInt(GM_getValue(STORAGE_KEY_CHAIN, '0'), 10) || 0;
-    let observer   = null;
+    let chain     = parseInt(GM_getValue(STORAGE_KEY_CHAIN, '0'), 10) || 0;
+    let isDark    = GM_getValue(STORAGE_KEY_THEME, 'dark') !== 'light';
+    let observer  = null;
 
     // =========================================================================
     // STORAGE
@@ -54,6 +65,62 @@
         return sanitized;
     }
 
+    function saveTheme() {
+        if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY_THEME, isDark ? 'dark' : 'light');
+    }
+
+    // =========================================================================
+    // THEME
+    // =========================================================================
+    // Dark: neon palette
+    // Light: muted but clearly readable equivalents at full opacity on white
+    const THEME = {
+        dark: {
+            widgetBg:      'rgba(255,255,255,0.07)',
+            widgetBorder:  'rgba(255,255,255,0.12)',
+            ringTrack:     'rgba(255,255,255,0.10)',
+            popoverBg:     '#1e1e1e',
+            popoverBorder: 'rgba(255,255,255,0.15)',
+            popoverColor:  '#ccc',
+            inputBg:       'rgba(255,255,255,0.06)',
+            inputBorder:   'rgba(255,255,255,0.15)',
+            inputFocus:    'rgba(255,255,255,0.4)',
+            saveBg:        'rgba(255,255,255,0.08)',
+            saveBorder:    'rgba(255,255,255,0.18)',
+            saveBgHover:   'rgba(255,255,255,0.16)',
+            labelOpacity:  '0.4',
+            statusOpacity: '0.8',
+            gearOpacity:   '0.35',
+            gearHover:     '0.75',
+            chainLow:      '#00ff66',   // neon green  < 30
+            chainMid:      '#ffaa00',   // neon amber  30–59
+            chainHigh:     '#ff3344',   // neon red    ≥ 60
+        },
+        light: {
+            widgetBg:      'rgba(0,0,0,0.05)',
+            widgetBorder:  'rgba(0,0,0,0.14)',
+            ringTrack:     'rgba(0,0,0,0.12)',
+            popoverBg:     '#ffffff',
+            popoverBorder: 'rgba(0,0,0,0.15)',
+            popoverColor:  '#222',
+            inputBg:       'rgba(0,0,0,0.04)',
+            inputBorder:   'rgba(0,0,0,0.18)',
+            inputFocus:    'rgba(0,0,0,0.45)',
+            saveBg:        'rgba(0,0,0,0.06)',
+            saveBorder:    'rgba(0,0,0,0.18)',
+            saveBgHover:   'rgba(0,0,0,0.13)',
+            labelOpacity:  '0.45',
+            statusOpacity: '1',
+            gearOpacity:   '0.4',
+            gearHover:     '0.8',
+            chainLow:      '#16a34a',   // green-700   < 30
+            chainMid:      '#d97706',   // amber-600   30–59
+            chainHigh:     '#dc2626',   // red-600     ≥ 60
+        },
+    };
+
+    function t() { return isDark ? THEME.dark : THEME.light; }
+
     // =========================================================================
     // OUTCOME LOGIC (DOM Monitoring)
     // =========================================================================
@@ -63,13 +130,13 @@
 
     function applyOutcome(text) {
         if (!text) return;
-        const t = text.toLowerCase();
+        const tx = text.toLowerCase();
 
-        if (RE_CRITICAL.test(t)) {
+        if (RE_CRITICAL.test(tx)) {
             chain = 0;
-        } else if (RE_FAIL.test(t)) {
+        } else if (RE_FAIL.test(tx)) {
             chain = chain > 0 ? Math.floor(chain / 2) : 0;
-        } else if (RE_SUCCESS.test(t)) {
+        } else if (RE_SUCCESS.test(tx)) {
             chain++;
         } else {
             return;
@@ -80,7 +147,7 @@
     }
 
     // =========================================================================
-    // UI ELEMENTS & INJECTION
+    // CSS
     // =========================================================================
     function injectCSS() {
         if (document.querySelector('#cct-global-styles')) return;
@@ -103,10 +170,9 @@
                 gap: 7px;
                 padding: 3px 9px 3px 4px;
                 border-radius: 20px;
-                background: rgba(255,255,255,0.07);
-                border: 1px solid rgba(255,255,255,0.12);
                 cursor: default;
                 user-select: none;
+                /* surface set dynamically via applyTheme() */
             }
 
             #cct-ring-wrap {
@@ -122,8 +188,8 @@
 
             #cct-ring-bg {
                 fill: none;
-                stroke: rgba(255,255,255,0.10);
                 stroke-width: 3;
+                /* stroke set dynamically */
             }
 
             #cct-ring-arc {
@@ -158,7 +224,6 @@
                 font-weight: 600;
                 text-transform: uppercase;
                 letter-spacing: 0.07em;
-                opacity: 0.4;
                 color: inherit;
             }
 
@@ -166,32 +231,30 @@
                 font-size: 11px;
                 font-weight: 600;
                 color: inherit;
-                opacity: 0.8;
             }
 
             @keyframes cct-flash {
                 0%   { opacity: 1; }
                 40%  { opacity: 0.25; }
-                100% { opacity: 0.8; }
+                100% { opacity: 1; }
             }
 
             #cct-status.cct-flash {
                 animation: cct-flash 0.35s ease;
             }
 
-            #cct-gear {
+            /* Gear + Theme toggle share the same base style */
+            .cct-icon-btn {
                 font-size: 13px;
-                opacity: 0.35;
                 cursor: pointer;
                 line-height: 1;
                 transition: opacity 0.15s;
                 background: none;
                 border: none;
                 color: inherit;
-                padding: 0 2px;
+                padding: 2px 4px;
+                border-radius: 4px;
             }
-
-            #cct-gear:hover { opacity: 0.75; }
 
             #cct-api-popover {
                 display: none;
@@ -201,14 +264,11 @@
                 z-index: 9999;
                 padding: 10px 12px;
                 border-radius: 8px;
-                background: #1e1e1e;
-                border: 1px solid rgba(255,255,255,0.15);
                 box-shadow: 0 6px 20px rgba(0,0,0,0.5);
                 white-space: nowrap;
                 flex-direction: column;
                 gap: 8px;
                 font-size: 12px;
-                color: #ccc;
             }
 
             #cct-api-popover.cct-open {
@@ -235,29 +295,17 @@
                 padding: 4px 7px;
                 font-size: 12px;
                 border-radius: 5px;
-                border: 1px solid rgba(255,255,255,0.15);
-                background: rgba(255,255,255,0.06);
-                color: inherit;
                 outline: none;
-            }
-
-            #cct-api-input:focus {
-                border-color: rgba(255,255,255,0.4);
             }
 
             #cct-api-save {
                 padding: 4px 9px;
                 font-size: 11px;
                 border-radius: 5px;
-                border: 1px solid rgba(255,255,255,0.18);
-                background: rgba(255,255,255,0.08);
-                color: inherit;
                 cursor: pointer;
                 transition: background 0.15s;
                 white-space: nowrap;
             }
-
-            #cct-api-save:hover { background: rgba(255,255,255,0.16); }
 
             #cct-api-hint {
                 font-size: 10px;
@@ -267,20 +315,91 @@
         document.head.appendChild(style);
     }
 
+    // =========================================================================
+    // THEME APPLICATION (updates live CSS on existing DOM)
+    // =========================================================================
+    function applyTheme() {
+        const th = t();
+
+        // Widget surface
+        const widget = document.querySelector('#cct-widget');
+        if (widget) {
+            widget.style.background = th.widgetBg;
+            widget.style.border     = `1px solid ${th.widgetBorder}`;
+        }
+
+        // Ring track
+        const ringBg = document.querySelector('#cct-ring-bg');
+        if (ringBg) ringBg.style.stroke = th.ringTrack;
+
+        // Label / status opacity
+        const lbl = document.querySelector('#cct-label');
+        if (lbl) lbl.style.opacity = th.labelOpacity;
+
+        const status = document.querySelector('#cct-status');
+        if (status) status.style.opacity = th.statusOpacity;
+
+        // Popover
+        const popover = document.querySelector('#cct-api-popover');
+        if (popover) {
+            popover.style.background   = th.popoverBg;
+            popover.style.border       = `1px solid ${th.popoverBorder}`;
+            popover.style.color        = th.popoverColor;
+        }
+
+        // Input
+        const input = document.querySelector('#cct-api-input');
+        if (input) {
+            input.style.background = th.inputBg;
+            input.style.border     = `1px solid ${th.inputBorder}`;
+            input.style.color      = th.popoverColor;
+            input.onfocus = () => { input.style.borderColor = th.inputFocus; };
+            input.onblur  = () => { input.style.borderColor = th.inputBorder; };
+        }
+
+        // Save button
+        const save = document.querySelector('#cct-api-save');
+        if (save) {
+            save.style.background = th.saveBg;
+            save.style.border     = `1px solid ${th.saveBorder}`;
+            save.style.color      = th.popoverColor;
+            save.onmouseenter = () => { save.style.background = th.saveBgHover; };
+            save.onmouseleave = () => { save.style.background = th.saveBg; };
+        }
+
+        // Icon buttons (gear + theme toggle)
+        document.querySelectorAll('.cct-icon-btn').forEach(btn => {
+            btn.style.opacity = th.gearOpacity;
+            btn.onmouseenter = () => { btn.style.opacity = th.gearHover; };
+            btn.onmouseleave = () => { btn.style.opacity = th.gearOpacity; };
+        });
+
+        // Theme toggle emoji
+        const toggle = document.querySelector('#cct-theme-toggle');
+        if (toggle) toggle.textContent = isDark ? '☀️' : '🌙';
+
+        // Re-render arc + label color with new palette
+        render();
+    }
+
+    // =========================================================================
+    // WIDGET CREATION
+    // =========================================================================
     const RADIUS = 10;
     const CIRC   = 2 * Math.PI * RADIUS;
 
     function chainColor(n) {
-        if (n < 30) return '#00ff66';
-        if (n < 60) return '#ffaa00';
-        return '#ff3344';
+        const th = t();
+        if (n < 30) return th.chainLow;
+        if (n < 60) return th.chainMid;
+        return th.chainHigh;
     }
 
     function statusText(n) {
-        if (n === 0)   return 'No active chain';
-        if (n < 10)    return 'Building…';
-        if (n < 30)    return 'On a roll';
-        if (n < 60)    return 'Hot streak';
+        if (n === 0)  return 'No active chain';
+        if (n < 10)   return 'Building…';
+        if (n < 30)   return 'On a roll';
+        if (n < 60)   return 'Hot streak';
         return 'Unstoppable';
     }
 
@@ -291,14 +410,14 @@
         if (!root) return;
 
         const anchor =
-            root.querySelector('[class*=\"heading\"]') ||
-            root.querySelector('[class*=\"appHeader\"]') ||
+            root.querySelector('[class*="heading"]') ||
+            root.querySelector('[class*="appHeader"]') ||
             root.querySelector('h4');
 
         if (!anchor) return;
 
         const key = getApiKey();
-        const el = document.createElement('span');
+        const el  = document.createElement('span');
         el.id = 'cct-root';
 
         el.innerHTML = `
@@ -318,10 +437,12 @@
                     <div id="cct-status">No active chain</div>
                 </div>
             </div>
+            <button id="cct-theme-toggle" class="cct-icon-btn"
+                title="Toggle light / dark mode">${isDark ? '☀️' : '🌙'}</button>
             ${USE_API ? `
-            <button id="cct-gear" title="API key settings">⚙</button>
+            <button id="cct-gear" class="cct-icon-btn" title="API key settings">⚙</button>
             <div id="cct-api-popover">
-                <label>Public API Key</label>
+                <label>Minimum Access API Key</label>
                 <div id="cct-api-row">
                     <input id="cct-api-input" type="password" placeholder="your public key"
                         value="${key}" spellcheck="false" autocomplete="off"/>
@@ -333,9 +454,17 @@
 
         anchor.appendChild(el);
 
+        // Theme toggle
+        el.querySelector('#cct-theme-toggle').addEventListener('click', (e) => {
+            e.stopPropagation();
+            isDark = !isDark;
+            saveTheme();
+            applyTheme();
+        });
+
         if (USE_API) {
-            const gear     = el.querySelector('#cct-gear');
-            const popover  = el.querySelector('#cct-api-popover');
+            const gear    = el.querySelector('#cct-gear');
+            const popover = el.querySelector('#cct-api-popover');
 
             gear.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -347,8 +476,8 @@
             });
 
             el.querySelector('#cct-api-save').addEventListener('click', async () => {
-                const input = el.querySelector('#cct-api-input');
-                const hint  = el.querySelector('#cct-api-hint');
+                const input    = el.querySelector('#cct-api-input');
+                const hint     = el.querySelector('#cct-api-hint');
                 const cleanKey = saveApiKey(input.value);
 
                 if (!cleanKey) {
@@ -366,9 +495,12 @@
             });
         }
 
-        render();
+        applyTheme();
     }
 
+    // =========================================================================
+    // RENDER (arc + label + status)
+    // =========================================================================
     function render() {
         const arc    = document.querySelector('#cct-ring-arc');
         const label  = document.querySelector('#cct-ring-label');
@@ -385,14 +517,13 @@
         label.style.color          = color;
 
         status.textContent = statusText(chain);
-
         status.classList.remove('cct-flash');
         void status.offsetWidth;
         status.classList.add('cct-flash');
     }
 
     // =========================================================================
-    // DOM OBSERVER (Binds to active sub-panels dynamically)
+    // DOM OBSERVER
     // =========================================================================
     function startDOMObserver() {
         if (observer) observer.disconnect();
@@ -409,9 +540,9 @@
                 for (const node of m.addedNodes) {
                     if (node.nodeType !== Node.ELEMENT_NODE) continue;
 
-                    const targetNode = node.matches('[class*=\"result\"],[class*=\"outcome\"],[class*=\"message\"],[class*=\"notification\"]')
+                    const targetNode = node.matches('[class*="result"],[class*="outcome"],[class*="message"],[class*="notification"]')
                         ? node
-                        : node.querySelector('[class*=\"result\"],[class*=\"outcome\"],[class*=\"message\"],[class*=\"notification\"]');
+                        : node.querySelector('[class*="result"],[class*="outcome"],[class*="message"],[class*="notification"]');
 
                     if (targetNode) {
                         applyOutcome(targetNode.textContent);
@@ -424,7 +555,7 @@
     }
 
     async function verifyPublicAPI(key) {
-        const url = `https://api.torn.com/user/?selections=crimes&key=${key}`;
+        const url  = `https://api.torn.com/user/?selections=crimes&key=${key}`;
         const res  = await fetch(url);
         const data = await res.json();
         if (data.error) throw new Error(data.error.error);
@@ -432,7 +563,7 @@
     }
 
     // =========================================================================
-    // SPA ROUTING RE-SYNC ENGINE
+    // SPA ROUTING RE-SYNC
     // =========================================================================
     function runSyncLoop() {
         renderWidget();
@@ -443,8 +574,8 @@
     // INIT
     // =========================================================================
     async function waitForApp(timeout = 15000) {
-        const t = Date.now();
-        while (Date.now() - t < timeout) {
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeout) {
             const el = document.querySelector('.crimes-app');
             if (el) return el;
             await new Promise(r => setTimeout(r, 250));
@@ -464,7 +595,7 @@
             setTimeout(runSyncLoop, 150);
         });
 
-        console.log(`[CCT v4.3.2] Text sizing enhanced.`);
+        console.log('[CCT v4.4.0] Light/dark mode toggle added.');
     }
 
     init();
