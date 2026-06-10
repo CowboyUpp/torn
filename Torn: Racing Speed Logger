@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.21
+// @version      1.6.22
 // @description  Lifetime top speed log per track with car type tracked and CSV export. No external dependencies.
 // @author       cowboyup
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -15,6 +15,13 @@
 // ==/UserScript==
 //
 // Changelog:
+// v1.6.22 - Added a Best Lap column to both the in-race and lobby log tables.
+//           Lap time is measured with wall-clock splits: each time completion
+//           crosses a full-lap boundary the delta since the previous crossing
+//           is recorded. The best (shortest) time for the current track+car
+//           combo is saved alongside the top speed. Resolution is ±1 s because
+//           the poller runs every second. The very first lap boundary after
+//           page load is skipped (no prior split to diff against).
 // v1.6.21 - Added a firework burst when you hit a new record. Also made the
 //           ★ NEW RECORD text much bigger so you actually notice it.
 // v1.6.19 - Each car now gets its own record per track, so your Colina and
@@ -72,6 +79,11 @@ let sessionTopSpeed = 0;
 let currentTrack    = '';
 let currentCar      = '';
 
+// Lap timing state — reset each time the speed loop starts
+let lapCount        = 0;    // how many full laps have been completed this session
+let lastLapSplit    = 0;    // Date.now() when the previous lap boundary was crossed
+let totalLaps       = NaN;  // total laps in the current race
+
 // ─── Interval helpers ──────────────────────────────────────────────────────────
 function maybeClear() {
     if (speedInterval !== 0) {
@@ -79,6 +91,9 @@ function maybeClear() {
         last_compl      = -1.0;
         sessionTopSpeed = 0;
         speedInterval   = 0;
+        lapCount        = 0;
+        lastLapSplit    = 0;
+        totalLaps       = NaN;
     }
 }
 
@@ -96,22 +111,47 @@ function carKey(carImg) {
     return m ? m[1] : 'unknown';
 }
 
-function updateRecord(trackName, speed, carImg) {
-    const log     = getSpeedLog();
-    const rounded = parseFloat(speed.toFixed(2));
-    const key     = trackName + '|' + carKey(carImg);
+// Returns true if a new top speed was set.
+function updateRecord(trackName, speed, carImg, bestLapMs) {
+    const log      = getSpeedLog();
+    const rounded  = parseFloat(speed.toFixed(2));
+    const key      = trackName + '|' + carKey(carImg);
     const existing = log[key];
+
+    let changed = false;
+
     if (!existing || rounded > existing.topSpeed) {
-        log[key] = {
-            track:    trackName,
-            topSpeed: rounded,
-            car:      carImg || '',
-            date:     new Date().toISOString().split('T')[0]
-        };
-        saveSpeedLog(log);
-        return true;
+        if (!existing) {
+            log[key] = { track: trackName, topSpeed: rounded, car: carImg || '', date: new Date().toISOString().split('T')[0] };
+        } else {
+            log[key].topSpeed = rounded;
+            log[key].date     = new Date().toISOString().split('T')[0];
+        }
+        changed = true;
     }
-    return false;
+
+    // Update best lap independently — a faster lap is always saved regardless
+    // of whether the top speed improved.
+    if (bestLapMs > 0) {
+        if (!log[key]) {
+            log[key] = { track: trackName, topSpeed: rounded, car: carImg || '', date: new Date().toISOString().split('T')[0] };
+        }
+        if (!existing || !existing.bestLapMs || bestLapMs < existing.bestLapMs) {
+            log[key].bestLapMs = bestLapMs;
+        }
+    }
+
+    saveSpeedLog(log);
+    return changed;
+}
+
+// ─── Lap time formatting ───────────────────────────────────────────────────────
+function formatLapTime(ms) {
+    if (!ms || ms <= 0) return '–';
+    const totalSec = Math.round(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return m + 'm ' + String(s).padStart(2, '0') + 's';
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────────
@@ -131,6 +171,7 @@ GM_addStyle(
     '#rslogPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; } ' +
     '#rslogPanel tr.rslogCurrentTrack td { color: #fff200; } ' +
     '#rslogPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; } ' +
+    '#rslogPanel td.rslogBestLap { color: #00cfff; font-weight: bold; } ' +
     '#rslogPanel td.rslogCar { width: 42px; padding: 2px 4px; } ' +
     '#rslogPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; } ' +
     '#rslogCsvBtn { display: inline-block; margin-top: 8px; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; } ' +
@@ -144,6 +185,7 @@ GM_addStyle(
     '#rslogLobbyPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; } ' +
     '#rslogLobbyPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; } ' +
     '#rslogLobbyPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; } ' +
+    '#rslogLobbyPanel td.rslogBestLap { color: #00cfff; font-weight: bold; } ' +
     '#rslogLobbyPanel td.rslogCar { width: 42px; padding: 2px 4px; } ' +
     '#rslogLobbyPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; } ' +
     '#rslogLobbyFooter { margin-top: 7px; display: flex; gap: 8px; align-items: center; } ' +
@@ -167,7 +209,7 @@ function injectWidget() {
         '  </div>' +
         '  <div id="rslogPanel">' +
         '    <table id="rslogTable">' +
-        '      <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead>' +
+        '      <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Best Lap</th><th>Date</th></tr></thead>' +
         '      <tbody id="rslogTableBody"></tbody>' +
         '    </table>' +
         '    <a id="rslogCsvBtn" href="#">⬇ Download CSV</a>' +
@@ -213,7 +255,7 @@ function renderLogTable() {
     tbody.empty();
     const entries = Object.entries(log).sort((a, b) => b[1].topSpeed - a[1].topSpeed);
     if (entries.length === 0) {
-        tbody.append('<tr><td colspan="4" style="color:#555;padding:6px;">No records yet.</td></tr>');
+        tbody.append('<tr><td colspan="5" style="color:#555;padding:6px;">No records yet.</td></tr>');
         return;
     }
     for (const [key, data] of entries) {
@@ -224,6 +266,7 @@ function renderLogTable() {
             '<td>' + escapeHtml(trackName) + '</td>' +
             '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
+            '<td class="rslogBestLap">' + formatLapTime(data.bestLapMs) + '</td>' +
             '<td>' + data.date + '</td>' +
             '</tr>'
         );
@@ -232,12 +275,13 @@ function renderLogTable() {
 
 function downloadCsv() {
     const log = getSpeedLog();
-    let csv   = 'Track,Car,Top Speed (mph),Date\n';
+    let csv   = 'Track,Car,Top Speed (mph),Best Lap,Date\n';
     for (const [key, data] of Object.entries(log)) {
         const trackName = data.track || key.split('|')[0];
         csv += '"' + trackName.replace(/"/g, '""') + '",' +
                '"' + (data.car || '').replace(/"/g, '""') + '",' +
                data.topSpeed.toFixed(2) + ',' +
+               formatLapTime(data.bestLapMs) + ',' +
                data.date + '\n';
     }
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -250,17 +294,13 @@ function downloadCsv() {
 }
 
 // ─── Car name ──────────────────────────────────────────────────────────────────
-// Read the title attribute from the car image in the "Current car" sidebar.
-// Torn always sets this to the canonical car name e.g. title="Volt GT".
 function parseCarImg() {
-    // Returns small image src for the current car from sidebar
     const img = document.querySelector('.car-selected .torn-item');
     if (img && img.src) {
         return img.src.replace('/large.png', '/small.png');
     }
     return '';
 }
-
 
 // ─── Firework burst ────────────────────────────────────────────────────────────
 function launchFirework() {
@@ -310,7 +350,7 @@ function launchFirework() {
             alive = true;
             p.x     += p.vx;
             p.y     += p.vy;
-            p.vy    += 0.12; // gravity
+            p.vy    += 0.12;
             p.alpha -= 0.018;
             ctx.globalAlpha = Math.max(0, p.alpha);
             ctx.fillStyle   = p.color;
@@ -343,7 +383,6 @@ function startSpeedLoop() {
             return;
         }
 
-        // Race title is in div.title-black.t-overflow, not the "Current car" heading
         const titleEl    = document.querySelector('div.title-black.t-overflow');
         const titleText  = titleEl ? titleEl.textContent.trim() : '';
         const cleanTitle = titleText.replace(/\s*-\s*(Race started|Race finished|Waiting.*|Cancelled.*)$/i, '').trim();
@@ -354,16 +393,46 @@ function startSpeedLoop() {
         const len        = parseFloat(trackInfo.attr('data-length'));
         const compl      = getCompletion();
 
-        // Update car name each tick (stays stable once found)
         const foundCar = parseCarImg();
         if (foundCar) currentCar = foundCar;
 
         if (isNaN(compl) || isNaN(laps) || isNaN(len)) return;
 
+        // ── Lap boundary detection ────────────────────────────────────────────
+        // totalLaps is set once per race start (when lapCount is still 0).
+        if (isNaN(totalLaps) || totalLaps !== laps) {
+            totalLaps = laps;
+        }
+
+        // A lap is complete each time compl crosses a multiple of (100 / laps).
+        // We detect this by comparing the integer lap index before and after.
+        // last_compl >= 0 guard ensures we have a valid previous reading.
+        if (last_compl >= 0) {
+            const lapSize          = 100 / laps;
+            const prevLapIndex     = Math.floor(last_compl / lapSize);
+            const currLapIndex     = Math.floor(compl      / lapSize);
+
+            // Ignore the wrap-around when compl resets from ~100 back to ~0
+            if (currLapIndex > prevLapIndex && compl > last_compl) {
+                const now = Date.now();
+                if (lastLapSplit > 0) {
+                    // We have a valid prior split — calculate the lap time
+                    const lapMs = now - lastLapSplit;
+                    // Sanity bounds: ignore anything under 5 s or over 30 min
+                    if (lapMs >= 5000 && lapMs <= 1800000) {
+                        updateRecord(currentTrack, 0, currentCar, lapMs);
+                        if ($('#rslogPanel').is(':visible')) renderLogTable();
+                    }
+                }
+                lastLapSplit = now;
+                lapCount++;
+            }
+        }
+
+        // ── Speed calculation ─────────────────────────────────────────────────
         if (last_compl >= 0) {
             const speed = (compl - last_compl) / 100 * laps * len * 3600000 / POLL_MS;
 
-            // ignore spikes from lap wraps (completion resets near 0) or implausible values
             if (speed > 0 && speed < 400) {
                 $('#rslogSpeed').text(speed.toFixed(2) + ' mph');
 
@@ -372,7 +441,7 @@ function startSpeedLoop() {
                     $('#rslogSessionTopVal').text(speed.toFixed(2));
                 }
 
-                if (updateRecord(currentTrack, speed, currentCar)) {
+                if (updateRecord(currentTrack, speed, currentCar, 0)) {
                     $('#rslogNewRecord').stop(true, true).show().delay(2000).fadeOut(500);
                     launchFirework();
                     if ($('#rslogPanel').is(':visible')) renderLogTable();
@@ -392,7 +461,7 @@ function injectLobbyPanel() {
     const panel =
         '<div id="rslogLobbyPanel">' +
         '  <table>' +
-        '    <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead>' +
+        '    <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Best Lap</th><th>Date</th></tr></thead>' +
         '    <tbody id="rslogLobbyTableBody"></tbody>' +
         '  </table>' +
         '  <div id="rslogLobbyFooter">' +
@@ -430,7 +499,7 @@ function renderLobbyTable() {
     tbody.empty();
     const entries = Object.entries(log).sort((a, b) => b[1].topSpeed - a[1].topSpeed);
     if (entries.length === 0) {
-        tbody.append('<tr><td colspan="4" style="color:#555;padding:6px;">No records yet — complete a race first.</td></tr>');
+        tbody.append('<tr><td colspan="5" style="color:#555;padding:6px;">No records yet — complete a race first.</td></tr>');
         return;
     }
     for (const [key, data] of entries) {
@@ -440,6 +509,7 @@ function renderLobbyTable() {
             '<td>' + escapeHtml(trackName) + '</td>' +
             '<td class="rslogCar">' + (data.car ? '<img src="' + data.car + '" title="Car">' : '–') + '</td>' +
             '<td class="rslogTopSpeed">' + data.topSpeed.toFixed(2) + ' mph</td>' +
+            '<td class="rslogBestLap">' + formatLapTime(data.bestLapMs) + '</td>' +
             '<td>' + data.date + '</td>' +
             '</tr>'
         );
