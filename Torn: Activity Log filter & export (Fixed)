@@ -1,19 +1,16 @@
 // ==UserScript==
-// @name         Torn: Activity Log filter & export (Fixed)
+// @name         Torn: Activity Log filter, export & reverse
 // @namespace    lugburz.activity_log_filter_export
-// @version      0.5.2
-// @description  Export only visually filtered items from the Torn Log Page
-// @author       Lugburz & Community *fixed by cowboyup
+// @version      0.6.0
+// @description  Export only visually filtered items and reverse the layout view on the Torn Log Page
+// @author       Lugburz & Community
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
-// @license      MIT
 // ==/UserScript==
 
 var exportAll = false;
-var visibleCategories = [];
-var root = '#recent-history-wrapper > div.recent-history-content';
 var logpageLogs = [];
 
 function addInterceptor() {
@@ -35,7 +32,7 @@ function addInterceptor() {
                             logpageLogs.push(l);
                         }
                     }
-                    setTimeout(addExportButton, 300);
+                    setTimeout(addScriptButtons, 300);
                 }
             } catch (e) { console.error(e); }
         }
@@ -58,7 +55,6 @@ function scrapeVisiblePageLogs() {
     if (typeof $ === 'undefined') return '';
     let csv = 'time,category,text\n';
 
-    // Looks for both old log wrappers and modern React LogHistory rows
     const logRows = $('#activity-log-root').find('tr, [class*=logRow___], [class*=row___]');
 
     logRows.each((index, el) => {
@@ -112,22 +108,43 @@ function exportActivityLog() {
     downloadCsv(csv);
 }
 
-function addExportButton() {
+function reverseLogView() {
+    if (typeof $ === 'undefined') return;
+
+    // Find the container holding the rows (works for both old tables and modern list dividers)
+    const container = $('#activity-log-root').find('tbody, [class*=logWrapper___]');
+
+    if (container.length > 0) {
+        const rows = container.children('tr, [class*=logRow___], [class*=row___]').not('[class*=title]');
+        container.append(rows.get().reverse());
+    }
+}
+
+function addScriptButtons() {
     if (typeof $ === 'undefined' || $('#exportLogsBtn').length > 0) return;
 
     let buttonClass = 'button___37oQ0';
-    // Check main button configurations or filters panel
     let wrapper = $('#activity-log-root').find('[class*=buttonsWrapper], [class*=filterWrapper], [class*=container___]');
 
     if (!wrapper.length) {
-        wrapper = $('#activity-log-root').find('h4').first(); // Fallback to header text block if wrappers fail
+        wrapper = $('#activity-log-root').find('h4').first();
     }
 
-    const button = `<button id="exportLogsBtn" class="${buttonClass}" style="line-height: 24px; padding: 0 12px; background-color: var(--default-blue-color, #337ab7); color: #fff; border: none; border-radius: 4px; margin-left: 10px; cursor: pointer;" title="Export filtered logs as CSV" type="button">Export Filtered CSV</button>`;
-    wrapper.append(button);
+    // Export Button
+    const exportBtn = `<button id="exportLogsBtn" class="${buttonClass}" style="line-height: 24px; padding: 0 12px; background-color: var(--default-blue-color, #337ab7); color: #fff; border: none; border-radius: 4px; margin-left: 10px; cursor: pointer;" title="Export filtered logs as CSV" type="button">Export Filtered CSV</button>`;
+
+    // Reverse Button
+    const reverseBtn = `<button id="reverseLogsBtn" class="${buttonClass}" style="line-height: 24px; padding: 0 12px; background-color: #4caf50; color: #fff; border: none; border-radius: 4px; margin-left: 10px; cursor: pointer;" title="Reverse log order layout" type="button">Reverse View</button>`;
+
+    wrapper.append(exportBtn);
+    wrapper.append(reverseBtn);
 
     $('#exportLogsBtn').on('click', () => {
         exportActivityLog();
+    });
+
+    $('#reverseLogsBtn').on('click', () => {
+        reverseLogView();
     });
 }
 
@@ -142,10 +159,11 @@ if (document.readyState === 'loading') {
 function init() {
     if (typeof $ !== 'undefined') {
         GM_registerMenuCommand('Export Filtered Logs', exportActivityLog);
+        GM_registerMenuCommand('Reverse Log View', reverseLogView);
 
         setInterval(() => {
             if ($('#activity-log-root').length && !$('#exportLogsBtn').length) {
-                addExportButton();
+                addScriptButtons();
             }
         }, 1000);
     } else {
