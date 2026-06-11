@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.4.5
+// @version      2.4.6
 // @description  Split UI: Top Speed + Top Lap panels. Much cleaner track names. Separate tables & CSVs.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -13,6 +13,8 @@
 // ==/UserScript==
 
 // Changelog:
+// 2.4.6 - formatLapTime: show centiseconds (2 decimal places) instead of tenths.
+//         e.g. 2m 50.75s instead of 2m 50.7s. Raw ms in storage unchanged.
 // 2.4.5 - Proportional speed floor: replaced fixed 50 mph cutoff with
 //         max(10, trackLength × 10) so short tracks like Sewage (1.5mi → 15 mph floor)
 //         record properly while long tracks still filter early-race noise.
@@ -240,8 +242,8 @@ function formatLapTime(ms) {
     if (!ms || ms <= 0) return '–';
     const m = Math.floor(ms / 60000);
     const s = Math.floor((ms % 60000) / 1000);
-    const dec = Math.floor((ms % 1000) / 100);
-    return m + 'm ' + String(s).padStart(2, '0') + '.' + dec + 's';
+    const cs = Math.floor((ms % 1000) / 10);
+    return m + 'm ' + String(s).padStart(2, '0') + '.' + String(cs).padStart(2, '0') + 's';
 }
 
 // ─── Migration (cleans old messy entries + purges implausible top speeds) ─────
