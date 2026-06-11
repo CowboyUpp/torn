@@ -1,0 +1,648 @@
+// ==UserScript==
+// @name         Torn Racing - Car Sorter
+// @namespace    https://greasyfork.org/users/CowboyUpp
+// @version      1.3.0
+// @description  Sort, filter, reorder and nickname your cars on the join-race screen.
+// @author       CowboyUp
+// @match        https://www.torn.com/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @license      MIT
+// ==/UserScript==
+
+// Changelog:
+// v1.3.0 - Complete rewrite of extractCars() based on confirmed live DOM:
+//          - Car name from .model-car-name-{id} (user's Torn custom name)
+//          - Torn model name + class from .model span.bold / (Class X) text
+//          - Unique car key from id-value attribute on remove link (stable across sessions)
+//          - Stats from ul.enlisted-stat: Top Speed (mph), 0-60, Brake Dist, Upgrades,
+//            Races Won, Races Entered, Win %
+//          - Bar stats from ul.enlist-bars title attributes: Speed, Accel, Braking,
+//            Handling, Dirt, Tarmac, Safety (total points shown on card)
+//          - Nickname keyed by car ID (not name) — fixes duplicate-name bug
+//          - Class filter now works correctly (reads per-car from DOM)
+//          - Sort by: Class, Name, Speed pts, Accel pts, Handling pts, Upgrades, Win%
+// v1.2.0 - User-assigned nicknames per car
+// v1.1.0 - Fixed selectors, drag-to-reorder
+// v1.0.1 - Broadened @match for SPA
+// v1.0.0 - Initial release
+
+(function () {
+    'use strict';
+
+    // ─── Constants ──────────────────────────────────────────────────────────────
+
+    const CLASS_ORDER  = ['A', 'B', 'C', 'D', 'E'];
+    const CLASS_COLORS = {
+        A: '#ffd700', B: '#c0c0c0', C: '#4ca8ff', D: '#44cc44', E: '#888888',
+    };
+    const STORAGE_KEY   = 'tcs_custom_order';
+    const NICKNAMES_KEY = 'tcs_nicknames';  // { [carId]: userNickname }
+
+    // ─── State ───────────────────────────────────────────────────────────────────
+
+    let activeClass = 'ALL';
+    let sortKey     = 'speedPts';
+    let sortDir     = -1;   // default: highest speed first
+    let carData     = [];
+    let customOrder = [];
+    let nicknames   = {};
+    let dragSrcIdx  = null;
+
+    // ─── Storage ─────────────────────────────────────────────────────────────────
+
+    function loadCustomOrder() {
+        try { customOrder = JSON.parse(GM_getValue(STORAGE_KEY, '[]')); }
+        catch (_) { customOrder = []; }
+    }
+    function saveCustomOrder() { GM_setValue(STORAGE_KEY, JSON.stringify(customOrder)); }
+
+    function loadNicknames() {
+        try { nicknames = JSON.parse(GM_getValue(NICKNAMES_KEY, '{}')); }
+        catch (_) { nicknames = {}; }
+    }
+    function saveNicknames() { GM_setValue(NICKNAMES_KEY, JSON.stringify(nicknames)); }
+
+    // ─── Styles ──────────────────────────────────────────────────────────────────
+
+    const STYLE = `
+        #tcs-wrapper { margin: 8px 0; font-family: Arial, sans-serif; }
+        #tcs-toolbar {
+            display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+            margin-bottom: 8px; padding: 6px 8px;
+            background: #1a1a1a; border: 1px solid #333; border-radius: 4px;
+        }
+        .tcs-toolbar-group { display: flex; align-items: center; gap: 4px; }
+        .tcs-toolbar-label {
+            font-size: 10px; color: #666; text-transform: uppercase;
+            letter-spacing: 0.5px; margin-right: 2px;
+        }
+        .tcs-btn {
+            padding: 3px 9px; border-radius: 3px; border: 1px solid #333;
+            background: #222; color: #999; font-size: 11px; cursor: pointer;
+            transition: background 0.12s, border-color 0.12s; white-space: nowrap;
+        }
+        .tcs-btn:hover { background: #2a2a2a; border-color: #555; color: #ccc; }
+        .tcs-btn.active, .tcs-btn.sort-active {
+            background: #2a2a2a; color: #fff; border-color: #666;
+        }
+        .tcs-btn[data-class="A"].active { border-color: #ffd700; color: #ffd700; }
+        .tcs-btn[data-class="B"].active { border-color: #c0c0c0; color: #c0c0c0; }
+        .tcs-btn[data-class="C"].active { border-color: #4ca8ff; color: #4ca8ff; }
+        .tcs-btn[data-class="D"].active { border-color: #44cc44; color: #44cc44; }
+        .tcs-btn[data-class="E"].active { border-color: #888;    color: #888;    }
+        .tcs-divider { width: 1px; height: 18px; background: #333; margin: 0 2px; }
+        #tcs-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+        .tcs-car-card {
+            background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 5px;
+            padding: 6px 8px 28px; width: 148px; flex: 0 0 148px;
+            cursor: pointer; position: relative; box-sizing: border-box;
+            user-select: none; transition: border-color 0.12s, background 0.12s;
+        }
+        .tcs-car-card:hover  { border-color: #444; background: #1e1e1e; }
+        .tcs-car-card.selected   { border-color: #ffd700 !important; background: #211f00 !important; }
+        .tcs-car-card.drag-over  { border-color: #888; border-style: dashed; }
+        .tcs-car-card.dragging   { opacity: 0.3; }
+        .tcs-drag-handle {
+            position: absolute; top: 4px; left: 5px;
+            font-size: 10px; color: #444; cursor: grab; line-height: 1;
+        }
+        .tcs-drag-handle:active { cursor: grabbing; }
+        .tcs-class-badge {
+            position: absolute; top: 4px; right: 5px;
+            font-size: 9px; font-weight: bold; padding: 1px 4px;
+            border-radius: 3px; border: 1px solid;
+        }
+        .tcs-torn-model {
+            font-size: 9px; color: #555; text-align: center;
+            margin: 1px 14px 0; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .tcs-car-img {
+            width: 100%; height: 44px; object-fit: contain;
+            display: block; margin: 4px 0 2px;
+        }
+        .tcs-nickname {
+            font-size: 11px; font-weight: bold; color: #ddd; text-align: center;
+            margin: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            min-height: 14px;
+        }
+        .tcs-nickname-input {
+            width: 100%; box-sizing: border-box; background: #111;
+            border: 1px solid #ffd700; border-radius: 3px;
+            color: #fff; font-size: 11px; font-weight: bold;
+            text-align: center; padding: 2px 4px; outline: none;
+        }
+        .tcs-car-stats {
+            display: grid; grid-template-columns: auto 1fr;
+            gap: 1px 4px; font-size: 10px; margin-top: 4px;
+        }
+        .tcs-stat-label { color: #555; white-space: nowrap; }
+        .tcs-stat-val   { color: #bbb; font-weight: bold; text-align: right; }
+        .tcs-stat-val.highlight { color: #ffd700; }
+        .tcs-edit-btn {
+            position: absolute; bottom: 5px; right: 6px;
+            font-size: 10px; color: #444; cursor: pointer;
+            padding: 1px 3px; border-radius: 2px;
+        }
+        .tcs-edit-btn:hover { color: #aaa; }
+        #tcs-status { font-size: 10px; color: #444; margin-top: 6px; }
+        .tcs-bar-wrap {
+            height: 4px; background: #222; border-radius: 2px;
+            margin: 1px 0; overflow: hidden; position: relative;
+        }
+        .tcs-bar-fill {
+            height: 100%; border-radius: 2px; position: absolute; left: 0; top: 0;
+        }
+        .tcs-bar-upgrade {
+            height: 100%; border-radius: 2px; position: absolute; top: 0;
+            background: rgba(255,255,255,0.15);
+        }
+    `;
+
+    // ─── Car extraction ──────────────────────────────────────────────────────────
+
+    function extractCars() {
+        const items = [...document.querySelectorAll('ul.enlist-list > li')];
+        if (items.length === 0) return [];
+
+        return items.map((el, idx) => {
+            // ── Stable car ID from remove link ────────────────────────────────
+            const removeLink = el.querySelector('a.enlist-link.remove[id-value]');
+            const carId = removeLink ? removeLink.getAttribute('id-value') : String(idx);
+
+            // ── Torn model name + class from .model ───────────────────────────
+            const modelEl = el.querySelector('.model');
+            let tornModel = '';
+            let carClass  = 'A';
+            if (modelEl) {
+                const boldEl = modelEl.querySelector('.bold');
+                tornModel = boldEl ? boldEl.textContent.trim() : '';
+                const classMatch = modelEl.textContent.match(/Class\s+([A-E])/i);
+                if (classMatch) carClass = classMatch[1].toUpperCase();
+            }
+
+            // ── User's Torn custom car name (e.g. "commerce underdog sewa") ──
+            const customNameEl = el.querySelector(`[class*="model-car-name-"]`);
+            const tornCustomName = customNameEl ? customNameEl.textContent.trim() : '';
+
+            // ── Image ─────────────────────────────────────────────────────────
+            const img    = el.querySelector('.enlist-car img');
+            const imgSrc = img ? img.src : '';
+
+            // ── Stats from ul.enlisted-stat ───────────────────────────────────
+            function getListedStat(keyword) {
+                const lis = el.querySelectorAll('ul.enlisted-stat > li');
+                for (const li of lis) {
+                    const text = li.textContent;
+                    if (text.toLowerCase().includes(keyword.toLowerCase())) {
+                        const m = text.match(/([\d,]+(?:\.\d+)?)\s*(%|mph|seconds|feet)?/);
+                        if (m) return parseFloat(m[1].replace(/,/g, ''));
+                    }
+                }
+                return null;
+            }
+
+            const topSpeedMph  = getListedStat('Top Speed');
+            const zeroSixty    = getListedStat('0-60');
+            const brakeDist    = getListedStat('Brake Dist');
+            const upgrades     = getListedStat('Upgrades');
+            const racesWon     = getListedStat('Races won');
+            const racesEntered = getListedStat('Races entered');
+            const winPct       = getListedStat('Win Percentage');
+
+            // ── Bar stats from ul.enlist-bars (title="total (base + upgrade)") ─
+            function getBarStat(labelText) {
+                const barLis = el.querySelectorAll('ul.enlist-bars > li');
+                for (const li of barLis) {
+                    const title = li.querySelector('.title');
+                    if (title && title.textContent.trim().toLowerCase() === labelText.toLowerCase()) {
+                        const pbWrap = li.querySelector('.progressbar-wrap');
+                        if (pbWrap) {
+                            const t = pbWrap.getAttribute('title') || '';
+                            // title format: "105 (45 + 60)"
+                            const m = t.match(/^(\d+)/);
+                            if (m) return parseInt(m[1], 10);
+                        }
+                        // fallback: read percentage from style
+                        const pb = li.querySelector('.progressbar');
+                        if (pb) {
+                            const w = parseFloat(pb.style.width);
+                            return isNaN(w) ? null : Math.round(w);
+                        }
+                    }
+                }
+                return null;
+            }
+
+            const speedPts    = getBarStat('Top Speed');
+            const accelPts    = getBarStat('Acceleration');
+            const brakingPts  = getBarStat('Braking');
+            const handlingPts = getBarStat('Handling');
+            const dirtPts     = getBarStat('Dirt');
+            const tarmacPts   = getBarStat('Tarmac');
+            const safetyPts   = getBarStat('Safety');
+
+            return {
+                el, carId, tornModel, tornCustomName, carClass, imgSrc,
+                topSpeedMph, zeroSixty, brakeDist, upgrades, racesWon, racesEntered, winPct,
+                speedPts, accelPts, brakingPts, handlingPts, dirtPts, tarmacPts, safetyPts,
+                idx,
+            };
+        });
+    }
+
+    // ─── Sorting ─────────────────────────────────────────────────────────────────
+
+    function sortedVisible() {
+        let list = activeClass === 'ALL'
+            ? [...carData]
+            : carData.filter(c => c.carClass === activeClass);
+
+        if (sortKey === 'custom') {
+            list.sort((a, b) => {
+                const ia = customOrder.indexOf(a.carId);
+                const ib = customOrder.indexOf(b.carId);
+                if (ia === -1 && ib === -1) return 0;
+                if (ia === -1) return 1;
+                if (ib === -1) return -1;
+                return ia - ib;
+            });
+        } else if (sortKey === 'class') {
+            list.sort((a, b) => {
+                const ca = CLASS_ORDER.indexOf(a.carClass);
+                const cb = CLASS_ORDER.indexOf(b.carClass);
+                return sortDir * (ca - cb) || a.tornModel.localeCompare(b.tornModel);
+            });
+        } else if (sortKey === 'name') {
+            list.sort((a, b) => sortDir * a.tornModel.localeCompare(b.tornModel));
+        } else {
+            list.sort((a, b) => {
+                const va = a[sortKey] ?? -Infinity;
+                const vb = b[sortKey] ?? -Infinity;
+                return sortDir * (vb - va);
+            });
+        }
+        return list;
+    }
+
+    // ─── Drag & drop ─────────────────────────────────────────────────────────────
+
+    function enableDrag(card, car, visibleList) {
+        card.draggable = true;
+        card.addEventListener('dragstart', e => {
+            dragSrcIdx = visibleList.indexOf(car);
+            card.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+        });
+        card.addEventListener('dragend', () => {
+            card.classList.remove('dragging');
+            document.querySelectorAll('.tcs-car-card').forEach(c => c.classList.remove('drag-over'));
+        });
+        card.addEventListener('dragover', e => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            card.classList.add('drag-over');
+        });
+        card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+        card.addEventListener('drop', e => {
+            e.preventDefault();
+            card.classList.remove('drag-over');
+            const destIdx = visibleList.indexOf(car);
+            if (dragSrcIdx === null || dragSrcIdx === destIdx) return;
+            const [moved] = visibleList.splice(dragSrcIdx, 1);
+            visibleList.splice(destIdx, 0, moved);
+            dragSrcIdx = destIdx;
+            customOrder = visibleList.map(c => c.carId);
+            saveCustomOrder();
+            sortKey = 'custom';
+            updateSortButtons();
+            renderGrid();
+        });
+    }
+
+    // ─── Bar helper ──────────────────────────────────────────────────────────────
+
+    function makeBar(pts, maxPts, color, upgradePct) {
+        // pts = total, maxPts = scale max, upgradePct = fraction of bar that is upgrade
+        const wrap = document.createElement('div');
+        wrap.className = 'tcs-bar-wrap';
+        const pct = Math.min(100, (pts / maxPts) * 100);
+        const fill = document.createElement('div');
+        fill.className = 'tcs-bar-fill';
+        fill.style.cssText = `width:${pct}%;background:${color};`;
+        wrap.appendChild(fill);
+        if (upgradePct != null && upgradePct > 0) {
+            const up = document.createElement('div');
+            up.className = 'tcs-bar-upgrade';
+            up.style.cssText = `left:${pct * (1 - upgradePct)}%;width:${pct * upgradePct}%;`;
+            wrap.appendChild(up);
+        }
+        return wrap;
+    }
+
+    // ─── Render ──────────────────────────────────────────────────────────────────
+
+    function updateSortButtons() {
+        document.querySelectorAll('.tcs-sort-btn').forEach(b => {
+            const active = b.dataset.sort === sortKey;
+            b.classList.toggle('sort-active', active);
+            const base = b.dataset.label;
+            if (active && sortKey !== 'custom') {
+                b.textContent = base + (sortDir === -1 ? ' ↓' : ' ↑');
+            } else {
+                b.textContent = base;
+            }
+        });
+    }
+
+    function renderGrid() {
+        const grid   = document.getElementById('tcs-grid');
+        const status = document.getElementById('tcs-status');
+        if (!grid) return;
+
+        const visible = sortedVisible();
+        grid.innerHTML = '';
+
+        visible.forEach(car => {
+            const card = document.createElement('div');
+            card.className = 'tcs-car-card';
+            card.dataset.carId = car.carId;
+
+            const badgeColor = CLASS_COLORS[car.carClass] || '#888';
+
+            // Drag handle
+            const handle = document.createElement('span');
+            handle.className = 'tcs-drag-handle';
+            handle.title = 'Drag to reorder';
+            handle.textContent = '⠿';
+            card.appendChild(handle);
+
+            // Class badge
+            const badge = document.createElement('span');
+            badge.className = 'tcs-class-badge';
+            badge.textContent = car.carClass;
+            badge.style.cssText = `color:${badgeColor};border-color:${badgeColor}66;background:${badgeColor}11;`;
+            card.appendChild(badge);
+
+            // Torn model name (small, top)
+            const modelEl = document.createElement('div');
+            modelEl.className = 'tcs-torn-model';
+            modelEl.textContent = car.tornModel || '—';
+            modelEl.title = car.tornModel;
+            card.appendChild(modelEl);
+
+            // Image
+            if (car.imgSrc) {
+                const img = document.createElement('img');
+                img.className = 'tcs-car-img';
+                img.src = car.imgSrc;
+                img.alt = car.tornModel;
+                card.appendChild(img);
+            }
+
+            // Nickname (prominent, editable)
+            const nicknameEl = document.createElement('div');
+            nicknameEl.className = 'tcs-nickname';
+            const savedNick = nicknames[car.carId];
+            // Fall back to Torn custom name if no user nickname set
+            nicknameEl.textContent = savedNick || car.tornCustomName || '—';
+            nicknameEl.title = 'Click ✎ to set nickname';
+            card.appendChild(nicknameEl);
+
+            // Stat bars (Speed, Accel, Braking, Handling)
+            const barDefs = [
+                { key: 'speedPts',    label: 'Spd',  color: '#ff9900', max: 120 },
+                { key: 'accelPts',    label: 'Acc',  color: '#00cfff', max: 120 },
+                { key: 'brakingPts',  label: 'Brk',  color: '#cc44ff', max: 120 },
+                { key: 'handlingPts', label: 'Hdl',  color: '#44cc44', max: 120 },
+            ];
+
+            const statsEl = document.createElement('div');
+            statsEl.className = 'tcs-car-stats';
+
+            barDefs.forEach(({ key, label, color, max }) => {
+                const val = car[key];
+                const lbl = document.createElement('span');
+                lbl.className = 'tcs-stat-label';
+                lbl.textContent = label;
+
+                const vWrap = document.createElement('div');
+                vWrap.style.cssText = 'display:flex;align-items:center;gap:4px;';
+
+                const vEl = document.createElement('span');
+                vEl.className = 'tcs-stat-val' + (key === sortKey ? ' highlight' : '');
+                vEl.textContent = val != null ? val : '–';
+                vEl.style.minWidth = '24px';
+
+                vWrap.appendChild(vEl);
+                if (val != null) vWrap.appendChild(makeBar(val, max, color, null));
+
+                statsEl.appendChild(lbl);
+                statsEl.appendChild(vWrap);
+            });
+
+            // Extra text stats
+            const extras = [
+                ['Speed',    car.topSpeedMph != null ? car.topSpeedMph + ' mph' : null],
+                ['0-60',     car.zeroSixty   != null ? car.zeroSixty + 's'      : null],
+                ['Upgrades', car.upgrades    != null ? car.upgrades              : null],
+                ['W%',       car.winPct      != null ? car.winPct + '%'          : null],
+            ];
+            extras.forEach(([label, val]) => {
+                if (val == null) return;
+                const lbl = document.createElement('span');
+                lbl.className = 'tcs-stat-label';
+                lbl.textContent = label;
+                const vEl = document.createElement('span');
+                vEl.className = 'tcs-stat-val';
+                vEl.textContent = val;
+                statsEl.appendChild(lbl);
+                statsEl.appendChild(vEl);
+            });
+
+            card.appendChild(statsEl);
+
+            // Click → select car in original Torn UI
+            card.addEventListener('click', e => {
+                if (e.target === handle || e.target.classList.contains('tcs-edit-btn')) return;
+                document.querySelectorAll('.tcs-car-card').forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+                const clickTarget = car.el.querySelector('input[type="radio"], button, a') || car.el;
+                clickTarget.click();
+            });
+
+            // Edit nickname button
+            const editBtn = document.createElement('span');
+            editBtn.className = 'tcs-edit-btn';
+            editBtn.textContent = '✎';
+            editBtn.title = 'Set nickname';
+            editBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'tcs-nickname-input';
+                input.value = nicknames[car.carId] || '';
+                input.placeholder = 'Nickname…';
+                input.maxLength = 22;
+                nicknameEl.replaceWith(input);
+                input.focus();
+                input.select();
+
+                function commit() {
+                    const val = input.value.trim();
+                    if (val) nicknames[car.carId] = val;
+                    else delete nicknames[car.carId];
+                    saveNicknames();
+                    nicknameEl.textContent = val || car.tornCustomName || '—';
+                    input.replaceWith(nicknameEl);
+                }
+                input.addEventListener('blur', commit);
+                input.addEventListener('keydown', ev => {
+                    if (ev.key === 'Enter')  { ev.preventDefault(); input.blur(); }
+                    if (ev.key === 'Escape') { input.value = nicknames[car.carId] || ''; input.blur(); }
+                });
+            });
+            card.appendChild(editBtn);
+
+            enableDrag(card, car, visible);
+            grid.appendChild(card);
+        });
+
+        if (status) {
+            const total = carData.length;
+            const shown = visible.length;
+            status.textContent = shown === total
+                ? `${total} cars  ·  drag ⠿ to reorder  ·  click ✎ to nickname`
+                : `${shown} of ${total} cars  ·  class filter active`;
+        }
+    }
+
+    // ─── Build UI ─────────────────────────────────────────────────────────────────
+
+    function buildUI(anchor) {
+        if (!document.getElementById('tcs-styles')) {
+            const s = document.createElement('style');
+            s.id = 'tcs-styles';
+            s.textContent = STYLE;
+            document.head.appendChild(s);
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.id = 'tcs-wrapper';
+
+        const toolbar = document.createElement('div');
+        toolbar.id = 'tcs-toolbar';
+
+        // Filter group
+        const filterGroup = document.createElement('div');
+        filterGroup.className = 'tcs-toolbar-group';
+        const filterLabel = document.createElement('span');
+        filterLabel.className = 'tcs-toolbar-label';
+        filterLabel.textContent = 'Class:';
+        filterGroup.appendChild(filterLabel);
+
+        ['ALL', ...CLASS_ORDER].forEach(cls => {
+            const btn = document.createElement('button');
+            btn.className = 'tcs-btn' + (cls === activeClass ? ' active' : '');
+            btn.dataset.class = cls;
+            btn.textContent = cls;
+            btn.addEventListener('click', () => {
+                activeClass = cls;
+                filterGroup.querySelectorAll('.tcs-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                renderGrid();
+            });
+            filterGroup.appendChild(btn);
+        });
+
+        // Sort group
+        const sortGroup = document.createElement('div');
+        sortGroup.className = 'tcs-toolbar-group';
+        const sortLabel = document.createElement('span');
+        sortLabel.className = 'tcs-toolbar-label';
+        sortLabel.textContent = 'Sort:';
+        sortGroup.appendChild(sortLabel);
+
+        const sortOptions = [
+            { key: 'speedPts',    label: 'Speed'    },
+            { key: 'accelPts',    label: 'Accel'    },
+            { key: 'handlingPts', label: 'Handling' },
+            { key: 'upgrades',    label: 'Upgrades' },
+            { key: 'winPct',      label: 'Win%'     },
+            { key: 'name',        label: 'Name'     },
+            { key: 'class',       label: 'Class'    },
+            { key: 'custom',      label: 'Custom'   },
+        ];
+
+        sortOptions.forEach(({ key, label }) => {
+            const btn = document.createElement('button');
+            btn.className = 'tcs-btn tcs-sort-btn' + (sortKey === key ? ' sort-active' : '');
+            btn.dataset.sort  = key;
+            btn.dataset.label = label;
+            btn.textContent   = label + (sortKey === key && key !== 'custom' ? ' ↓' : '');
+            btn.addEventListener('click', () => {
+                if (sortKey === key && key !== 'custom') sortDir *= -1;
+                else { sortKey = key; sortDir = -1; }
+                updateSortButtons();
+                renderGrid();
+            });
+            sortGroup.appendChild(btn);
+        });
+
+        const divider = document.createElement('div');
+        divider.className = 'tcs-divider';
+
+        toolbar.appendChild(filterGroup);
+        toolbar.appendChild(divider);
+        toolbar.appendChild(sortGroup);
+
+        const grid = document.createElement('div');
+        grid.id = 'tcs-grid';
+
+        const status = document.createElement('div');
+        status.id = 'tcs-status';
+
+        wrapper.appendChild(toolbar);
+        wrapper.appendChild(grid);
+        wrapper.appendChild(status);
+
+        anchor.parentNode.insertBefore(wrapper, anchor);
+        anchor.style.display = 'none';
+    }
+
+    // ─── Init ────────────────────────────────────────────────────────────────────
+
+    function init() {
+        const carList = document.querySelector('ul.enlist-list');
+        if (!carList || document.getElementById('tcs-wrapper')) return;
+
+        setTimeout(() => {
+            loadCustomOrder();
+            loadNicknames();
+            carData = extractCars();
+            if (carData.length === 0) return;
+            buildUI(carList);
+            renderGrid();
+        }, 200);
+    }
+
+    const observer = new MutationObserver(() => {
+        if (document.querySelector('ul.enlist-list') && !document.getElementById('tcs-wrapper')) {
+            init();
+        }
+        if (!document.querySelector('ul.enlist-list')) {
+            const w = document.getElementById('tcs-wrapper');
+            if (w) {
+                w.remove();
+                // Restore hidden original list if still in DOM
+                const orig = document.querySelector('ul.enlist-list');
+                if (orig) orig.style.display = '';
+            }
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+    init();
+
+})();
