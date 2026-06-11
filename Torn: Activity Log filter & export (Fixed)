@@ -1,0 +1,154 @@
+// ==UserScript==
+// @name         Torn: Activity Log filter & export (Fixed)
+// @namespace    lugburz.activity_log_filter_export
+// @version      0.5.2
+// @description  Export only visually filtered items from the Torn Log Page
+// @author       Lugburz & Community *fixed by cowboyup
+// @match        https://www.torn.com/*
+// @run-at       document-start
+// @grant        unsafeWindow
+// @grant        GM_registerMenuCommand
+// @license      MIT
+// ==/UserScript==
+
+var exportAll = false;
+var visibleCategories = [];
+var root = '#recent-history-wrapper > div.recent-history-content';
+var logpageLogs = [];
+
+function addInterceptor() {
+    if (unsafeWindow.__logInterceptorAdded) return;
+    unsafeWindow.__logInterceptorAdded = true;
+
+    const originalFetch = unsafeWindow.fetch;
+    unsafeWindow.fetch = async function(...args) {
+        const response = await originalFetch.apply(this, args);
+        const url = args[0] ? (typeof args[0] === 'string' ? args[0] : args[0].url) : '';
+
+        if (url && url.indexOf('page.php?sid=activityLogUserData') > -1) {
+            try {
+                const text = await response.clone().text();
+                const json = JSON.parse(text);
+                if (json && json.log) {
+                    for (const l of json.log) {
+                        if (!logpageLogs.some(existing => existing.ID === l.ID)) {
+                            logpageLogs.push(l);
+                        }
+                    }
+                    setTimeout(addExportButton, 300);
+                }
+            } catch (e) { console.error(e); }
+        }
+        return response;
+    };
+}
+
+function downloadCsv(csv) {
+    const myblob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+    const myurl = window.URL.createObjectURL(myblob);
+    const ancorTag = document.createElement('a');
+    ancorTag.href = myurl;
+    ancorTag.download = 'filtered_activity_log.csv';
+    document.body.appendChild(ancorTag);
+    ancorTag.click();
+    document.body.removeChild(ancorTag);
+}
+
+function scrapeVisiblePageLogs() {
+    if (typeof $ === 'undefined') return '';
+    let csv = 'time,category,text\n';
+
+    // Looks for both old log wrappers and modern React LogHistory rows
+    const logRows = $('#activity-log-root').find('tr, [class*=logRow___], [class*=row___]');
+
+    logRows.each((index, el) => {
+        if ($(el).is(':hidden') || $(el).attr('class')?.includes('title')) return;
+
+        const timeEl = $(el).find('td[class^=time], [class*=time___]');
+        const textEl = $(el).find('span.log-text, [class*=text___]');
+
+        if (textEl.length > 0) {
+            let id = textEl.attr('id') ? textEl.attr('id').replace('text-', '') : null;
+            let category = "Filtered Log";
+
+            if (id) {
+                const networkMatch = logpageLogs.find(log => log.ID === id);
+                if (networkMatch) {
+                    category = networkMatch.category;
+                }
+            }
+
+            const timeText = timeEl.text().trim() || "N/A";
+            const logText = textEl.text().trim().replace(/\n/g, ' ').replace(/"/g, '""');
+
+            csv += [`"${timeText}"`, category, `"${logText}"`].join(',') + '\n';
+        }
+    });
+    return csv;
+}
+
+function exportActivityLog() {
+    if (!exportAll) {
+        const scrapedCsv = scrapeVisiblePageLogs();
+        const rowCount = scrapedCsv.split('\n').length - 2;
+
+        if (rowCount > 0) {
+            downloadCsv(scrapedCsv);
+        } else {
+            alert("No visible logs found. Please make sure you are on the Log page and logs are currently displayed.");
+        }
+        return;
+    }
+
+    if (logpageLogs.length === 0) {
+        alert("Please wait for the Log Page data to finish loading.");
+        return;
+    }
+    let csv = 'time,category,text\n';
+    for (const l of logpageLogs) {
+        const time = new Date(l.time * 1000);
+        csv += [`"${time.toUTCString()}"`, l.category, `"${l.text.replace(/\n/g, ' ').replace(/"/g, '""')}"`].join(',') + '\n';
+    }
+    downloadCsv(csv);
+}
+
+function addExportButton() {
+    if (typeof $ === 'undefined' || $('#exportLogsBtn').length > 0) return;
+
+    let buttonClass = 'button___37oQ0';
+    // Check main button configurations or filters panel
+    let wrapper = $('#activity-log-root').find('[class*=buttonsWrapper], [class*=filterWrapper], [class*=container___]');
+
+    if (!wrapper.length) {
+        wrapper = $('#activity-log-root').find('h4').first(); // Fallback to header text block if wrappers fail
+    }
+
+    const button = `<button id="exportLogsBtn" class="${buttonClass}" style="line-height: 24px; padding: 0 12px; background-color: var(--default-blue-color, #337ab7); color: #fff; border: none; border-radius: 4px; margin-left: 10px; cursor: pointer;" title="Export filtered logs as CSV" type="button">Export Filtered CSV</button>`;
+    wrapper.append(button);
+
+    $('#exportLogsBtn').on('click', () => {
+        exportActivityLog();
+    });
+}
+
+addInterceptor();
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+} else {
+    init();
+}
+
+function init() {
+    if (typeof $ !== 'undefined') {
+        GM_registerMenuCommand('Export Filtered Logs', exportActivityLog);
+
+        setInterval(() => {
+            if ($('#activity-log-root').length && !$('#exportLogsBtn').length) {
+                addExportButton();
+            }
+        }, 1000);
+    } else {
+        setTimeout(init, 300);
+    }
+}
