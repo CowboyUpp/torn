@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.1.0
+// @version      2.4.3
 // @description  Split UI: Top Speed + Top Lap panels. Much cleaner track names. Separate tables & CSVs.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -11,6 +11,28 @@
 // @grant        unsafeWindow
 // @license      MIT
 // ==/UserScript==
+
+// Changelog:
+// 2.4.3 - Fix Best Laps columns cut off in lobby panel: reduce flex min-width from
+//         300px to 220px, add table-layout:fixed + colgroup proportional widths,
+//         overflow:hidden + text-overflow:ellipsis on td to prevent blowout.
+// 2.4.2 - CSS fix: add overflow-x:auto to .rslogPanel and min-width to tables so
+//         the Best Lap (and Speed) tables scroll horizontally instead of overflowing
+//         outside the widget container.
+// 2.4.1 - Confirmed raceData field names from live payload: track = raceData.title,
+//         car = raceData.imagePath + imageID + '/small.png'. Removed dev logger.
+// 2.4.0 - Add CAR_CLASSES map (sourced from Torn wiki) with coloured class badges
+//         (A=gold, B=silver, C=blue, D=green, E=grey) in all four tables and both CSV exports.
+// 2.3.0 - Store top speed as raw float (full precision) instead of rounding to 2dp before storage.
+//         CSV export now writes the full value. Display stays at toFixed(2).
+// 2.2.0 - Bug fixes:
+//         [1] Speed floor raised from >0 to >10 mph to filter near-zero lap-wrap spikes
+//         [2] updateTopSpeed: ignore speeds below 50 mph (implausible top-speed samples)
+//         [3] migrateSpeedLog: zero out existing topSpeed entries below 50 mph on first run
+//         [4] parseBestLapFromResponse: read track/car from raceData payload first,
+//             fall back to DOM — prevents stale globals mis-attributing laps during
+//             lobby transition (was causing duplicate 43.3s entries across different combos)
+//         [5] Added raceData key logger (console.log, dev aid, remove after confirming field names)
 
 'use strict';
 
@@ -83,14 +105,87 @@ function carName(carImg) {
     return CAR_NAMES[carKey(carImg)] || null;
 }
 
+// Car classes — sourced from https://wiki.torn.com/wiki/Cars
+const CAR_CLASSES = {
+    '77': 'D',  // Tabata RM2
+    '78': 'A',  // Edomondo NSX
+    '79': 'C',  // Echo Quadrato
+    '80': 'B',  // Bavaria M5
+    '81': 'C',  // Bavaria Z8
+    '82': 'C',  // Chevalier CZ06
+    '83': 'B',  // Dart Rampager
+    '84': 'C',  // Knight Firebrand
+    '85': 'A',  // Volt GT
+    '86': 'D',  // Invader H3
+    '87': 'B',  // Echo S4
+    '88': 'C',  // Edomondo IR
+    '89': 'D',  // Edomondo ACD
+    '90': 'E',  // Edomondo Localé
+    '91': 'D',  // Verpestung Insecta
+    '92': 'D',  // Chevalier CVR
+    '93': 'B',  // Volt MNG
+    '94': 'E',  // Trident
+    '95': 'C',  // Oceania SS
+    '494': 'E', // Limoen Saxon
+    '495': 'E', // Nano Pioneer
+    '496': 'E', // Vita Bravo
+    '497': 'E', // Zaibatsu Macro
+    '498': 'E', // Çagoutte 10-6
+    '499': 'E', // Papani Colé
+    '500': 'E', // Bedford Racer
+    '501': 'E', // Stålhög 860
+    '502': 'D', // Alpha Milano 156
+    '503': 'D', // Bavaria X5
+    '504': 'D', // Coche Basurero
+    '505': 'D', // Bedford Nova
+    '506': 'D', // Verpestung Sport
+    '507': 'C', // Echo S3
+    '508': 'C', // Volt RS
+    '509': 'C', // Edomondo S2
+    '510': 'C', // Nano Cavalier
+    '511': 'B', // Colina Tanprice
+    '512': 'B', // Cosmos EX
+    '513': 'B', // Yotsuhada EVX
+    '514': 'B', // Sturmfahrt 111
+    '515': 'B', // Tsubasa Impressor
+    '516': 'B', // Wington GGU
+    '517': 'A', // Weston Marlin 177
+    '518': 'A', // Echo R8
+    '519': 'A', // Stormatti Casteon
+    '520': 'A', // Lolo 458
+    '521': 'A', // Lambrini Torobravo
+    '522': 'A', // Veloria LFA
+    '523': 'A', // Mercia SLR
+    '524': 'A', // Zaibatsu GT-R
+};
+
+function carClass(carImg) {
+    return CAR_CLASSES[carKey(carImg)] || null;
+}
+
+// Returns an HTML badge string for a given car image URL.
+// Colours: A=gold, B=silver, C=blue, D=green, E=grey
+const CLASS_BADGE_STYLE = {
+    'A': 'background:#7a5c00;color:#ffd700;border:1px solid #ffd700;',
+    'B': 'background:#2a2a2a;color:#c0c0c0;border:1px solid #c0c0c0;',
+    'C': 'background:#002244;color:#4ca8ff;border:1px solid #4ca8ff;',
+    'D': 'background:#002200;color:#44cc44;border:1px solid #44cc44;',
+    'E': 'background:#1a1a1a;color:#888;border:1px solid #555;',
+};
+
+function classBadgeHtml(carImg) {
+    const cls = carClass(carImg);
+    if (!cls) return '';
+    const style = CLASS_BADGE_STYLE[cls] || '';
+    return `<span style="${style}font-size:9px;font-weight:bold;padding:1px 4px;border-radius:3px;margin-left:3px;vertical-align:middle;">${cls}</span>`;
+}
+
 // ─── Improved Track Name Normalizer ───────────────────────────────────────────
 function normalizeTrackName(titleText) {
     if (!titleText) return '';
 
     let cleaned = titleText
-        // Split at the first occurrence of " - " followed by race status, laps, countdown, etc.
         .split(/\s*-\s*(Race (started|finished|will Start|in progress)|Waiting|Cancelled|Starts:|lap|Lap|\d+\s+seconds?)/i)[0]
-        // Additional cleanup passes
         .replace(/\s*-\s*\d+\s*laps?.*$/i, '')
         .replace(/\s*-\s*Starts:.*$/i, '')
         .replace(/\s*-\s*Race.*$/i, '')
@@ -102,12 +197,14 @@ function normalizeTrackName(titleText) {
 
 // ─── Update functions ──────────────────────────────────────────────────────────
 function updateTopSpeed(trackName, speed, carImg) {
+    // FIX [2]: ignore implausible speeds — first-poll samples before car has built speed
+    if (speed < 50) return false;
+
     const log = getSpeedLog();
-    const rounded = parseFloat(speed.toFixed(2));
     const key = trackName + '|' + carKey(carImg);
-    if (!log[key] || rounded > (log[key].topSpeed || 0)) {
+    if (!log[key] || speed > (log[key].topSpeed || 0)) {
         if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, bestLapMs: 0, date: new Date().toISOString().split('T')[0] };
-        log[key].topSpeed = rounded;
+        log[key].topSpeed = speed; // raw float, full precision
         log[key].date = new Date().toISOString().split('T')[0];
         saveSpeedLog(log);
         return true;
@@ -137,7 +234,7 @@ function formatLapTime(ms) {
     return m + 'm ' + String(s).padStart(2, '0') + '.' + dec + 's';
 }
 
-// ─── Migration (cleans old messy entries) ─────────────────────────────────────
+// ─── Migration (cleans old messy entries + purges implausible top speeds) ─────
 function migrateSpeedLog() {
     let log = getSpeedLog();
     const migrated = {};
@@ -148,6 +245,13 @@ function migrateSpeedLog() {
         const cleanTrack = normalizeTrackName(track);
 
         if (cleanTrack !== track) changed = true;
+
+        // FIX [3]: zero out implausible top speeds recorded before the floor was in place
+        if ((data.topSpeed || 0) > 0 && data.topSpeed < 50) {
+            data.topSpeed = 0;
+            changed = true;
+            console.log('[Racing Logger] Cleared implausible top speed for', cleanTrack, '(was', data.topSpeed, 'mph)');
+        }
 
         const newKey = cleanTrack + '|' + carKey(data.car);
 
@@ -166,7 +270,7 @@ function migrateSpeedLog() {
 
     if (changed) {
         saveSpeedLog(migrated);
-        console.log('[Racing Logger] Cleaned track names during migration');
+        console.log('[Racing Logger] Migration complete');
     }
     return migrated;
 }
@@ -183,8 +287,8 @@ GM_addStyle(`
     @keyframes rslogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
     .rslogToggle { cursor: pointer; color: #888; font-size: 10px; text-decoration: underline; margin-left: auto; user-select: none; }
     .rslogToggle:hover { color: #fff200; }
-    .rslogPanel { display: none; margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }
-    .rslogPanel table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .rslogPanel { display: none; margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; overflow-x: auto; }
+    .rslogPanel table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 320px; }
     .rslogPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
     .rslogPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; }
     .rslogPanel tr.rslogCurrentTrack td { color: #fff200; }
@@ -198,10 +302,10 @@ GM_addStyle(`
     .rslogClearBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }
     #rslogLobbyBtn { display: inline-block; margin: 6px 10px 0; padding: 3px 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; cursor: pointer; user-select: none; }
     #rslogLobbyBtn:hover { border-color: #fff200; }
-    #rslogLobbyPanel { display: none; font-family: "Courier New", Courier, monospace; font-size: 11px; margin: 4px 10px 8px; padding: 6px 10px; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; }
-    #rslogLobbyPanel table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    #rslogLobbyPanel { display: none; font-family: "Courier New", Courier, monospace; font-size: 11px; margin: 4px 10px 8px; padding: 6px 10px; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; overflow-x: auto; }
+    #rslogLobbyPanel table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
     #rslogLobbyPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
-    #rslogLobbyPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; }
+    #rslogLobbyPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #rslogLobbyPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; }
     #rslogLobbyPanel td.rslogBestLap { color: #00cfff; font-weight: bold; }
     #rslogLobbyPanel td.rslogCar { width: 42px; padding: 2px 4px; }
@@ -313,10 +417,13 @@ function renderSpeedTable() {
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
         const isCurrent = (trackName === currentTrack);
+        const carHtml = data.car
+            ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
+            : '–';
         tbody.append(`
             <tr class="${isCurrent ? 'rslogCurrentTrack' : ''}">
                 <td>${escapeHtml(trackName)}</td>
-                <td class="rslogCar">${data.car ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">` : '–'}</td>
+                <td class="rslogCar" style="width:58px;">${carHtml}</td>
                 <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
                 <td>${data.date || '–'}</td>
             </tr>
@@ -335,10 +442,13 @@ function renderLapTable() {
     }
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
+        const carHtml = data.car
+            ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
+            : '–';
         tbody.append(`
             <tr>
                 <td>${escapeHtml(trackName)}</td>
-                <td class="rslogCar">${data.car ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">` : '–'}</td>
+                <td class="rslogCar" style="width:58px;">${carHtml}</td>
                 <td class="rslogBestLap">${formatLapTime(data.bestLapMs)}</td>
                 <td>${data.date || '–'}</td>
             </tr>
@@ -349,11 +459,12 @@ function renderLapTable() {
 // ─── CSV Exports ───────────────────────────────────────────────────────────────
 function downloadSpeedCsv() {
     const log = getSpeedLog();
-    let csv = 'Track,Car,Top Speed (mph),Date\n';
+    let csv = 'Track,Car,Class,Top Speed (mph),Date\n';
     Object.entries(log).forEach(([, data]) => {
         if (!data.topSpeed) return;
         const trackName = data.track || '';
-        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${data.topSpeed.toFixed(2)},"${data.date || ''}"\n`;
+        const cls = carClass(data.car) || '';
+        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${data.topSpeed},"${data.date || ''}"\n`;
     });
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -364,11 +475,12 @@ function downloadSpeedCsv() {
 
 function downloadLapCsv() {
     const log = getSpeedLog();
-    let csv = 'Track,Car,Best Lap,Date\n';
+    let csv = 'Track,Car,Class,Best Lap,Best Lap (ms),Date\n';
     Object.entries(log).forEach(([, data]) => {
         if (!data.bestLapMs) return;
         const trackName = data.track || '';
-        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${formatLapTime(data.bestLapMs)},"${data.date || ''}"\n`;
+        const cls = carClass(data.car) || '';
+        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${data.date || ''}"\n`;
     });
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -423,11 +535,30 @@ function launchFirework() {
 function parseBestLapFromResponse(data) {
     try {
         if (!data || !data.timeData || data.timeData.status < 3) return;
-        const cars = data.raceData?.cars;
+        const cars      = data.raceData?.cars;
         const trackData = data.raceData?.trackData;
         const playerName = data.user?.playername;
-        const totalLaps = data.laps;
+        const totalLaps  = data.laps;
         if (!cars || !trackData || !playerName || !totalLaps) return;
+
+        // FIX [4]: read track and car from payload — confirmed field names:
+        //   track → data.raceData.title
+        //   car   → data.raceData.imagePath + imageID (e.g. ".../items/522/small.png")
+        const trackNameRaw = data.raceData?.title
+            || (() => {
+                const el = document.querySelector('div.title-black.t-overflow');
+                return el ? el.textContent.trim() : '';
+            })();
+        const trackName = normalizeTrackName(trackNameRaw) || currentTrack;
+
+        const carImg = (() => {
+            const path = data.raceData?.imagePath;
+            const id   = data.raceData?.imageID;
+            if (path && id) return path + id + '/small.png';
+            return parseCarImg() || currentCar;
+        })();
+
+        if (!trackName || !carImg) return;
 
         const encoded = cars[playerName];
         if (!encoded) return;
@@ -450,12 +581,6 @@ function parseBestLapFromResponse(data) {
         if (bestLapSec === Infinity) return;
 
         const bestLapMs = Math.round(bestLapSec * 1000);
-        const trackEl = document.querySelector('div.title-black.t-overflow');
-        const trackText = trackEl ? trackEl.textContent.trim() : '';
-        const trackName = normalizeTrackName(trackText) || currentTrack;
-        const carImg = parseCarImg() || currentCar;
-
-        if (!trackName || !carImg) return;
 
         const isNewRecord = updateBestLap(trackName, carImg, bestLapMs);
         if (isNewRecord) {
@@ -498,7 +623,8 @@ function startSpeedLoop() {
         if (last_compl >= 0) {
             const speed = (compl - last_compl) / 100 * len * 3600000 / POLL_MS;
 
-            if (speed > 0 && speed < 400) {
+            // FIX [1]: raised floor from >0 to >10 to filter near-zero lap-wrap spikes
+            if (speed > 10 && speed < 400) {
                 $('#rslogSpeed').text(speed.toFixed(2) + ' mph');
 
                 if (speed > sessionTopSpeed) {
@@ -525,13 +651,15 @@ function injectLobbyPanel() {
         <button id="rslogLobbyBtn">▼ Speed & Lap Log</button>
         <div id="rslogLobbyPanel">
             <div style="display:flex; gap:12px; flex-wrap:wrap;">
-                <div style="flex:1; min-width:300px;">
+                <div style="flex:1; min-width:220px;">
                     <h4 style="margin:4px 0; color:#ff9900;">Top Speeds</h4>
-                    <table><thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogLobbySpeedBody"></tbody></table>
+                    <table><colgroup><col style="width:30%"><col style="width:22%"><col style="width:28%"><col style="width:20%"></colgroup>
+                    <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogLobbySpeedBody"></tbody></table>
                 </div>
-                <div style="flex:1; min-width:300px;">
+                <div style="flex:1; min-width:220px;">
                     <h4 style="margin:4px 0; color:#00cfff;">Best Laps</h4>
-                    <table><thead><tr><th>Track</th><th>Car</th><th>Best Lap</th><th>Date</th></tr></thead><tbody id="rslogLobbyLapBody"></tbody></table>
+                    <table><colgroup><col style="width:30%"><col style="width:22%"><col style="width:28%"><col style="width:20%"></colgroup>
+                    <thead><tr><th>Track</th><th>Car</th><th>Best Lap</th><th>Date</th></tr></thead><tbody id="rslogLobbyLapBody"></tbody></table>
                 </div>
             </div>
             <div id="rslogLobbyFooter">
@@ -575,9 +703,12 @@ function renderLobbySpeedTable() {
     }
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
+        const carHtml = data.car
+            ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
+            : '–';
         tbody.append(`
             <tr><td>${escapeHtml(trackName)}</td>
-            <td class="rslogCar">${data.car ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">` : '–'}</td>
+            <td class="rslogCar" style="width:58px;">${carHtml}</td>
             <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
             <td>${data.date || '–'}</td></tr>
         `);
@@ -595,9 +726,12 @@ function renderLobbyLapTable() {
     }
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
+        const carHtml = data.car
+            ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
+            : '–';
         tbody.append(`
             <tr><td>${escapeHtml(trackName)}</td>
-            <td class="rslogCar">${data.car ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">` : '–'}</td>
+            <td class="rslogCar" style="width:58px;">${carHtml}</td>
             <td class="rslogBestLap">${formatLapTime(data.bestLapMs)}</td>
             <td>${data.date || '–'}</td></tr>
         `);
