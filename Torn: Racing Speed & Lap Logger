@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.4.4
+// @version      2.4.5
 // @description  Split UI: Top Speed + Top Lap panels. Much cleaner track names. Separate tables & CSVs.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -13,6 +13,10 @@
 // ==/UserScript==
 
 // Changelog:
+// 2.4.5 - Proportional speed floor: replaced fixed 50 mph cutoff with
+//         max(10, trackLength × 10) so short tracks like Sewage (1.5mi → 15 mph floor)
+//         record properly while long tracks still filter early-race noise.
+//         Migration floor lowered to absolute minimum of 10 mph to match.
 // 2.4.4 - Critical fix: raceData.imagePath is the track SVG outline, NOT a car image URL.
 //         Revert car resolution to DOM-only (parseCarImg/currentCar). Add migration step
 //         to purge corrupted SVG strings from data.car in existing storage.
@@ -200,9 +204,11 @@ function normalizeTrackName(titleText) {
 }
 
 // ─── Update functions ──────────────────────────────────────────────────────────
-function updateTopSpeed(trackName, speed, carImg) {
-    // FIX [2]: ignore implausible speeds — first-poll samples before car has built speed
-    if (speed < 50) return false;
+function updateTopSpeed(trackName, speed, carImg, trackLen) {
+    // Proportional floor: filters early-race near-zero samples without punishing
+    // short technical tracks. Min 10 mph, scales with track length (×10 per mile).
+    const minSpeed = Math.max(10, trackLen * 10);
+    if (speed < minSpeed) return false;
 
     const log = getSpeedLog();
     const key = trackName + '|' + carKey(carImg);
@@ -258,8 +264,8 @@ function migrateSpeedLog() {
             console.log('[Racing Logger] Cleared corrupted car image for', cleanTrack);
         }
 
-        // FIX [3]: zero out implausible top speeds recorded before the floor was in place
-        if ((data.topSpeed || 0) > 0 && data.topSpeed < 50) {
+        // Zero out implausible top speeds (below absolute minimum floor of 10 mph)
+        if ((data.topSpeed || 0) > 0 && data.topSpeed < 10) {
             data.topSpeed = 0;
             changed = true;
             console.log('[Racing Logger] Cleared implausible top speed for', cleanTrack, '(was', data.topSpeed, 'mph)');
@@ -638,7 +644,7 @@ function startSpeedLoop() {
                     $('#rslogSessionTopVal').text(speed.toFixed(2));
                 }
 
-                if (updateTopSpeed(currentTrack, speed, currentCar)) {
+                if (updateTopSpeed(currentTrack, speed, currentCar, len)) {
                     $('#rslogNewRecord').stop(true, true).show().delay(2000).fadeOut(500);
                     launchFirework();
                     if ($('#rslogSpeedPanelContent').is(':visible')) renderSpeedTable();
