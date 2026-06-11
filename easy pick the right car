@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Racing - Car Sorter
 // @namespace    https://greasyfork.org/users/CowboyUpp
-// @version      1.3.0
+// @version      1.3.1
 // @description  Sort, filter, reorder and nickname your cars on the join-race screen.
-// @author       CowboyUp
+// @author       CowboyUpp
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // Changelog:
+// v1.3.1 - Fix triple toolbar on Your Cars page: debounce init so multiple
+//          ul.enlist-list insertions produce only one widget; hide all lists.
+//          Fix 0-60 showing as 0s: match number after colon in stat text,
+//          not first digit in keyword itself.
 // v1.3.0 - Complete rewrite of extractCars() based on confirmed live DOM:
 //          - Car name from .model-car-name-{id} (user's Torn custom name)
 //          - Torn model name + class from .model span.bold / (Class X) text
@@ -196,7 +200,8 @@
                 for (const li of lis) {
                     const text = li.textContent;
                     if (text.toLowerCase().includes(keyword.toLowerCase())) {
-                        const m = text.match(/([\d,]+(?:\.\d+)?)\s*(%|mph|seconds|feet)?/);
+                        // Match number after the colon to avoid matching digits in the keyword itself
+                        const m = text.match(/:\s*([\d,]+(?:\.\d+)?)/);
                         if (m) return parseFloat(m[1].replace(/,/g, ''));
                     }
                 }
@@ -613,18 +618,27 @@
 
     // ─── Init ────────────────────────────────────────────────────────────────────
 
-    function init() {
-        const carList = document.querySelector('ul.enlist-list');
-        if (!carList || document.getElementById('tcs-wrapper')) return;
+    let _initTimer = null;
 
-        setTimeout(() => {
+    function init() {
+        // Debounce — Torn inserts multiple ul.enlist-list elements in quick succession;
+        // wait for DOM to settle before building the single unified widget.
+        clearTimeout(_initTimer);
+        _initTimer = setTimeout(() => {
+            const firstList = document.querySelector('ul.enlist-list');
+            if (!firstList || document.getElementById('tcs-wrapper')) return;
+
             loadCustomOrder();
             loadNicknames();
+            // extractCars uses querySelectorAll which collects ALL li across ALL lists
             carData = extractCars();
             if (carData.length === 0) return;
-            buildUI(carList);
+            // Anchor the widget before the first list; hide all lists
+            buildUI(firstList);
+            // Hide any additional lists too
+            document.querySelectorAll('ul.enlist-list').forEach(l => l.style.display = 'none');
             renderGrid();
-        }, 200);
+        }, 300);
     }
 
     const observer = new MutationObserver(() => {
@@ -632,13 +646,9 @@
             init();
         }
         if (!document.querySelector('ul.enlist-list')) {
+            clearTimeout(_initTimer);
             const w = document.getElementById('tcs-wrapper');
-            if (w) {
-                w.remove();
-                // Restore hidden original list if still in DOM
-                const orig = document.querySelector('ul.enlist-list');
-                if (orig) orig.style.display = '';
-            }
+            if (w) w.remove();
         }
     });
 
