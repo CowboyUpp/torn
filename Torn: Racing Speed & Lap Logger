@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.4.3
+// @version      2.4.4
 // @description  Split UI: Top Speed + Top Lap panels. Much cleaner track names. Separate tables & CSVs.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -13,6 +13,10 @@
 // ==/UserScript==
 
 // Changelog:
+// 2.4.4 - Critical fix: raceData.imagePath is the track SVG outline, NOT a car image URL.
+//         Revert car resolution to DOM-only (parseCarImg/currentCar). Add migration step
+//         to purge corrupted SVG strings from data.car in existing storage.
+//         Date column widened to 24% in lobby colgroup.
 // 2.4.3 - Fix Best Laps columns cut off in lobby panel: reduce flex min-width from
 //         300px to 220px, add table-layout:fixed + colgroup proportional widths,
 //         overflow:hidden + text-overflow:ellipsis on td to prevent blowout.
@@ -245,6 +249,14 @@ function migrateSpeedLog() {
         const cleanTrack = normalizeTrackName(track);
 
         if (cleanTrack !== track) changed = true;
+
+        // Purge corrupted car entries — imagePath was mistakenly used as car URL,
+        // producing SVG markup strings instead of item image URLs.
+        if (data.car && (data.car.includes('<svg') || data.car.includes('<!DOCTYPE svg'))) {
+            data.car = '';
+            changed = true;
+            console.log('[Racing Logger] Cleared corrupted car image for', cleanTrack);
+        }
 
         // FIX [3]: zero out implausible top speeds recorded before the floor was in place
         if ((data.topSpeed || 0) > 0 && data.topSpeed < 50) {
@@ -541,9 +553,8 @@ function parseBestLapFromResponse(data) {
         const totalLaps  = data.laps;
         if (!cars || !trackData || !playerName || !totalLaps) return;
 
-        // FIX [4]: read track and car from payload — confirmed field names:
-        //   track → data.raceData.title
-        //   car   → data.raceData.imagePath + imageID (e.g. ".../items/522/small.png")
+        // FIX [4]: track from payload (confirmed field: raceData.title), car from DOM.
+        // raceData.imagePath/imageID are the track SVG outline — NOT the car image.
         const trackNameRaw = data.raceData?.title
             || (() => {
                 const el = document.querySelector('div.title-black.t-overflow');
@@ -551,12 +562,7 @@ function parseBestLapFromResponse(data) {
             })();
         const trackName = normalizeTrackName(trackNameRaw) || currentTrack;
 
-        const carImg = (() => {
-            const path = data.raceData?.imagePath;
-            const id   = data.raceData?.imageID;
-            if (path && id) return path + id + '/small.png';
-            return parseCarImg() || currentCar;
-        })();
+        const carImg = parseCarImg() || currentCar;
 
         if (!trackName || !carImg) return;
 
@@ -653,12 +659,12 @@ function injectLobbyPanel() {
             <div style="display:flex; gap:12px; flex-wrap:wrap;">
                 <div style="flex:1; min-width:220px;">
                     <h4 style="margin:4px 0; color:#ff9900;">Top Speeds</h4>
-                    <table><colgroup><col style="width:30%"><col style="width:22%"><col style="width:28%"><col style="width:20%"></colgroup>
+                    <table><colgroup><col style="width:28%"><col style="width:22%"><col style="width:26%"><col style="width:24%"></colgroup>
                     <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogLobbySpeedBody"></tbody></table>
                 </div>
                 <div style="flex:1; min-width:220px;">
                     <h4 style="margin:4px 0; color:#00cfff;">Best Laps</h4>
-                    <table><colgroup><col style="width:30%"><col style="width:22%"><col style="width:28%"><col style="width:20%"></colgroup>
+                    <table><colgroup><col style="width:28%"><col style="width:22%"><col style="width:26%"><col style="width:24%"></colgroup>
                     <thead><tr><th>Track</th><th>Car</th><th>Best Lap</th><th>Date</th></tr></thead><tbody id="rslogLobbyLapBody"></tbody></table>
                 </div>
             </div>
