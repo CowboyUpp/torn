@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Racing - Car Sorter
 // @namespace    https://greasyfork.org/users/CowboyUpp
-// @version      1.5.0
+// @version      1.5.1
 // @description  Sort, filter and nickname all your cars. Auto-pages through all cars.
 // @author       CowboyUpp
 // @match        https://www.torn.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // Changelog:
+// v1.5.1 - Fix pagination loop: disconnect MutationObserver during collection so page
+//          clicks don't re-trigger init. Fix waitForListChange to detect DOM node
+//          replacement. Observer no longer resets _collecting mid-run.
 // v1.5.0 - Removed API entirely. Auto-clicks through all pagination pages (a.page-number
 //          with page-value attr) to collect all cars before rendering. No API key needed.
 //          Shows loading indicator while paging. Cars cached in GM storage for 5 minutes
@@ -185,43 +188,40 @@
             .sort((a, b) => parseInt(a.getAttribute('page-value')) - parseInt(b.getAttribute('page-value')));
     }
 
-    function waitForListChange(previousCount, timeout = 3000) {
-        return new Promise((resolve, reject) => {
+    function waitForListChange(previousList, timeout = 4000) {
+        // Wait until the ul.enlist-list node itself is replaced OR its children change
+        return new Promise((resolve) => {
             const start = Date.now();
             const check = () => {
                 const list = document.querySelector('ul.enlist-list');
-                if (list && list.querySelectorAll(':scope > li').length > 0 &&
-                    list.querySelectorAll(':scope > li').length !== previousCount) {
+                // New node, or same node but children have settled with items
+                if (list && list !== previousList && list.querySelectorAll(':scope > li').length > 0) {
                     resolve(list);
-                } else if (Date.now() - start > timeout) {
-                    // Timeout — resolve with whatever is there
-                    resolve(document.querySelector('ul.enlist-list'));
-                } else {
-                    setTimeout(check, 100);
+                } else if (list && list === previousList) {
+                    // Same node — Torn may update in place; just wait for items
+                    const count = list.querySelectorAll(':scope > li').length;
+                    if (count > 0) { resolve(list); return; }
                 }
+                if (Date.now() - start > timeout) { resolve(document.querySelector('ul.enlist-list')); return; }
+                setTimeout(check, 120);
             };
-            setTimeout(check, 200);
+            setTimeout(check, 300);
         });
     }
 
     function waitForListStable(timeout = 3000) {
-        // Wait for list to exist and have items, then wait 200ms of no change
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
             const start = Date.now();
-            let lastCount = -1;
-            let stableFor = 0;
+            let lastCount = -1, stableFor = 0;
             const check = () => {
                 const list = document.querySelector('ul.enlist-list');
                 const count = list ? list.querySelectorAll(':scope > li').length : 0;
                 if (count > 0 && count === lastCount) {
-                    stableFor += 100;
-                    if (stableFor >= 200) { resolve(list); return; }
-                } else {
-                    stableFor = 0;
-                    lastCount = count;
-                }
+                    stableFor += 120;
+                    if (stableFor >= 240) { resolve(list); return; }
+                } else { stableFor = 0; lastCount = count; }
                 if (Date.now() - start > timeout) { resolve(list); return; }
-                setTimeout(check, 100);
+                setTimeout(check, 120);
             };
             setTimeout(check, 150);
         });
@@ -230,31 +230,42 @@
     async function collectAllCars(loadingEl) {
         const pageLinks = getPageLinks();
 
-        // Only one page — just extract and return
         if (pageLinks.length <= 1) {
             const list = document.querySelector('ul.enlist-list');
             return list ? extractCarsFromList(list) : [];
         }
 
+        // ── Disconnect observer so pagination clicks don't trigger re-init ──
+        observer.disconnect();
+
         const allCars = [];
         if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page 1 of ${pageLinks.length}…`;
 
-        // Collect page 1 (already loaded)
+        // Page 1 already loaded
         const firstList = document.querySelector('ul.enlist-list');
         if (firstList) allCars.push(...extractCarsFromList(firstList));
 
         // Click through remaining pages
         for (let i = 1; i < pageLinks.length; i++) {
             if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page ${i + 1} of ${pageLinks.length}…`;
-            const prevCount = document.querySelector('ul.enlist-list')?.querySelectorAll(':scope > li').length || 0;
-            pageLinks[i].click();
-            const list = await waitForListChange(prevCount);
-            if (list) allCars.push(...extractCarsFromList(list));
+            const currentList = document.querySelector('ul.enlist-list');
+            // Re-query page links each time — DOM may have been replaced
+            const freshLinks = getPageLinks();
+            const target = freshLinks.find(a => a.getAttribute('page-value') === pageLinks[i].getAttribute('page-value'));
+            if (!target) continue;
+            target.click();
+            const newList = await waitForListChange(currentList);
+            if (newList) allCars.push(...extractCarsFromList(newList));
         }
 
         // Navigate back to page 1
-        pageLinks[0].click();
-        await waitForListStable();
+        if (loadingEl) loadingEl.querySelector('span').textContent = 'Finishing…';
+        const freshLinks = getPageLinks();
+        const page1 = freshLinks.find(a => a.getAttribute('page-value') === '0');
+        if (page1) { page1.click(); await waitForListStable(); }
+
+        // ── Reconnect observer ──
+        observer.observe(document.body, { childList: true, subtree: true });
 
         return allCars;
     }
@@ -755,9 +766,9 @@
         const hasList   = !!document.querySelector('ul.enlist-list');
         const hasWidget = !!(document.getElementById('tcs-wrapper') || document.getElementById('tcs-loading'));
         if (hasList && !hasWidget && !_collecting) init();
-        if (!hasList) {
+        // Only clean up if we're NOT mid-collection
+        if (!hasList && !_collecting) {
             clearTimeout(_initTimer);
-            _collecting = false;
             ['tcs-wrapper', 'tcs-loading'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) el.remove();
