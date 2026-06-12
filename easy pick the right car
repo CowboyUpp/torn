@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Racing - Car Sorter
 // @namespace    https://greasyfork.org/users/CowboyUpp
-// @version      1.5.1
+// @version      1.5.2
 // @description  Sort, filter and nickname all your cars. Auto-pages through all cars.
 // @author       CowboyUpp
 // @match        https://www.torn.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // Changelog:
+// v1.5.2 - Fix infinite pagination loop: use empty→fill wait strategy instead of
+//          node-identity check. Observer stays disconnected for entire collection
+//          and only reconnects in init() after buildWidget is in place.
 // v1.5.1 - Fix pagination loop: disconnect MutationObserver during collection so page
 //          clicks don't re-trigger init. Fix waitForListChange to detect DOM node
 //          replacement. Observer no longer resets _collecting mid-run.
@@ -188,40 +191,38 @@
             .sort((a, b) => parseInt(a.getAttribute('page-value')) - parseInt(b.getAttribute('page-value')));
     }
 
-    function waitForListChange(previousList, timeout = 4000) {
-        // Wait until the ul.enlist-list node itself is replaced OR its children change
+    function waitForListEmpty(timeout = 3000) {
+        // Wait for Torn to clear the list contents after a page click
         return new Promise((resolve) => {
             const start = Date.now();
             const check = () => {
                 const list = document.querySelector('ul.enlist-list');
-                // New node, or same node but children have settled with items
-                if (list && list !== previousList && list.querySelectorAll(':scope > li').length > 0) {
-                    resolve(list);
-                } else if (list && list === previousList) {
-                    // Same node — Torn may update in place; just wait for items
-                    const count = list.querySelectorAll(':scope > li').length;
-                    if (count > 0) { resolve(list); return; }
-                }
-                if (Date.now() - start > timeout) { resolve(document.querySelector('ul.enlist-list')); return; }
-                setTimeout(check, 120);
+                const count = list ? list.querySelectorAll(':scope > li').length : 0;
+                if (count === 0) { resolve(); return; }
+                if (Date.now() - start > timeout) { resolve(); return; }
+                setTimeout(check, 80);
             };
-            setTimeout(check, 300);
+            setTimeout(check, 80);
         });
     }
 
-    function waitForListStable(timeout = 3000) {
+    function waitForListFilled(timeout = 5000) {
+        // Wait for Torn to populate the list after page change
         return new Promise((resolve) => {
             const start = Date.now();
-            let lastCount = -1, stableFor = 0;
+            let lastCount = 0, stableFor = 0;
             const check = () => {
                 const list = document.querySelector('ul.enlist-list');
                 const count = list ? list.querySelectorAll(':scope > li').length : 0;
                 if (count > 0 && count === lastCount) {
-                    stableFor += 120;
-                    if (stableFor >= 240) { resolve(list); return; }
-                } else { stableFor = 0; lastCount = count; }
+                    stableFor += 80;
+                    if (stableFor >= 160) { resolve(list); return; }
+                } else {
+                    stableFor = 0;
+                    lastCount = count;
+                }
                 if (Date.now() - start > timeout) { resolve(list); return; }
-                setTimeout(check, 120);
+                setTimeout(check, 80);
             };
             setTimeout(check, 150);
         });
@@ -235,26 +236,28 @@
             return list ? extractCarsFromList(list) : [];
         }
 
-        // ── Disconnect observer so pagination clicks don't trigger re-init ──
+        // Disconnect observer for the entire collection — reconnected in init() after buildWidget
         observer.disconnect();
 
         const allCars = [];
-        if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page 1 of ${pageLinks.length}…`;
 
         // Page 1 already loaded
+        if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page 1 of ${pageLinks.length}…`;
         const firstList = document.querySelector('ul.enlist-list');
         if (firstList) allCars.push(...extractCarsFromList(firstList));
 
         // Click through remaining pages
         for (let i = 1; i < pageLinks.length; i++) {
             if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page ${i + 1} of ${pageLinks.length}…`;
-            const currentList = document.querySelector('ul.enlist-list');
-            // Re-query page links each time — DOM may have been replaced
+
+            // Re-query links fresh each iteration
             const freshLinks = getPageLinks();
             const target = freshLinks.find(a => a.getAttribute('page-value') === pageLinks[i].getAttribute('page-value'));
             if (!target) continue;
+
             target.click();
-            const newList = await waitForListChange(currentList);
+            await waitForListEmpty();     // wait for old items to clear
+            const newList = await waitForListFilled(); // wait for new items
             if (newList) allCars.push(...extractCarsFromList(newList));
         }
 
@@ -262,10 +265,11 @@
         if (loadingEl) loadingEl.querySelector('span').textContent = 'Finishing…';
         const freshLinks = getPageLinks();
         const page1 = freshLinks.find(a => a.getAttribute('page-value') === '0');
-        if (page1) { page1.click(); await waitForListStable(); }
-
-        // ── Reconnect observer ──
-        observer.observe(document.body, { childList: true, subtree: true });
+        if (page1) {
+            page1.click();
+            await waitForListEmpty();
+            await waitForListFilled();
+        }
 
         return allCars;
     }
@@ -750,9 +754,12 @@
                 loader.remove();
                 buildWidget(firstList);
                 renderGrid();
+                // Reconnect observer now that widget is in place
+                observer.observe(document.body, { childList: true, subtree: true });
             } catch (e) {
                 loader.remove();
                 firstList.style.display = '';
+                observer.observe(document.body, { childList: true, subtree: true });
                 console.error('[Car Sorter] Error collecting cars:', e);
             } finally {
                 _collecting = false;
@@ -776,6 +783,8 @@
         }
     });
 
+    // Observer starts connected for initial page detection.
+    // It is disconnected during pagination and reconnected after buildWidget.
     observer.observe(document.body, { childList: true, subtree: true });
     init();
 
