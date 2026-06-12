@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Torn: Garage
+// @name         Torn: Racecar Garage
 // @namespace    https://greasyfork.org/users/CowboyUpp
 // @version      1.5.4
 // @description  Your full car collection in one view. Sort, filter and nickname all your cars.
-// @author       CowboyUpp
+// @author       CowboyUp
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
