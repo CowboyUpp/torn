@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Racing - Car Sorter
 // @namespace    https://greasyfork.org/users/CowboyUpp
-// @version      1.4.0
-// @description  Sort, filter and nickname all your cars via API — no pagination limit.
-// @author       CowboyUp
+// @version      1.5.0
+// @description  Sort, filter and nickname all your cars. Auto-pages through all cars.
+// @author       CowboyUpp
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -11,11 +11,11 @@
 // ==/UserScript==
 
 // Changelog:
-// v1.4.0 - API-powered: fetches ALL cars via user→properties (Minimal Access key).
-//          Pretty first-run setup UI with direct key-creation link (pre-selects correct
-//          permissions). API key stored in GM storage, gear button to change it.
-//          All cars shown in one grid, no pagination. Car data cached for 5 minutes.
-//          Merged with DOM extraction as fallback for stat bars (points) not in API.
+// v1.5.0 - Removed API entirely. Auto-clicks through all pagination pages (a.page-number
+//          with page-value attr) to collect all cars before rendering. No API key needed.
+//          Shows loading indicator while paging. Cars cached in GM storage for 5 minutes
+//          so subsequent tab visits are instant.
+// v1.4.0 - API-powered attempt (reverted — enlisted cars not in Torn API)
 // v1.3.1 - Fix triple toolbar, fix 0-60 showing as 0s
 // v1.3.0 - Complete DOM rewrite with confirmed selectors
 // v1.2.0 - Nicknames
@@ -31,14 +31,10 @@
     const CLASS_COLORS = {
         A: '#ffd700', B: '#c0c0c0', C: '#4ca8ff', D: '#44cc44', E: '#888888',
     };
-    const API_KEY_STORAGE   = 'tcs_api_key';
-    const NICKNAMES_KEY     = 'tcs_nicknames';
-    const CUSTOM_ORDER_KEY  = 'tcs_custom_order';
-    const CACHE_KEY         = 'tcs_car_cache';
-    const CACHE_TTL_MS      = 5 * 60 * 1000; // 5 minutes
-
-    // Key creation URL — pre-selects user→properties (Minimal Access)
-    const KEY_CREATE_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Car%20Sorter&user=properties';
+    const NICKNAMES_KEY    = 'tcs_nicknames';
+    const CUSTOM_ORDER_KEY = 'tcs_custom_order';
+    const CACHE_KEY        = 'tcs_car_cache';
+    const CACHE_TTL_MS     = 5 * 60 * 1000; // 5 minutes
 
     // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -49,15 +45,15 @@
     let customOrder = [];
     let nicknames   = {};
     let dragSrcIdx  = null;
+    let _initTimer  = null;
+    let _collecting = false;
 
     // ─── Storage ─────────────────────────────────────────────────────────────────
 
-    const getApiKey      = ()  => GM_getValue(API_KEY_STORAGE, '');
-    const setApiKey      = k   => GM_setValue(API_KEY_STORAGE, k.trim());
-    const getNicknames   = ()  => { try { return JSON.parse(GM_getValue(NICKNAMES_KEY, '{}')); } catch (_) { return {}; } };
-    const saveNicknames  = ()  => GM_setValue(NICKNAMES_KEY, JSON.stringify(nicknames));
-    const getCustomOrder = ()  => { try { return JSON.parse(GM_getValue(CUSTOM_ORDER_KEY, '[]')); } catch (_) { return []; } };
-    const saveCustomOrder = () => GM_setValue(CUSTOM_ORDER_KEY, JSON.stringify(customOrder));
+    const getNicknames    = ()  => { try { return JSON.parse(GM_getValue(NICKNAMES_KEY, '{}')); } catch (_) { return {}; } };
+    const saveNicknames   = ()  => GM_setValue(NICKNAMES_KEY, JSON.stringify(nicknames));
+    const getCustomOrder  = ()  => { try { return JSON.parse(GM_getValue(CUSTOM_ORDER_KEY, '[]')); } catch (_) { return []; } };
+    const saveCustomOrder = ()  => GM_setValue(CUSTOM_ORDER_KEY, JSON.stringify(customOrder));
 
     function getCachedCars() {
         try {
@@ -71,8 +67,12 @@
     function setCachedCars(data) {
         GM_setValue(CACHE_KEY, JSON.stringify({ ts: Date.now(), data }));
     }
+    function clearCache() {
+        GM_setValue(CACHE_KEY, null);
+    }
 
-    // ─── CAR_NAMES map (item ID → model name) ────────────────────────────────────
+    // ─── CAR_NAMES / CAR_CLASSES ─────────────────────────────────────────────────
+
     const CAR_NAMES = {
         '77':'Tabata RM2','78':'Edomondo NSX','79':'Echo Quadrato','80':'Bavaria M5',
         '81':'Bavaria Z8','82':'Chevalier CZ06','83':'Dart Rampager','84':'Knight Firebrand',
@@ -98,46 +98,34 @@
         '523':'A','524':'A',
     };
 
-    // ─── API fetch ───────────────────────────────────────────────────────────────
+    // ─── DOM extraction ───────────────────────────────────────────────────────────
 
-    async function fetchCarsFromApi(apiKey) {
-        const url = `https://api.torn.com/user/?selections=properties&key=${apiKey}&comment=CarSorter`;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const json = await resp.json();
-        if (json.error) throw Object.assign(new Error(json.error.error), { code: json.error.code });
-        return json;
-    }
-
-    function parseApiCars(json) {
-        const props = json.properties;
-        if (!props) return [];
-
-        // properties is an object keyed by property ID
-        // We only want type=car (type_id in racing car range)
-        const cars = [];
-        for (const [propId, prop] of Object.entries(props)) {
-            if (!prop || prop.property_type !== 'Enlisted Car') continue;
-            // item_id is the car model ID
-            const itemId = String(prop.item_id || '');
-            const carId  = String(propId); // unique property ID = stable key
-            const tornModel   = CAR_NAMES[itemId] || prop.name || 'Unknown';
-            const carClass    = CAR_CLASSES[itemId] || 'A';
-            const imgSrc      = itemId ? `https://www.torn.com/images/items/${itemId}/large.png` : '';
-            cars.push({ carId, itemId, tornModel, carClass, imgSrc, tornCustomName: prop.name || '' });
-        }
-        return cars;
-    }
-
-    // ─── DOM stat extraction (for current page cars only — fills in bar stats) ──
-
-    function extractDomStats() {
-        const map = {}; // carId → stats
-        const items = [...document.querySelectorAll('ul.enlist-list > li')];
-        for (const el of items) {
+    function extractCarsFromList(listEl) {
+        const items = [...listEl.querySelectorAll(':scope > li')];
+        return items.map((el, idx) => {
             const removeLink = el.querySelector('a.enlist-link.remove[id-value]');
-            if (!removeLink) continue;
-            const carId = removeLink.getAttribute('id-value');
+            const carId = removeLink ? removeLink.getAttribute('id-value') : `idx-${idx}`;
+
+            const modelEl = el.querySelector('.model');
+            let tornModel = '', carClass = 'A';
+            if (modelEl) {
+                const boldEl = modelEl.querySelector('.bold');
+                tornModel = boldEl ? boldEl.textContent.trim() : '';
+                const classMatch = modelEl.textContent.match(/Class\s+([A-E])/i);
+                if (classMatch) carClass = classMatch[1].toUpperCase();
+            }
+
+            const customNameEl = el.querySelector('[class*="model-car-name-"]');
+            const tornCustomName = customNameEl ? customNameEl.textContent.trim() : '';
+
+            const imgEl = el.querySelector('.enlist-car img');
+            const imgSrc = imgEl ? imgEl.src.replace(/large(@\dx)?\.png$/, 'large.png') : '';
+
+            // Extract item ID from image URL for fallback name/class
+            const itemIdMatch = imgSrc.match(/items\/(\d+)\//);
+            const itemId = itemIdMatch ? itemIdMatch[1] : '';
+            if (!tornModel && itemId) tornModel = CAR_NAMES[itemId] || '';
+            if (carClass === 'A' && itemId && CAR_CLASSES[itemId]) carClass = CAR_CLASSES[itemId];
 
             function getListedStat(keyword) {
                 for (const li of el.querySelectorAll('ul.enlisted-stat > li')) {
@@ -151,12 +139,11 @@
             }
             function getBarStat(labelText) {
                 for (const li of el.querySelectorAll('ul.enlist-bars > li')) {
-                    const title = li.querySelector('.title');
-                    if (title && title.textContent.trim().toLowerCase() === labelText.toLowerCase()) {
+                    const titleEl = li.querySelector('.title');
+                    if (titleEl && titleEl.textContent.trim().toLowerCase() === labelText.toLowerCase()) {
                         const pbWrap = li.querySelector('.progressbar-wrap');
                         if (pbWrap) {
-                            const t = pbWrap.getAttribute('title') || '';
-                            const m = t.match(/^(\d+)/);
+                            const m = (pbWrap.getAttribute('title') || '').match(/^(\d+)/);
                             if (m) return parseInt(m[1], 10);
                         }
                     }
@@ -164,7 +151,8 @@
                 return null;
             }
 
-            map[carId] = {
+            return {
+                el, carId, itemId, tornModel, tornCustomName, carClass, imgSrc,
                 topSpeedMph:  getListedStat('Top Speed'),
                 zeroSixty:    getListedStat('0-60'),
                 brakeDist:    getListedStat('Brake Dist'),
@@ -176,181 +164,100 @@
                 accelPts:     getBarStat('Acceleration'),
                 brakingPts:   getBarStat('Braking'),
                 handlingPts:  getBarStat('Handling'),
-                tornCustomName: (() => {
-                    const el2 = el.querySelector('[class*="model-car-name-"]');
-                    return el2 ? el2.textContent.trim() : '';
-                })(),
             };
-        }
-        return map;
+        });
     }
 
-    // ─── Styles ──────────────────────────────────────────────────────────────────
+    // ─── Pagination collector ────────────────────────────────────────────────────
+    // Clicks each a.page-number in order, waits for the list to refresh,
+    // collects cars, then navigates back to page 1.
 
-    const STYLE = `
-        #tcs-wrapper { margin: 8px 0; font-family: Arial, sans-serif; }
+    function getPageLinks() {
+        // De-dupe by page-value, sort numerically
+        const seen = new Set();
+        return [...document.querySelectorAll('a.page-number[page-value]')]
+            .filter(a => {
+                const v = a.getAttribute('page-value');
+                if (seen.has(v)) return false;
+                seen.add(v);
+                return true;
+            })
+            .sort((a, b) => parseInt(a.getAttribute('page-value')) - parseInt(b.getAttribute('page-value')));
+    }
 
-        /* ── Setup screen ── */
-        #tcs-setup {
-            background: linear-gradient(135deg, #111 0%, #1a1a1a 100%);
-            border: 1px solid #333; border-radius: 8px;
-            padding: 28px 32px; max-width: 480px; margin: 12px 0;
-            font-family: Arial, sans-serif;
-        }
-        #tcs-setup h2 {
-            margin: 0 0 6px; font-size: 18px; color: #ffd700;
-            letter-spacing: 0.5px;
-        }
-        #tcs-setup p { color: #888; font-size: 12px; margin: 0 0 20px; line-height: 1.5; }
-        .tcs-setup-steps { margin: 0 0 20px; padding: 0; list-style: none; }
-        .tcs-setup-steps li {
-            display: flex; align-items: flex-start; gap: 10px;
-            font-size: 12px; color: #aaa; margin-bottom: 12px;
-        }
-        .tcs-step-num {
-            flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
-            background: #2a2a2a; border: 1px solid #444;
-            font-size: 11px; font-weight: bold; color: #ffd700;
-            display: flex; align-items: center; justify-content: center;
-        }
-        .tcs-setup-link {
-            display: inline-block; margin: 0 0 20px;
-            padding: 8px 16px; border-radius: 5px;
-            background: #2a2200; border: 1px solid #ffd700;
-            color: #ffd700; font-size: 12px; font-weight: bold;
-            text-decoration: none; transition: background 0.15s;
-        }
-        .tcs-setup-link:hover { background: #3a3000; }
-        .tcs-setup-input-row { display: flex; gap: 8px; align-items: center; }
-        #tcs-api-input {
-            flex: 1; padding: 8px 10px; background: #111;
-            border: 1px solid #333; border-radius: 4px;
-            color: #fff; font-size: 12px; font-family: monospace;
-            outline: none; transition: border-color 0.15s;
-        }
-        #tcs-api-input:focus { border-color: #ffd700; }
-        #tcs-api-input::placeholder { color: #444; }
-        #tcs-api-save {
-            padding: 8px 16px; background: #2a2200;
-            border: 1px solid #ffd700; border-radius: 4px;
-            color: #ffd700; font-size: 12px; font-weight: bold;
-            cursor: pointer; transition: background 0.15s; white-space: nowrap;
-        }
-        #tcs-api-save:hover { background: #3a3000; }
-        #tcs-setup-error { font-size: 11px; color: #ff6666; margin-top: 8px; min-height: 16px; }
+    function waitForListChange(previousCount, timeout = 3000) {
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+            const check = () => {
+                const list = document.querySelector('ul.enlist-list');
+                if (list && list.querySelectorAll(':scope > li').length > 0 &&
+                    list.querySelectorAll(':scope > li').length !== previousCount) {
+                    resolve(list);
+                } else if (Date.now() - start > timeout) {
+                    // Timeout — resolve with whatever is there
+                    resolve(document.querySelector('ul.enlist-list'));
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            setTimeout(check, 200);
+        });
+    }
 
-        /* ── Loading ── */
-        #tcs-loading {
-            display: flex; align-items: center; gap: 10px;
-            padding: 16px 0; font-size: 12px; color: #666;
-        }
-        .tcs-spinner {
-            width: 16px; height: 16px; border: 2px solid #333;
-            border-top-color: #ffd700; border-radius: 50%;
-            animation: tcs-spin 0.7s linear infinite;
-        }
-        @keyframes tcs-spin { to { transform: rotate(360deg); } }
+    function waitForListStable(timeout = 3000) {
+        // Wait for list to exist and have items, then wait 200ms of no change
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+            let lastCount = -1;
+            let stableFor = 0;
+            const check = () => {
+                const list = document.querySelector('ul.enlist-list');
+                const count = list ? list.querySelectorAll(':scope > li').length : 0;
+                if (count > 0 && count === lastCount) {
+                    stableFor += 100;
+                    if (stableFor >= 200) { resolve(list); return; }
+                } else {
+                    stableFor = 0;
+                    lastCount = count;
+                }
+                if (Date.now() - start > timeout) { resolve(list); return; }
+                setTimeout(check, 100);
+            };
+            setTimeout(check, 150);
+        });
+    }
 
-        /* ── Toolbar ── */
-        #tcs-toolbar {
-            display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-            margin-bottom: 8px; padding: 6px 8px;
-            background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px;
-        }
-        .tcs-toolbar-group { display: flex; align-items: center; gap: 4px; }
-        .tcs-toolbar-label {
-            font-size: 10px; color: #555; text-transform: uppercase;
-            letter-spacing: 0.5px; margin-right: 2px;
-        }
-        .tcs-btn {
-            padding: 3px 9px; border-radius: 3px; border: 1px solid #2a2a2a;
-            background: #1e1e1e; color: #777; font-size: 11px; cursor: pointer;
-            transition: background 0.12s, border-color 0.12s; white-space: nowrap;
-        }
-        .tcs-btn:hover { background: #252525; border-color: #444; color: #bbb; }
-        .tcs-btn.active, .tcs-btn.sort-active { background: #252525; color: #fff; border-color: #555; }
-        .tcs-btn[data-class="A"].active { border-color: #ffd700; color: #ffd700; }
-        .tcs-btn[data-class="B"].active { border-color: #c0c0c0; color: #c0c0c0; }
-        .tcs-btn[data-class="C"].active { border-color: #4ca8ff; color: #4ca8ff; }
-        .tcs-btn[data-class="D"].active { border-color: #44cc44; color: #44cc44; }
-        .tcs-btn[data-class="E"].active { border-color: #888;    color: #888;    }
-        .tcs-divider { width: 1px; height: 18px; background: #2a2a2a; margin: 0 2px; }
-        .tcs-gear-btn {
-            margin-left: auto; padding: 3px 7px;
-            background: none; border: 1px solid #2a2a2a; border-radius: 3px;
-            color: #555; font-size: 12px; cursor: pointer; line-height: 1;
-        }
-        .tcs-gear-btn:hover { border-color: #555; color: #aaa; }
+    async function collectAllCars(loadingEl) {
+        const pageLinks = getPageLinks();
 
-        /* ── Grid ── */
-        #tcs-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-        .tcs-car-card {
-            background: #1a1a1a; border: 1px solid #242424; border-radius: 6px;
-            padding: 6px 8px 28px; width: 148px; flex: 0 0 148px;
-            cursor: pointer; position: relative; box-sizing: border-box;
-            user-select: none; transition: border-color 0.12s, background 0.12s;
+        // Only one page — just extract and return
+        if (pageLinks.length <= 1) {
+            const list = document.querySelector('ul.enlist-list');
+            return list ? extractCarsFromList(list) : [];
         }
-        .tcs-car-card:hover   { border-color: #383838; background: #1d1d1d; }
-        .tcs-car-card.selected  { border-color: #ffd700 !important; background: #1c1900 !important; }
-        .tcs-car-card.drag-over { border-color: #666; border-style: dashed; }
-        .tcs-car-card.dragging  { opacity: 0.25; }
-        .tcs-car-card.no-dom    { border-style: dashed; }
-        .tcs-drag-handle {
-            position: absolute; top: 4px; left: 5px;
-            font-size: 10px; color: #333; cursor: grab; line-height: 1;
+
+        const allCars = [];
+        if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page 1 of ${pageLinks.length}…`;
+
+        // Collect page 1 (already loaded)
+        const firstList = document.querySelector('ul.enlist-list');
+        if (firstList) allCars.push(...extractCarsFromList(firstList));
+
+        // Click through remaining pages
+        for (let i = 1; i < pageLinks.length; i++) {
+            if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page ${i + 1} of ${pageLinks.length}…`;
+            const prevCount = document.querySelector('ul.enlist-list')?.querySelectorAll(':scope > li').length || 0;
+            pageLinks[i].click();
+            const list = await waitForListChange(prevCount);
+            if (list) allCars.push(...extractCarsFromList(list));
         }
-        .tcs-drag-handle:active { cursor: grabbing; }
-        .tcs-class-badge {
-            position: absolute; top: 4px; right: 5px;
-            font-size: 9px; font-weight: bold; padding: 1px 4px;
-            border-radius: 3px; border: 1px solid;
-        }
-        .tcs-torn-model {
-            font-size: 9px; color: #444; text-align: center;
-            margin: 1px 14px 0; white-space: nowrap;
-            overflow: hidden; text-overflow: ellipsis;
-        }
-        .tcs-car-img {
-            width: 100%; height: 44px; object-fit: contain;
-            display: block; margin: 4px 0 2px;
-        }
-        .tcs-nickname {
-            font-size: 11px; font-weight: bold; color: #ddd; text-align: center;
-            margin: 1px 0; white-space: nowrap; overflow: hidden;
-            text-overflow: ellipsis; min-height: 15px;
-        }
-        .tcs-nickname-input {
-            width: 100%; box-sizing: border-box; background: #111;
-            border: 1px solid #ffd700; border-radius: 3px;
-            color: #fff; font-size: 11px; font-weight: bold;
-            text-align: center; padding: 2px 4px; outline: none;
-        }
-        .tcs-car-stats {
-            display: grid; grid-template-columns: auto 1fr;
-            gap: 1px 4px; font-size: 10px; margin-top: 4px;
-        }
-        .tcs-stat-label { color: #484848; white-space: nowrap; }
-        .tcs-stat-val   { color: #aaa; font-weight: bold; text-align: right; }
-        .tcs-stat-val.hl { color: #ffd700; }
-        .tcs-edit-btn {
-            position: absolute; bottom: 5px; right: 6px;
-            font-size: 10px; color: #333; cursor: pointer;
-            padding: 1px 3px; border-radius: 2px;
-        }
-        .tcs-edit-btn:hover { color: #999; }
-        #tcs-status { font-size: 10px; color: #3a3a3a; margin-top: 6px; }
-        .tcs-bar-wrap {
-            height: 4px; background: #1e1e1e; border-radius: 2px;
-            margin: 1px 0; overflow: hidden; position: relative; flex: 1;
-        }
-        .tcs-bar-fill {
-            height: 100%; border-radius: 2px; position: absolute; left: 0; top: 0;
-        }
-        .tcs-no-stats {
-            font-size: 9px; color: #333; text-align: center;
-            margin-top: 6px; font-style: italic;
-        }
-    `;
+
+        // Navigate back to page 1
+        pageLinks[0].click();
+        await waitForListStable();
+
+        return allCars;
+    }
 
     // ─── Sorting ─────────────────────────────────────────────────────────────────
 
@@ -421,6 +328,112 @@
         });
     }
 
+    // ─── Styles ──────────────────────────────────────────────────────────────────
+
+    const STYLE = `
+        #tcs-wrapper { margin: 8px 0; font-family: Arial, sans-serif; }
+        #tcs-loading {
+            display: flex; align-items: center; gap: 10px;
+            padding: 14px 0; font-size: 12px; color: #555;
+        }
+        .tcs-spinner {
+            width: 14px; height: 14px; border: 2px solid #2a2a2a;
+            border-top-color: #ffd700; border-radius: 50%;
+            animation: tcs-spin 0.7s linear infinite; flex-shrink: 0;
+        }
+        @keyframes tcs-spin { to { transform: rotate(360deg); } }
+        #tcs-toolbar {
+            display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+            margin-bottom: 8px; padding: 6px 8px;
+            background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px;
+        }
+        .tcs-toolbar-group { display: flex; align-items: center; gap: 3px; }
+        .tcs-toolbar-label {
+            font-size: 10px; color: #555; text-transform: uppercase;
+            letter-spacing: 0.5px; margin-right: 2px;
+        }
+        .tcs-btn {
+            padding: 3px 8px; border-radius: 3px; border: 1px solid #2a2a2a;
+            background: #1e1e1e; color: #666; font-size: 11px; cursor: pointer;
+            transition: background 0.1s, border-color 0.1s; white-space: nowrap;
+        }
+        .tcs-btn:hover { background: #232323; border-color: #3a3a3a; color: #bbb; }
+        .tcs-btn.active, .tcs-btn.sort-active { background: #232323; color: #eee; border-color: #4a4a4a; }
+        .tcs-btn[data-class="A"].active { border-color: #ffd700; color: #ffd700; }
+        .tcs-btn[data-class="B"].active { border-color: #c0c0c0; color: #c0c0c0; }
+        .tcs-btn[data-class="C"].active { border-color: #4ca8ff; color: #4ca8ff; }
+        .tcs-btn[data-class="D"].active { border-color: #44cc44; color: #44cc44; }
+        .tcs-btn[data-class="E"].active { border-color: #888;    color: #888;    }
+        .tcs-divider { width: 1px; height: 16px; background: #2a2a2a; margin: 0 2px; }
+        .tcs-refresh-btn {
+            margin-left: auto; padding: 3px 7px;
+            background: none; border: 1px solid #2a2a2a; border-radius: 3px;
+            color: #555; font-size: 11px; cursor: pointer;
+        }
+        .tcs-refresh-btn:hover { border-color: #555; color: #aaa; }
+        #tcs-grid { display: flex; flex-wrap: wrap; gap: 7px; }
+        .tcs-car-card {
+            background: #1a1a1a; border: 1px solid #242424; border-radius: 6px;
+            padding: 6px 8px 26px; width: 148px; flex: 0 0 148px;
+            cursor: pointer; position: relative; box-sizing: border-box;
+            user-select: none; transition: border-color 0.1s, background 0.1s;
+        }
+        .tcs-car-card:hover   { border-color: #333; background: #1c1c1c; }
+        .tcs-car-card.selected  { border-color: #ffd700 !important; background: #1c1800 !important; }
+        .tcs-car-card.drag-over { border-color: #555; border-style: dashed; }
+        .tcs-car-card.dragging  { opacity: 0.25; }
+        .tcs-drag-handle {
+            position: absolute; top: 4px; left: 5px;
+            font-size: 10px; color: #333; cursor: grab; line-height: 1;
+        }
+        .tcs-drag-handle:active { cursor: grabbing; }
+        .tcs-class-badge {
+            position: absolute; top: 4px; right: 5px;
+            font-size: 9px; font-weight: bold; padding: 1px 4px;
+            border-radius: 3px; border: 1px solid;
+        }
+        .tcs-torn-model {
+            font-size: 9px; color: #444; text-align: center;
+            margin: 1px 14px 0; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .tcs-car-img {
+            width: 100%; height: 44px; object-fit: contain;
+            display: block; margin: 3px 0 2px;
+        }
+        .tcs-nickname {
+            font-size: 11px; font-weight: bold; color: #ddd; text-align: center;
+            margin: 1px 0; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; min-height: 15px;
+        }
+        .tcs-nickname-input {
+            width: 100%; box-sizing: border-box; background: #111;
+            border: 1px solid #ffd700; border-radius: 3px;
+            color: #fff; font-size: 11px; font-weight: bold;
+            text-align: center; padding: 2px 4px; outline: none;
+        }
+        .tcs-car-stats {
+            display: grid; grid-template-columns: auto 1fr;
+            gap: 1px 4px; font-size: 10px; margin-top: 3px;
+        }
+        .tcs-stat-label { color: #444; white-space: nowrap; }
+        .tcs-stat-val   { color: #aaa; font-weight: bold; text-align: right; }
+        .tcs-stat-val.hl { color: #ffd700; }
+        .tcs-edit-btn {
+            position: absolute; bottom: 5px; right: 6px;
+            font-size: 10px; color: #333; cursor: pointer; padding: 1px 3px;
+        }
+        .tcs-edit-btn:hover { color: #999; }
+        #tcs-status { font-size: 10px; color: #3a3a3a; margin-top: 5px; }
+        .tcs-bar-wrap {
+            height: 4px; background: #1e1e1e; border-radius: 2px;
+            margin: 1px 0; overflow: hidden; position: relative; flex: 1;
+        }
+        .tcs-bar-fill {
+            height: 100%; border-radius: 2px; position: absolute; left: 0; top: 0;
+        }
+    `;
+
     // ─── Render ──────────────────────────────────────────────────────────────────
 
     function updateSortButtons() {
@@ -444,33 +457,29 @@
 
         visible.forEach(car => {
             const card = document.createElement('div');
-            card.className = 'tcs-car-card' + (car.speedPts == null ? ' no-dom' : '');
+            card.className = 'tcs-car-card';
             card.dataset.carId = car.carId;
 
             const badgeColor = CLASS_COLORS[car.carClass] || '#888';
 
-            // Drag handle
             const handle = document.createElement('span');
             handle.className = 'tcs-drag-handle';
             handle.title = 'Drag to reorder';
             handle.textContent = '⠿';
             card.appendChild(handle);
 
-            // Class badge
             const badge = document.createElement('span');
             badge.className = 'tcs-class-badge';
             badge.textContent = car.carClass;
             badge.style.cssText = `color:${badgeColor};border-color:${badgeColor}55;background:${badgeColor}0f;`;
             card.appendChild(badge);
 
-            // Torn model name
             const modelEl = document.createElement('div');
             modelEl.className = 'tcs-torn-model';
-            modelEl.textContent = car.tornModel;
+            modelEl.textContent = car.tornModel || '—';
             modelEl.title = car.tornModel;
             card.appendChild(modelEl);
 
-            // Image
             if (car.imgSrc) {
                 const img = document.createElement('img');
                 img.className = 'tcs-car-img';
@@ -479,63 +488,49 @@
                 card.appendChild(img);
             }
 
-            // Nickname
             const nicknameEl = document.createElement('div');
             nicknameEl.className = 'tcs-nickname';
             nicknameEl.textContent = nicknames[car.carId] || car.tornCustomName || '—';
-            nicknameEl.title = 'Click ✎ to set nickname';
             card.appendChild(nicknameEl);
 
-            // Stats — bar stats if available (DOM page), text stats always
             const statsEl = document.createElement('div');
             statsEl.className = 'tcs-car-stats';
 
-            const barDefs = [
+            [
                 { key: 'speedPts',    label: 'Spd', color: '#ff9900' },
                 { key: 'accelPts',    label: 'Acc', color: '#00cfff' },
                 { key: 'brakingPts',  label: 'Brk', color: '#cc44ff' },
                 { key: 'handlingPts', label: 'Hdl', color: '#44cc44' },
-            ];
-
-            let hasBarStats = false;
-            barDefs.forEach(({ key, label, color }) => {
+            ].forEach(({ key, label, color }) => {
                 const val = car[key];
                 if (val == null) return;
-                hasBarStats = true;
-
                 const lbl = document.createElement('span');
                 lbl.className = 'tcs-stat-label';
                 lbl.textContent = label;
-
                 const vWrap = document.createElement('div');
                 vWrap.style.cssText = 'display:flex;align-items:center;gap:4px;';
-
                 const vEl = document.createElement('span');
                 vEl.className = 'tcs-stat-val' + (key === sortKey ? ' hl' : '');
                 vEl.textContent = val;
                 vEl.style.minWidth = '24px';
-
                 const barWrap = document.createElement('div');
                 barWrap.className = 'tcs-bar-wrap';
                 const fill = document.createElement('div');
                 fill.className = 'tcs-bar-fill';
                 fill.style.cssText = `width:${Math.min(100, val / 120 * 100)}%;background:${color};`;
                 barWrap.appendChild(fill);
-
                 vWrap.appendChild(vEl);
                 vWrap.appendChild(barWrap);
                 statsEl.appendChild(lbl);
                 statsEl.appendChild(vWrap);
             });
 
-            // Text stats
-            const textStats = [
+            [
                 ['Speed',    car.topSpeedMph != null ? car.topSpeedMph + ' mph' : null],
                 ['0-60',     car.zeroSixty   != null ? car.zeroSixty + 's'      : null],
                 ['Upgrades', car.upgrades    != null ? String(car.upgrades)      : null],
                 ['W%',       car.winPct      != null ? car.winPct + '%'          : null],
-            ];
-            textStats.forEach(([label, val]) => {
+            ].forEach(([label, val]) => {
                 if (val == null) return;
                 const lbl = document.createElement('span');
                 lbl.className = 'tcs-stat-label';
@@ -543,34 +538,24 @@
                 const vEl = document.createElement('span');
                 vEl.className = 'tcs-stat-val' + (
                     (label === 'Upgrades' && sortKey === 'upgrades') ||
-                    (label === 'W%'       && sortKey === 'winPct')
-                    ? ' hl' : '');
+                    (label === 'W%' && sortKey === 'winPct') ? ' hl' : '');
                 vEl.textContent = val;
                 statsEl.appendChild(lbl);
                 statsEl.appendChild(vEl);
             });
 
-            if (!hasBarStats && !textStats.some(([,v]) => v != null)) {
-                const note = document.createElement('div');
-                note.className = 'tcs-no-stats';
-                note.textContent = 'Open Your Cars tab for stats';
-                card.appendChild(note);
-            } else {
-                card.appendChild(statsEl);
-            }
+            card.appendChild(statsEl);
 
-            // Click → select in Torn UI if DOM car exists
             card.addEventListener('click', e => {
                 if (e.target === handle || e.target.classList.contains('tcs-edit-btn')) return;
                 document.querySelectorAll('.tcs-car-card').forEach(c => c.classList.remove('selected'));
                 card.classList.add('selected');
                 if (car.el) {
-                    const clickTarget = car.el.querySelector('input[type="radio"], a.enlist-link:not(.remove), button') || car.el;
-                    clickTarget.click();
+                    const t = car.el.querySelector('input[type="radio"], a.enlist-link:not(.remove), button') || car.el;
+                    t.click();
                 }
             });
 
-            // Edit nickname
             const editBtn = document.createElement('span');
             editBtn.className = 'tcs-edit-btn';
             editBtn.textContent = '✎';
@@ -585,7 +570,6 @@
                 input.maxLength = 22;
                 nicknameEl.replaceWith(input);
                 input.focus(); input.select();
-
                 function commit() {
                     const val = input.value.trim();
                     if (val) nicknames[car.carId] = val;
@@ -615,69 +599,7 @@
         }
     }
 
-    // ─── Setup UI ────────────────────────────────────────────────────────────────
-
-    function showSetupUI(anchor, onSave) {
-        const setup = document.createElement('div');
-        setup.id = 'tcs-setup';
-        setup.innerHTML = `
-            <h2>🏎 Car Sorter — Setup</h2>
-            <p>A Torn API key is needed to load all your cars at once.<br>
-               Only <strong style="color:#ffd700;">Minimal Access</strong> is required —
-               this key can only see your enlisted car list, nothing sensitive.</p>
-            <ol class="tcs-setup-steps">
-                <li>
-                    <span class="tcs-step-num">1</span>
-                    <span>Click the button below to open Torn's key creation page.
-                    The correct permission (<code>properties</code>) is pre-selected for you.</span>
-                </li>
-                <li>
-                    <span class="tcs-step-num">2</span>
-                    <span>Give the key a name (e.g. <em>Car Sorter</em>), then click
-                    <strong>Generate</strong>. Copy the key that appears.</span>
-                </li>
-                <li>
-                    <span class="tcs-step-num">3</span>
-                    <span>Paste it below and click <strong>Save</strong>.</span>
-                </li>
-            </ol>
-            <a class="tcs-setup-link" href="${KEY_CREATE_URL}" target="_blank">
-                🔑 Create API Key on Torn →
-            </a>
-            <div class="tcs-setup-input-row">
-                <input id="tcs-api-input" type="password" placeholder="Paste your API key here…" autocomplete="off" spellcheck="false">
-                <button id="tcs-api-save">Save</button>
-            </div>
-            <div id="tcs-setup-error"></div>
-        `;
-
-        anchor.parentNode.insertBefore(setup, anchor);
-        anchor.style.display = 'none';
-
-        document.getElementById('tcs-api-save').addEventListener('click', async () => {
-            const key = document.getElementById('tcs-api-input').value.trim();
-            const err = document.getElementById('tcs-setup-error');
-            if (!key) { err.textContent = 'Please enter your API key.'; return; }
-            err.textContent = '';
-            document.getElementById('tcs-api-save').textContent = 'Checking…';
-            try {
-                await fetchCarsFromApi(key);
-                setApiKey(key);
-                setup.remove();
-                anchor.style.display = '';
-                onSave(key);
-            } catch (e) {
-                document.getElementById('tcs-api-save').textContent = 'Save';
-                err.textContent = e.code === 2
-                    ? 'Invalid key — please check and try again.'
-                    : e.code === 16
-                    ? 'Key doesn\'t have the right permissions. Make sure you selected "properties" when creating it.'
-                    : `Error: ${e.message}`;
-            }
-        });
-    }
-
-    // ─── Main widget UI ──────────────────────────────────────────────────────────
+    // ─── Build widget ────────────────────────────────────────────────────────────
 
     function buildWidget(anchor) {
         if (!document.getElementById('tcs-styles')) {
@@ -690,11 +612,10 @@
         const wrapper = document.createElement('div');
         wrapper.id = 'tcs-wrapper';
 
-        // Toolbar
         const toolbar = document.createElement('div');
         toolbar.id = 'tcs-toolbar';
 
-        // Filter group
+        // Filter
         const filterGroup = document.createElement('div');
         filterGroup.className = 'tcs-toolbar-group';
         const filterLabel = document.createElement('span');
@@ -715,14 +636,13 @@
             filterGroup.appendChild(btn);
         });
 
-        // Sort group
+        // Sort
         const sortGroup = document.createElement('div');
         sortGroup.className = 'tcs-toolbar-group';
         const sortLabel = document.createElement('span');
         sortLabel.className = 'tcs-toolbar-label';
         sortLabel.textContent = 'Sort:';
         sortGroup.appendChild(sortLabel);
-
         [
             { key: 'speedPts',    label: 'Speed'    },
             { key: 'accelPts',    label: 'Accel'    },
@@ -747,146 +667,98 @@
             sortGroup.appendChild(btn);
         });
 
-        // Gear button — change API key
-        const gearBtn = document.createElement('button');
-        gearBtn.className = 'tcs-gear-btn';
-        gearBtn.title = 'Change API key';
-        gearBtn.textContent = '⚙';
-        gearBtn.addEventListener('click', () => {
-            GM_setValue(API_KEY_STORAGE, '');
+        // Refresh button — clears cache and re-collects
+        const refreshBtn = document.createElement('button');
+        refreshBtn.className = 'tcs-refresh-btn';
+        refreshBtn.title = 'Refresh car list';
+        refreshBtn.textContent = '↺ Refresh';
+        refreshBtn.addEventListener('click', () => {
+            clearCache();
             wrapper.remove();
             document.querySelectorAll('ul.enlist-list').forEach(l => l.style.display = '');
+            _collecting = false;
             init();
         });
 
         const divider = document.createElement('div');
         divider.className = 'tcs-divider';
-
         toolbar.appendChild(filterGroup);
         toolbar.appendChild(divider);
         toolbar.appendChild(sortGroup);
-        toolbar.appendChild(gearBtn);
+        toolbar.appendChild(refreshBtn);
 
-        const grid = document.createElement('div');
-        grid.id = 'tcs-grid';
-
+        const grid   = document.createElement('div');
+        grid.id      = 'tcs-grid';
         const status = document.createElement('div');
-        status.id = 'tcs-status';
+        status.id    = 'tcs-status';
 
         wrapper.appendChild(toolbar);
         wrapper.appendChild(grid);
         wrapper.appendChild(status);
 
         anchor.parentNode.insertBefore(wrapper, anchor);
-        anchor.style.display = 'none';
-        document.querySelectorAll('ul.enlist-list').forEach(l => {
-            if (l !== anchor) l.style.display = 'none';
-        });
+        document.querySelectorAll('ul.enlist-list').forEach(l => l.style.display = 'none');
     }
 
+    // ─── Loading indicator ───────────────────────────────────────────────────────
+
     function showLoading(anchor) {
+        if (!document.getElementById('tcs-styles')) {
+            const s = document.createElement('style');
+            s.id = 'tcs-styles';
+            s.textContent = STYLE;
+            document.head.appendChild(s);
+        }
         const el = document.createElement('div');
         el.id = 'tcs-loading';
-        el.innerHTML = '<div class="tcs-spinner"></div><span>Loading all your cars…</span>';
+        el.innerHTML = '<div class="tcs-spinner"></div><span>Loading cars…</span>';
         anchor.parentNode.insertBefore(el, anchor);
         return el;
     }
 
     // ─── Init ────────────────────────────────────────────────────────────────────
 
-    let _initTimer = null;
-
     async function init() {
         clearTimeout(_initTimer);
         _initTimer = setTimeout(async () => {
+            if (_collecting) return;
             const firstList = document.querySelector('ul.enlist-list');
-            if (!firstList || document.getElementById('tcs-wrapper') || document.getElementById('tcs-setup') || document.getElementById('tcs-loading')) return;
+            if (!firstList) return;
+            if (document.getElementById('tcs-wrapper') || document.getElementById('tcs-loading')) return;
 
-            // Inject styles early
-            if (!document.getElementById('tcs-styles')) {
-                const s = document.createElement('style');
-                s.id = 'tcs-styles';
-                s.textContent = STYLE;
-                document.head.appendChild(s);
-            }
-
-            const apiKey = getApiKey();
-            if (!apiKey) {
-                showSetupUI(firstList, async (key) => {
-                    await loadAndRender(firstList, key);
-                });
-                return;
-            }
-
-            await loadAndRender(firstList, apiKey);
-        }, 300);
-    }
-
-    async function loadAndRender(anchor, apiKey) {
-        const loader = showLoading(anchor);
-        anchor.style.display = 'none';
-
-        try {
-            // Try cache first
-            let apiCars = getCachedCars();
-            if (!apiCars) {
-                const json = await fetchCarsFromApi(apiKey);
-                apiCars = parseApiCars(json);
-                setCachedCars(apiCars);
-            }
-
-            // Merge DOM stats for cars visible on current page
-            const domStats = extractDomStats();
-            carData = apiCars.map(car => {
-                const dom = domStats[car.carId] || {};
-                return { ...car, ...dom, el: findDomEl(car.carId) };
-            });
-
-            loader.remove();
+            _collecting = true;
             customOrder = getCustomOrder();
             nicknames   = getNicknames();
 
-            buildWidget(anchor);
-            renderGrid();
+            const loader = showLoading(firstList);
+            firstList.style.display = 'none';
 
-        } catch (e) {
-            loader.remove();
-            anchor.style.display = '';
-            // If key error, clear and show setup again
-            if (e.code === 2 || e.code === 16) {
-                GM_setValue(API_KEY_STORAGE, '');
-                showSetupUI(anchor, async (key) => {
-                    await loadAndRender(anchor, key);
-                });
-            } else {
-                const errEl = document.createElement('div');
-                errEl.style.cssText = 'color:#ff6666;font-size:11px;padding:8px 0;';
-                errEl.textContent = `Car Sorter error: ${e.message}. Reload to retry.`;
-                anchor.parentNode.insertBefore(errEl, anchor);
+            try {
+                const cars = await collectAllCars(loader);
+                carData = cars;
+                loader.remove();
+                buildWidget(firstList);
+                renderGrid();
+            } catch (e) {
+                loader.remove();
+                firstList.style.display = '';
+                console.error('[Car Sorter] Error collecting cars:', e);
+            } finally {
+                _collecting = false;
             }
-        }
-    }
-
-    function findDomEl(carId) {
-        const items = document.querySelectorAll('ul.enlist-list > li');
-        for (const el of items) {
-            const link = el.querySelector(`a.enlist-link.remove[id-value="${carId}"]`);
-            if (link) return el;
-        }
-        return null;
+        }, 400);
     }
 
     // ─── Observer ────────────────────────────────────────────────────────────────
 
     const observer = new MutationObserver(() => {
         const hasList   = !!document.querySelector('ul.enlist-list');
-        const hasWidget = !!(document.getElementById('tcs-wrapper') || document.getElementById('tcs-setup') || document.getElementById('tcs-loading'));
-
-        if (hasList && !hasWidget) init();
-
+        const hasWidget = !!(document.getElementById('tcs-wrapper') || document.getElementById('tcs-loading'));
+        if (hasList && !hasWidget && !_collecting) init();
         if (!hasList) {
             clearTimeout(_initTimer);
-            ['tcs-wrapper', 'tcs-setup', 'tcs-loading'].forEach(id => {
+            _collecting = false;
+            ['tcs-wrapper', 'tcs-loading'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) el.remove();
             });
