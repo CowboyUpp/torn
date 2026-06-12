@@ -1,18 +1,28 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.4.6
+// @version      2.5.0
 // @description  Split UI: Top Speed + Top Lap panels. Much cleaner track names. Separate tables & CSVs.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @license      MIT
 // ==/UserScript==
 
 // Changelog:
+// 2.5.0 - Three new features inspired by Torn Racing Telemetry script:
+//         [1] Race results export: captures finishing positions when race ends
+//             (status=3), stores as finalRaceData, adds ⬇ Export Race button to
+//             widget. Exports CSV + plain text, plus copy-to-clipboard via GM_setClipboard.
+//         [2] GM_setClipboard: copy buttons added to speed/lap CSV exports and
+//             race results. Requires new @grant GM_setClipboard.
+//         [3] SPA navigation cleanup: cleanupRaceState() tears down intervals,
+//             observers and UI elements on navigation away from racing page, then
+//             re-initialises cleanly on return. Fixes stale widget on back-navigation.
 // 2.4.6 - formatLapTime: show centiseconds (2 decimal places) instead of tenths.
 //         e.g. 2m 50.75s instead of 2m 50.7s. Raw ms in storage unchanged.
 // 2.4.5 - Proportional speed floor: replaced fixed 50 mph cutoff with
@@ -56,6 +66,7 @@ function tornAjax(callback) {
                 try {
                     const data = JSON.parse(xhr.responseText);
                     parseBestLapFromResponse(data);
+                    captureRaceResults(data);
                 } catch (e) {}
                 callback();
             }
@@ -359,6 +370,7 @@ function injectWidget() {
                         <tbody id="rslogSpeedTableBody"></tbody>
                     </table>
                     <a id="rslogSpeedCsvBtn" class="rslogCsvBtn" href="#">⬇ Download Speed CSV</a>
+                    <span id="rslogSpeedCopyBtn" class="rslogCsvBtn" style="cursor:pointer;">📋 Copy</span>
                     <span id="rslogSpeedClearBtn" class="rslogClearBtn">✕ Clear Speeds</span>
                 </div>
             </div>
@@ -375,7 +387,9 @@ function injectWidget() {
                         <tbody id="rslogLapTableBody"></tbody>
                     </table>
                     <a id="rslogLapCsvBtn" class="rslogCsvBtn" href="#">⬇ Download Lap CSV</a>
+                    <span id="rslogLapCopyBtn" class="rslogCsvBtn" style="cursor:pointer;">📋 Copy</span>
                     <span id="rslogLapClearBtn" class="rslogClearBtn">✕ Clear Laps</span>
+                    <a id="rslogExportRaceBtn" class="rslogCsvBtn" href="#" style="display:none;color:#00ff88;border-color:#00ff88;background:#002200;">🏁 Export Race</a>
                 </div>
             </div>
         </div>
@@ -405,6 +419,36 @@ function injectWidget() {
 
     $('#rslogSpeedCsvBtn').on('click', e => { e.preventDefault(); downloadSpeedCsv(); });
     $('#rslogLapCsvBtn').on('click', e => { e.preventDefault(); downloadLapCsv(); });
+
+    $('#rslogSpeedCopyBtn').on('click', () => {
+        const log = getSpeedLog();
+        let csv = 'Track,Car,Class,Top Speed (mph),Date\n';
+        Object.entries(log).forEach(([, data]) => {
+            if (!data.topSpeed) return;
+            const cls = carClass(data.car) || '';
+            csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${data.topSpeed},"${data.date||''}"\n`;
+        });
+        if (copyToClipboard(csv)) {
+            $('#rslogSpeedCopyBtn').text('✓ Copied!');
+            setTimeout(() => $('#rslogSpeedCopyBtn').text('📋 Copy'), 2000);
+        }
+    });
+
+    $('#rslogLapCopyBtn').on('click', () => {
+        const log = getSpeedLog();
+        let csv = 'Track,Car,Class,Best Lap,Best Lap (ms),Date\n';
+        Object.entries(log).forEach(([, data]) => {
+            if (!data.bestLapMs) return;
+            const cls = carClass(data.car) || '';
+            csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${data.date||''}"\n`;
+        });
+        if (copyToClipboard(csv)) {
+            $('#rslogLapCopyBtn').text('✓ Copied!');
+            setTimeout(() => $('#rslogLapCopyBtn').text('📋 Copy'), 2000);
+        }
+    });
+
+    $('#rslogExportRaceBtn').on('click', e => { e.preventDefault(); showRaceExportPopup(); });
 
     $('#rslogSpeedClearBtn').on('click', () => {
         if (confirm('Clear ALL top speed records?')) {
@@ -509,7 +553,144 @@ function downloadLapCsv() {
     URL.revokeObjectURL(url);
 }
 
-// ─── Firework ──────────────────────────────────────────────────────────────────
+// ─── Clipboard helper ──────────────────────────────────────────────────────────
+function copyToClipboard(text) {
+    if (typeof GM_setClipboard !== 'undefined') {
+        GM_setClipboard(text);
+        return true;
+    }
+    return false;
+}
+
+// ─── Race Results ──────────────────────────────────────────────────────────────
+let finalRaceResults = []; // { position, name, userId, car, carImg, status, timeText }
+
+function captureRaceResults(data) {
+    try {
+        if (!data || !data.timeData || data.timeData.status < 3) return;
+        if (!data.raceData?.cars || !data.drivers) return;
+        if (finalRaceResults.length > 0) return; // already captured
+
+        const drivers = data.drivers;
+        const results = [];
+
+        Object.entries(drivers).forEach(([userId, d]) => {
+            const timeText = d.time || '';
+            const status = d.status || '';
+            // position: Torn uses 1-based finish order in d.position
+            const position = d.position != null ? parseInt(d.position, 10) : 999;
+            results.push({
+                position,
+                name: d.name || userId,
+                userId,
+                car: carName(d.car) || 'Unknown',
+                carImg: d.car || '',
+                status,
+                timeText,
+            });
+        });
+
+        results.sort((a, b) => a.position - b.position);
+        finalRaceResults = results;
+
+        // Show export button
+        $('#rslogExportRaceBtn').show();
+    } catch (e) {}
+}
+
+function formatRaceResultsCsv() {
+    let csv = 'Position,Driver,User ID,Car,Class,Status,Time\n';
+    finalRaceResults.forEach(r => {
+        const cls = carClass(r.carImg) || '';
+        csv += `${r.position},"${r.name}",${r.userId},"${r.car}",${cls},"${r.status}","${r.timeText}"\n`;
+    });
+    return csv;
+}
+
+function formatRaceResultsText() {
+    const trackLine = currentTrack ? `Track: ${currentTrack}` : 'Track: Unknown';
+    let txt = `=== Race Results ===\n${trackLine}\n${'─'.repeat(40)}\n`;
+    finalRaceResults.forEach(r => {
+        const cls = carClass(r.carImg) ? ` [${carClass(r.carImg)}]` : '';
+        const time = r.timeText ? ` — ${r.timeText}` : '';
+        txt += `${String(r.position).padStart(2)}. ${r.name} (${r.car}${cls})${time}\n`;
+    });
+    return txt;
+}
+
+function downloadRaceResultsCsv() {
+    if (!finalRaceResults.length) return;
+    const csv = formatRaceResultsCsv();
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `torn_race_${(currentTrack || 'result').replace(/\s+/g, '_').toLowerCase()}_${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function showRaceExportPopup() {
+    if ($('#rslogExportPopup').length) { $('#rslogExportPopup').remove(); return; }
+
+    const trackLine = currentTrack ? `<b>${escapeHtml(currentTrack)}</b>` : 'Unknown track';
+    const rows = finalRaceResults.map(r => {
+        const cls = carClass(r.carImg) ? classBadgeHtml(r.carImg) : '';
+        const carImgHtml = r.carImg ? `<img src="${r.carImg}" style="height:16px;vertical-align:middle;margin-right:3px;">` : '';
+        return `<tr>
+            <td style="text-align:center;padding:3px 6px;">${r.position}</td>
+            <td style="padding:3px 6px;">${escapeHtml(r.name)}</td>
+            <td style="padding:3px 6px;">${carImgHtml}${escapeHtml(r.car)}${cls}</td>
+            <td style="padding:3px 6px;color:#aaa;">${escapeHtml(r.timeText)}</td>
+        </tr>`;
+    }).join('');
+
+    const popup = $(`
+        <div id="rslogExportPopup" style="
+            position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+            background:linear-gradient(135deg,#111,#1a1a1a);border:1px solid #444;
+            border-radius:6px;padding:16px 20px;z-index:999998;
+            font-family:'Courier New',monospace;font-size:11px;color:#ccc;
+            min-width:360px;max-width:520px;max-height:80vh;overflow-y:auto;
+            box-shadow:0 4px 24px rgba(0,0,0,0.7);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <span style="color:#fff200;font-weight:bold;font-size:13px;">🏁 Race Results — ${trackLine}</span>
+                <span id="rslogExportClose" style="cursor:pointer;color:#888;font-size:16px;padding:0 4px;">✕</span>
+            </div>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:10px;">
+                <thead><tr style="color:#999;border-bottom:1px solid #333;">
+                    <th style="padding:3px 6px;">#</th>
+                    <th style="padding:3px 6px;">Driver</th>
+                    <th style="padding:3px 6px;">Car</th>
+                    <th style="padding:3px 6px;">Time</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <a id="rslogExportCsvBtn" class="rslogCsvBtn" href="#" style="font-size:10px;">⬇ Download CSV</a>
+                <span id="rslogCopyResultsBtn" class="rslogCsvBtn" style="cursor:pointer;font-size:10px;">📋 Copy Text</span>
+                <span id="rslogCopyCsvBtn" class="rslogCsvBtn" style="cursor:pointer;font-size:10px;">📋 Copy CSV</span>
+            </div>
+        </div>
+    `);
+
+    $('body').append(popup);
+
+    $('#rslogExportClose').on('click', () => $('#rslogExportPopup').remove());
+    $('#rslogExportCsvBtn').on('click', e => { e.preventDefault(); downloadRaceResultsCsv(); });
+    $('#rslogCopyResultsBtn').on('click', () => {
+        if (copyToClipboard(formatRaceResultsText())) {
+            $('#rslogCopyResultsBtn').text('✓ Copied!');
+            setTimeout(() => $('#rslogCopyResultsBtn').text('📋 Copy Text'), 2000);
+        }
+    });
+    $('#rslogCopyCsvBtn').on('click', () => {
+        if (copyToClipboard(formatRaceResultsCsv())) {
+            $('#rslogCopyCsvBtn').text('✓ Copied!');
+            setTimeout(() => $('#rslogCopyCsvBtn').text('📋 Copy CSV'), 2000);
+        }
+    });
+}
 function launchFirework() {
     const el = document.getElementById('rslogNewRecord');
     if (!el) return;
@@ -752,6 +933,21 @@ function renderLobbyLapTable() {
     }
 }
 
+// ─── Cleanup ───────────────────────────────────────────────────────────────────
+function cleanupRaceState() {
+    maybeClear();
+    // Remove injected UI elements
+    ['rslogWrapper', 'rslogLobbyBtn', 'rslogLobbyPanel', 'rslogExportPopup'].forEach(id => {
+        document.getElementById(id)?.remove();
+    });
+    // Reset race results
+    finalRaceResults = [];
+    currentTrack = '';
+    currentCar = '';
+    last_compl = -1.0;
+    sessionTopSpeed = 0;
+}
+
 // ─── Init ──────────────────────────────────────────────────────────────────────
 let _raceObserver = null;
 
@@ -759,6 +955,8 @@ function watchForRaceStart() {
     if (_raceObserver) return;
     _raceObserver = new MutationObserver(() => {
         if (document.getElementById('racingdetails') && !document.getElementById('rslogWrapper')) {
+            // New race view — clean up stale state from any previous race first
+            cleanupRaceState();
             injectWidget();
             startSpeedLoop();
         }
@@ -771,6 +969,18 @@ function watchForRaceStart() {
     });
     _raceObserver.observe(document.body, { childList: true, subtree: true });
 }
+
+// SPA navigation cleanup — fires when Torn navigates away from racing page
+let _currentHref = location.href;
+const _navObserver = new MutationObserver(() => {
+    if (location.href !== _currentHref) {
+        _currentHref = location.href;
+        if (!location.href.includes('sid=racing')) {
+            cleanupRaceState();
+        }
+    }
+});
+_navObserver.observe(document.body, { childList: true, subtree: false });
 
 function init() {
     migrateSpeedLog();
