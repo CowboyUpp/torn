@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.5.2
-// @description  Split UI: Top Speed + Top Lap panels. Much cleaner track names. Separate tables & CSVs.
-// @author       cowboyup
+// @version      2.5.3
+// @description  Split UI: Top Speed + Top Lap panels.
+// @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -12,45 +12,6 @@
 // @grant        unsafeWindow
 // @license      MIT
 // ==/UserScript==
-
-// Changelog:
-// 2.5.2 - Moved 📋 Copy buttons to lobby panel footer (next to CSV buttons) where
-//         they're always visible. Removed them from the race widget panels.
-// 2.5.1 - Removed race results export: Torn's AJAX payload does not include finishing
-//         positions — only your own car data. Feature not feasible without a different
-//         approach. Cleaned up all related dead code.
-// 2.5.0 - Added GM_setClipboard (📋 Copy buttons for speed/lap CSVs), SPA navigation
-//         cleanup via cleanupRaceState() + _navObserver. Race export attempted but removed.
-// 2.4.6 - formatLapTime: show centiseconds (2 decimal places) instead of tenths.
-//         e.g. 2m 50.75s instead of 2m 50.7s. Raw ms in storage unchanged.
-// 2.4.5 - Proportional speed floor: replaced fixed 50 mph cutoff with
-//         max(10, trackLength × 10) so short tracks like Sewage (1.5mi → 15 mph floor)
-//         record properly while long tracks still filter early-race noise.
-//         Migration floor lowered to absolute minimum of 10 mph to match.
-// 2.4.4 - Critical fix: raceData.imagePath is the track SVG outline, NOT a car image URL.
-//         Revert car resolution to DOM-only (parseCarImg/currentCar). Add migration step
-//         to purge corrupted SVG strings from data.car in existing storage.
-//         Date column widened to 24% in lobby colgroup.
-// 2.4.3 - Fix Best Laps columns cut off in lobby panel: reduce flex min-width from
-//         300px to 220px, add table-layout:fixed + colgroup proportional widths,
-//         overflow:hidden + text-overflow:ellipsis on td to prevent blowout.
-// 2.4.2 - CSS fix: add overflow-x:auto to .rslogPanel and min-width to tables so
-//         the Best Lap (and Speed) tables scroll horizontally instead of overflowing
-//         outside the widget container.
-// 2.4.1 - Confirmed raceData field names from live payload: track = raceData.title,
-//         car = raceData.imagePath + imageID + '/small.png'. Removed dev logger.
-// 2.4.0 - Add CAR_CLASSES map (sourced from Torn wiki) with coloured class badges
-//         (A=gold, B=silver, C=blue, D=green, E=grey) in all four tables and both CSV exports.
-// 2.3.0 - Store top speed as raw float (full precision) instead of rounding to 2dp before storage.
-//         CSV export now writes the full value. Display stays at toFixed(2).
-// 2.2.0 - Bug fixes:
-//         [1] Speed floor raised from >0 to >10 mph to filter near-zero lap-wrap spikes
-//         [2] updateTopSpeed: ignore speeds below 50 mph (implausible top-speed samples)
-//         [3] migrateSpeedLog: zero out existing topSpeed entries below 50 mph on first run
-//         [4] parseBestLapFromResponse: read track/car from raceData payload first,
-//             fall back to DOM — prevents stale globals mis-attributing laps during
-//             lobby transition (was causing duplicate 43.3s entries across different combos)
-//         [5] Added raceData key logger (console.log, dev aid, remove after confirming field names)
 
 'use strict';
 
@@ -809,6 +770,7 @@ function cleanupRaceState() {
     currentCar = '';
     last_compl = -1.0;
     sessionTopSpeed = 0;
+    _initialized = false; // allow re-init after navigation
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────
@@ -845,7 +807,11 @@ const _navObserver = new MutationObserver(() => {
 });
 _navObserver.observe(document.body, { childList: true, subtree: false });
 
+let _initialized = false;
+
 function init() {
+    if (_initialized) return;
+    _initialized = true;
     migrateSpeedLog();
     if (document.getElementById('racingdetails') && !document.getElementById('rslogWrapper')) {
         injectWidget();
