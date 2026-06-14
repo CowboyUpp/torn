@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racecar Garage
 // @namespace    https://greasyfork.org/users/CowboyUpp
-// @version      1.6.2
+// @version      1.7.0
 // @description  Your full car collection in one view. Sort, filter and nickname all your cars.
 // @author       CowboyUp
 // @match        https://www.torn.com/*
@@ -50,6 +50,28 @@
 //          (tab switches are full page loads, so each gets a fresh script
 //          execution — no reconnect needed). Removed stale/incorrect comment
 //          about pagination-driven disconnect/reconnect.
+// v1.7.0 - MAJOR: Torn's Racing page is an AJAX/SPA — switching sub-tabs
+//          (Cars/Parts/Race/Custom Events) swaps ul.enlist-list and
+//          .categories li.active via jQuery .html() WITHOUT changing
+//          location.href and WITHOUT a page reload. All of v1.6.2's
+//          location.href-based detection (IS_PARTS_PAGE) and the
+//          observer-disconnect-after-success change were built on a false
+//          full-reload assumption and are now wrong.
+//          Replaced IS_PARTS_PAGE with getCurrentTab(), which reads
+//          .racing-main-wrap .categories li.active a's href fresh on every
+//          call — confirmed reliable across tab switches via live testing.
+//          The observer is now permanent (never disconnects) and tracks
+//          currentTab; on each mutation it compares the live active tab
+//          against currentTab. On a real tab change it tears down the
+//          existing widget immediately and re-inits for the new tab once
+//          ul.enlist-list reappears (debounced 400ms as before). On the
+//          same tab, it only inits if no widget/loader exists yet (handles
+//          the async-chunk-loading first-paint case).
+//          getCacheContext() now takes the current tab explicitly instead
+//          of relying on the stale page-load-time constant.
+//          The parts-page click branch re-checks getCurrentTab() live at
+//          click time rather than trusting a render-time value, in case the
+//          user switched tabs without (yet) triggering a rebuild.
 
 (function () {
     'use strict';
@@ -65,8 +87,21 @@
     const CACHE_KEY_PREFIX = 'tcs_car_cache';
     const CACHE_TTL_MS     = 5 * 60 * 1000; // 5 minutes
 
-    // Page-context detection, computed once at load
-    const IS_PARTS_PAGE = location.href.includes('tab=parts');
+    // Active-tab detection. Torn's Racing page is an AJAX/SPA: clicking a
+    // sub-tab (Cars/Parts/Race/Custom Events) swaps content via jQuery
+    // without changing location.href, so location.href-based detection is
+    // unreliable after the first tab. The active tab's <li> reliably gets
+    // an "active" class on its <a>'s containing <li>, and its href always
+    // reflects the real tab — so we read that fresh every time instead of
+    // caching a constant at load.
+    function getCurrentTab() {
+        const href = document.querySelector('.racing-main-wrap .categories li.active a')?.href || '';
+        if (href.includes('tab=parts'))      return 'parts';
+        if (href.includes('tab=race'))       return 'race';
+        if (href.includes('tab=customrace')) return 'customrace';
+        if (href.includes('tab=cars'))       return 'cars';
+        return 'unknown';
+    }
 
     // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -81,6 +116,7 @@
     let selectedCarId = null;
     let _initTimer  = null;
     let _collecting = false;
+    let currentTab  = ''; // tab the active widget (if any) was built for
 
     // ─── Storage ─────────────────────────────────────────────────────────────────
 
@@ -89,9 +125,9 @@
     const getCustomOrder  = ()  => { try { return JSON.parse(GM_getValue(CUSTOM_ORDER_KEY, '[]')); } catch (_) { return []; } };
     const saveCustomOrder = ()  => GM_setValue(CUSTOM_ORDER_KEY, JSON.stringify(customOrder));
 
-    function getCacheContext() {
-        if (IS_PARTS_PAGE) return 'parts';
-        if (document.querySelector('a.link.btn-action-joinRace[carid-value]')) return 'join';
+    function getCacheContext(tab) {
+        if (tab === 'parts') return 'parts';
+        if (tab === 'customrace' && document.querySelector('a.link.btn-action-joinRace[carid-value]')) return 'join';
         return 'cars';
     }
 
@@ -402,7 +438,7 @@
         #tcs-wrapper { margin: 8px 0; font-family: Arial, sans-serif; }
         #tcs-loading {
             display: flex; align-items: center; gap: 10px;
-            padding: 14px 0; font-size: 12px; color: #555;
+            padding: 14px 0; font-size: 12px; color: #999;
         }
         .tcs-spinner {
             width: 14px; height: 14px; border: 2px solid #2a2a2a;
@@ -417,12 +453,12 @@
         }
         .tcs-toolbar-group { display: flex; align-items: center; gap: 3px; }
         .tcs-toolbar-label {
-            font-size: 10px; color: #555; text-transform: uppercase;
+            font-size: 10px; color: #888; text-transform: uppercase;
             letter-spacing: 0.5px; margin-right: 2px;
         }
         .tcs-btn {
             padding: 3px 8px; border-radius: 3px; border: 1px solid #2a2a2a;
-            background: #1e1e1e; color: #666; font-size: 11px; cursor: pointer;
+            background: #1e1e1e; color: #999; font-size: 11px; cursor: pointer;
             transition: background 0.1s, border-color 0.1s; white-space: nowrap;
         }
         .tcs-btn:hover { background: #232323; border-color: #3a3a3a; color: #bbb; }
@@ -436,7 +472,7 @@
         .tcs-refresh-btn {
             margin-left: auto; padding: 3px 7px;
             background: none; border: 1px solid #2a2a2a; border-radius: 3px;
-            color: #555; font-size: 11px; cursor: pointer;
+            color: #999; font-size: 11px; cursor: pointer;
         }
         .tcs-refresh-btn:hover { border-color: #555; color: #aaa; }
         #tcs-grid { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -452,7 +488,7 @@
         .tcs-car-card.dragging  { opacity: 0.25; }
         .tcs-drag-handle {
             position: absolute; top: 4px; left: 5px;
-            font-size: 10px; color: #333; cursor: grab; line-height: 1;
+            font-size: 10px; color: #777; cursor: grab; line-height: 1;
         }
         .tcs-drag-handle:active { cursor: grabbing; }
         .tcs-class-badge {
@@ -461,7 +497,7 @@
             border-radius: 3px; border: 1px solid;
         }
         .tcs-torn-model {
-            font-size: 9px; color: #444; text-align: center;
+            font-size: 9px; color: #888; text-align: center;
             margin: 1px 14px 0; white-space: nowrap;
             overflow: hidden; text-overflow: ellipsis;
         }
@@ -484,15 +520,15 @@
             display: grid; grid-template-columns: auto 1fr;
             gap: 1px 4px; font-size: 10px; margin-top: 3px;
         }
-        .tcs-stat-label { color: #444; white-space: nowrap; }
+        .tcs-stat-label { color: #999; white-space: nowrap; }
         .tcs-stat-val   { color: #aaa; font-weight: bold; text-align: right; }
         .tcs-stat-val.hl { color: #ffd700; }
         .tcs-edit-btn {
             position: absolute; bottom: 5px; right: 6px;
-            font-size: 10px; color: #333; cursor: pointer; padding: 1px 3px;
+            font-size: 10px; color: #777; cursor: pointer; padding: 1px 3px;
         }
         .tcs-edit-btn:hover { color: #999; }
-        #tcs-status { font-size: 10px; color: #3a3a3a; margin-top: 5px; }
+        #tcs-status { font-size: 10px; color: #777; margin-top: 5px; }
         .tcs-bar-wrap {
             height: 4px; background: #1e1e1e; border-radius: 2px;
             margin: 1px 0; overflow: hidden; position: relative; flex: 1;
@@ -520,6 +556,7 @@
         const status = document.getElementById('tcs-status');
         if (!grid) return;
 
+        const tab = getCurrentTab();
         const visible = sortedVisible();
         grid.innerHTML = '';
         selectedCard = null;
@@ -534,7 +571,7 @@
             }
 
             // Context-aware tooltip
-            if (IS_PARTS_PAGE && car.upgradeUrl) card.title = 'Click to manage parts/upgrades';
+            if (tab === 'parts' && car.upgradeUrl) card.title = 'Click to manage parts/upgrades';
             else if (car.joinHref) card.title = 'Click to select this car for the race';
 
             const badgeColor = CLASS_COLORS[car.carClass] || '#888';
@@ -637,8 +674,10 @@
                 selectedCard = card;
                 selectedCarId = car.carId;
 
-                // 1) Parts page: navigate to the upgrades/parts page for this car
-                if (IS_PARTS_PAGE && car.upgradeUrl) {
+                // 1) Parts page: navigate to the upgrades/parts page for this car.
+                //    Re-check live — the user may have switched tabs without a
+                //    rebuild happening yet.
+                if (getCurrentTab() === 'parts' && car.upgradeUrl) {
                     window.location.href = car.upgradeUrl;
                     return;
                 }
@@ -780,7 +819,7 @@
         refreshBtn.title = 'Refresh car list';
         refreshBtn.textContent = '↺ Refresh';
         refreshBtn.addEventListener('click', () => {
-            clearCache(getCacheContext());
+            clearCache(getCacheContext(getCurrentTab()));
             wrapper.remove();
             document.querySelectorAll('ul.enlist-list').forEach(l => l.style.display = '');
             document.querySelectorAll('.gallery-wrapper.pagination').forEach(p => p.style.display = '');
@@ -825,9 +864,22 @@
         return el;
     }
 
+    // ─── Teardown ────────────────────────────────────────────────────────────────
+    // Removes our injected widget/loader. Torn's AJAX tab-swap replaces the
+    // ul.enlist-list / pagination subtree wholesale (confirmed via jQuery
+    // .html() calls in racing.js), so the OLD hidden list is discarded by
+    // Torn itself — we don't need to un-hide anything from the previous tab.
+
+    function teardownWidget() {
+        document.getElementById('tcs-wrapper')?.remove();
+        document.getElementById('tcs-loading')?.remove();
+        selectedCard = null;
+        selectedCarId = null;
+    }
+
     // ─── Init ────────────────────────────────────────────────────────────────────
 
-    async function init() {
+    async function init(tab) {
         clearTimeout(_initTimer);
         _initTimer = setTimeout(async () => {
             if (_collecting) return;
@@ -836,18 +888,19 @@
             if (document.getElementById('tcs-wrapper') || document.getElementById('tcs-loading')) return;
 
             _collecting = true;
+            currentTab  = tab;
             customOrder = getCustomOrder();
             nicknames   = getNicknames();
 
-            const ctx = getCacheContext();
+            const ctx = getCacheContext(tab);
             const cached = getCachedCars(ctx);
 
             if (cached) {
                 carData = cached;
                 firstList.style.display = 'none';
+                document.querySelectorAll('.gallery-wrapper.pagination').forEach(p => p.style.display = 'none');
                 buildWidget(firstList);
                 renderGrid();
-                observer.disconnect();
                 _collecting = false;
                 return;
             }
@@ -861,7 +914,6 @@
                 loader.remove();
                 buildWidget(firstList);
                 renderGrid();
-                observer.disconnect();
             } catch (e) {
                 loader.remove();
                 firstList.style.display = '';
@@ -873,21 +925,51 @@
     }
 
     // ─── Observer ────────────────────────────────────────────────────────────────
+    // Torn's Racing page is a long-lived AJAX/SPA: switching sub-tabs
+    // (Cars/Parts/Race/Custom Events) replaces ul.enlist-list and the
+    // .categories li.active marker via jQuery .html(), without a full page
+    // reload and without changing location.href. A single tab-swap fires
+    // dozens of childList mutations as jQuery incrementally rebuilds the
+    // DOM, but .categories li.active updates reliably and early, so we use
+    // a *tab change* (not "list appeared") as the rebuild trigger.
+    //
+    // The observer is NEVER disconnected — Torn keeps swapping content for
+    // the lifetime of the racing page.
 
     const observer = new MutationObserver(() => {
         if (_collecting) return;
+
+        const tab = getCurrentTab();
+        if (tab === 'unknown') return; // transient state during a swap
+
         const hasList   = !!document.querySelector('ul.enlist-list');
         const hasWidget = !!(document.getElementById('tcs-wrapper') || document.getElementById('tcs-loading'));
-        if (hasList && !hasWidget) init();
+
+        if (tab !== currentTab) {
+            // Tab changed (or this is the first run). Tear down any stale
+            // widget immediately so we don't show the previous tab's cars,
+            // then (re)init for the new tab once its content is present.
+            // Update currentTab right away so the burst of mutations that
+            // follows a tab-swap doesn't repeatedly re-teardown.
+            currentTab = tab;
+            if (hasWidget) teardownWidget();
+            if (hasList) init(tab);
+            return;
+        }
+
+        // Same tab as our current widget — only act if no widget exists yet
+        // (e.g. first load, where ul.enlist-list appears asynchronously
+        // after the build-chunk scripts finish loading).
+        if (hasList && !hasWidget) init(tab);
     });
 
-    // The racing page's React/build chunks load asynchronously, so
-    // ul.enlist-list may not exist yet at script-run time. The observer's
-    // only job is to catch its first appearance; init() disconnects it on
-    // success. Tab switches are full page navigations (plain <a href> tab
-    // links), so each tab gets a fresh script execution — no reconnect logic
-    // is needed for navigating away.
     observer.observe(document.body, { childList: true, subtree: true });
-    init();
+    {
+        const tab = getCurrentTab();
+        if (tab !== 'unknown') {
+            currentTab = tab;
+            init(tab);
+        }
+    }
 
 })();
