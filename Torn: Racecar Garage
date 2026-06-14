@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racecar Garage
 // @namespace    https://greasyfork.org/users/CowboyUpp
-// @version      1.6.1
+// @version      1.6.2
 // @description  Your full car collection in one view. Sort, filter and nickname all your cars.
 // @author       CowboyUp
 // @match        https://www.torn.com/*
@@ -26,6 +26,30 @@
 //          upgradeUrl is now stored as an absolute URL via new URL().
 //          Added Dirt/Tarmac/Safety extraction (dirtPts/tarmacPts/safetyPts),
 //          new sort buttons, and stat display on each card.
+// v1.6.2 - Unified carId/carIdNum into a single robust carId (prefers
+//          .model-car-name-{id}, falls back to remove-link id-value, then
+//          idx-based as last resort). Dropped car.el entirely — click
+//          handler now always re-resolves live DOM nodes by carId, removing
+//          the detached-document fallback and its memory retention.
+//          Click handler simplified to 3 steps (parts / join / cars).
+//          Fixed sort direction polarity: sortDir=-1 now correctly means
+//          descending/highest-first, matching the displayed "↓" arrow.
+//          Fixed drag-and-drop: reordering under a class filter now splices
+//          the moved car into the master customOrder instead of overwriting
+//          it with the filtered subset, preserving order for hidden cars.
+//          Added dedup-by-carId during multi-page collection (first-seen
+//          wins), guarding against pagination overlap/glitches.
+//          Wired up the previously-unused car-list cache: reads/writes a
+//          context-aware cache (cars/parts/join each cached separately,
+//          since their per-car fields differ), 5-minute TTL. Refresh button
+//          clears only the current context's cache.
+//          Selection now tracked via a single selectedCard/selectedCarId
+//          pair instead of a full querySelectorAll('.tcs-car-card') sweep on
+//          every click, and persists across sort/filter re-renders.
+//          Observer now disconnects after the widget builds successfully
+//          (tab switches are full page loads, so each gets a fresh script
+//          execution — no reconnect needed). Removed stale/incorrect comment
+//          about pagination-driven disconnect/reconnect.
 
 (function () {
     'use strict';
@@ -38,7 +62,7 @@
     };
     const NICKNAMES_KEY    = 'tcs_nicknames';
     const CUSTOM_ORDER_KEY = 'tcs_custom_order';
-    const CACHE_KEY        = 'tcs_car_cache';
+    const CACHE_KEY_PREFIX = 'tcs_car_cache';
     const CACHE_TTL_MS     = 5 * 60 * 1000; // 5 minutes
 
     // Page-context detection, computed once at load
@@ -53,6 +77,8 @@
     let customOrder = [];
     let nicknames   = {};
     let dragSrcIdx  = null;
+    let selectedCard = null;
+    let selectedCarId = null;
     let _initTimer  = null;
     let _collecting = false;
 
@@ -63,20 +89,26 @@
     const getCustomOrder  = ()  => { try { return JSON.parse(GM_getValue(CUSTOM_ORDER_KEY, '[]')); } catch (_) { return []; } };
     const saveCustomOrder = ()  => GM_setValue(CUSTOM_ORDER_KEY, JSON.stringify(customOrder));
 
-    function getCachedCars() {
+    function getCacheContext() {
+        if (IS_PARTS_PAGE) return 'parts';
+        if (document.querySelector('a.link.btn-action-joinRace[carid-value]')) return 'join';
+        return 'cars';
+    }
+
+    function getCachedCars(ctx) {
         try {
-            const raw = GM_getValue(CACHE_KEY, null);
+            const raw = GM_getValue(`${CACHE_KEY_PREFIX}_${ctx}`, null);
             if (!raw) return null;
             const { ts, data } = JSON.parse(raw);
             if (Date.now() - ts > CACHE_TTL_MS) return null;
             return data;
         } catch (_) { return null; }
     }
-    function setCachedCars(data) {
-        GM_setValue(CACHE_KEY, JSON.stringify({ ts: Date.now(), data }));
+    function setCachedCars(ctx, data) {
+        GM_setValue(`${CACHE_KEY_PREFIX}_${ctx}`, JSON.stringify({ ts: Date.now(), data }));
     }
-    function clearCache() {
-        GM_setValue(CACHE_KEY, null);
+    function clearCache(ctx) {
+        GM_setValue(`${CACHE_KEY_PREFIX}_${ctx}`, null);
     }
 
     // ─── CAR_NAMES / CAR_CLASSES ─────────────────────────────────────────────────
@@ -112,7 +144,6 @@
         const items = [...listEl.querySelectorAll(':scope > li')];
         return items.map((el, idx) => {
             const removeLink = el.querySelector('a.enlist-link.remove[id-value]');
-            const carId = removeLink ? removeLink.getAttribute('id-value') : `idx-${idx}`;
 
             // "Select" link — navigates to selectParts page for this car.
             // Only present on tab=parts.
@@ -137,18 +168,23 @@
             const customNameEl = el.querySelector('[class*="model-car-name-"]');
             const tornCustomName = customNameEl ? customNameEl.textContent.trim() : '';
 
-            // Extract numeric car id from the model-car-name-{id} class —
-            // works on every page (cars, parts, customrace join)
-            let carIdNum = null;
+            // Unified car identifier. Prefer the model-car-name-{id} class —
+            // present on tab=cars, tab=parts, AND the tab=customrace join
+            // page, and is the value used for live re-querying in the click
+            // handler. Fall back to the remove-link's id-value (same
+            // underlying id, different markup source). Only fall back to a
+            // synthetic idx-based id if BOTH sources are missing, which would
+            // indicate Torn changed markup significantly.
+            let carId = null;
             if (customNameEl) {
                 const cls = [...customNameEl.classList].find(c => c.startsWith('model-car-name-'));
                 if (cls) {
                     const m = cls.match(/model-car-name-(\d+)/);
-                    if (m) carIdNum = m[1];
+                    if (m) carId = m[1];
                 }
             }
-            // Fall back to the remove-link's id-value if the class wasn't found
-            if (!carIdNum && removeLink) carIdNum = removeLink.getAttribute('id-value');
+            if (!carId && removeLink) carId = removeLink.getAttribute('id-value');
+            if (!carId) carId = `idx-${idx}`;
 
             const imgEl = el.querySelector('.enlist-car img');
             const imgSrc = imgEl ? imgEl.src.replace(/large(@\dx)?\.png$/, 'large.png') : '';
@@ -184,7 +220,7 @@
             }
 
             return {
-                el, carId, carIdNum, itemId, tornModel, tornCustomName, carClass, imgSrc,
+                carId, itemId, tornModel, tornCustomName, carClass, imgSrc,
                 partsHref, upgradeUrl, joinHref,
                 topSpeedMph:  getListedStat('Top Speed'),
                 zeroSixty:    getListedStat('0-60'),
@@ -245,18 +281,25 @@
         const firstList = document.querySelector('ul.enlist-list');
         const page1Cars = firstList ? extractCarsFromList(firstList) : [];
 
-        if (pageLinks.length <= 1) return page1Cars;
-
-        // Fetch remaining pages
-        const allCars = [...page1Cars];
-        for (let i = 1; i < pageLinks.length; i++) {
-            if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page ${i + 1} of ${pageLinks.length}…`;
-            const url = pageLinks[i].href;
-            const cars = await fetchPageCars(url);
-            allCars.push(...cars);
+        // Dedup by carId across all collected pages, first-seen wins. This
+        // guards against pagination glitches returning overlapping pages.
+        const byId = new Map();
+        for (const car of page1Cars) {
+            if (!byId.has(car.carId)) byId.set(car.carId, car);
         }
 
-        return allCars;
+        if (pageLinks.length > 1) {
+            for (let i = 1; i < pageLinks.length; i++) {
+                if (loadingEl) loadingEl.querySelector('span').textContent = `Loading page ${i + 1} of ${pageLinks.length}…`;
+                const url = pageLinks[i].href;
+                const cars = await fetchPageCars(url);
+                for (const car of cars) {
+                    if (!byId.has(car.carId)) byId.set(car.carId, car);
+                }
+            }
+        }
+
+        return [...byId.values()];
     }
 
     // ─── Sorting ─────────────────────────────────────────────────────────────────
@@ -287,7 +330,7 @@
             list.sort((a, b) => {
                 const va = a[sortKey] ?? -Infinity;
                 const vb = b[sortKey] ?? -Infinity;
-                return sortDir * (vb - va);
+                return sortDir * (va - vb);
             });
         }
         return list;
@@ -320,7 +363,32 @@
             const [moved] = visibleList.splice(dragSrcIdx, 1);
             visibleList.splice(destIdx, 0, moved);
             dragSrcIdx = destIdx;
-            customOrder = visibleList.map(c => c.carId);
+
+            // Rebuild the MASTER order (all cars, not just the filtered/visible
+            // subset) by taking the existing order (or full carData order if
+            // none exists yet), removing the moved car, and reinserting it
+            // adjacent to its new neighbor in the visible list. This avoids
+            // discarding ordering information for cars hidden by the current
+            // class filter.
+            let master = customOrder.length
+                ? [...customOrder]
+                : carData.map(c => c.carId);
+
+            master = master.filter(id => id !== moved.carId);
+
+            const prevInVisible = visibleList[destIdx - 1];
+            const nextInVisible = visibleList[destIdx + 1];
+            if (prevInVisible) {
+                const anchorIdx = master.indexOf(prevInVisible.carId);
+                master.splice(anchorIdx + 1, 0, moved.carId);
+            } else if (nextInVisible) {
+                const anchorIdx = master.indexOf(nextInVisible.carId);
+                master.splice(Math.max(0, anchorIdx), 0, moved.carId);
+            } else {
+                master.unshift(moved.carId);
+            }
+
+            customOrder = master;
             saveCustomOrder();
             sortKey = 'custom';
             updateSortButtons();
@@ -454,11 +522,16 @@
 
         const visible = sortedVisible();
         grid.innerHTML = '';
+        selectedCard = null;
 
         visible.forEach(car => {
             const card = document.createElement('div');
             card.className = 'tcs-car-card';
             card.dataset.carId = car.carId;
+            if (car.carId === selectedCarId) {
+                card.classList.add('selected');
+                selectedCard = card;
+            }
 
             // Context-aware tooltip
             if (IS_PARTS_PAGE && car.upgradeUrl) card.title = 'Click to manage parts/upgrades';
@@ -558,8 +631,11 @@
 
             card.addEventListener('click', e => {
                 if (e.target === handle || e.target.classList.contains('tcs-edit-btn')) return;
-                document.querySelectorAll('.tcs-car-card').forEach(c => c.classList.remove('selected'));
+
+                if (selectedCard) selectedCard.classList.remove('selected');
                 card.classList.add('selected');
+                selectedCard = card;
+                selectedCarId = car.carId;
 
                 // 1) Parts page: navigate to the upgrades/parts page for this car
                 if (IS_PARTS_PAGE && car.upgradeUrl) {
@@ -568,33 +644,19 @@
                 }
 
                 // 2) Race-join page: look up the live join link by car id.
-                //    carData may include cars from fetched (non-page-1) pages
-                //    whose .el is detached from the live document, so we must
-                //    re-resolve via a fresh querySelector.
-                const liveJoinLink = car.carIdNum
-                    ? document.querySelector(`a.link.btn-action-joinRace[carid-value="${car.carIdNum}"]`)
-                    : null;
+                const liveJoinLink = document.querySelector(`a.link.btn-action-joinRace[carid-value="${car.carId}"]`);
                 if (liveJoinLink) {
                     liveJoinLink.click();
                     return;
                 }
 
                 // 3) tab=cars (or anything else): re-resolve the live <li> by id
-                //    before clicking — car.el may belong to a detached document
-                //    if this car came from a fetched page.
-                if (car.carIdNum) {
-                    const nameEl = document.querySelector(`.model-car-name-${car.carIdNum}`);
-                    const liveLi = nameEl ? nameEl.closest('li') : null;
-                    if (liveLi) {
-                        const target = liveLi.querySelector('input[type="radio"], a.enlist-link:not(.remove), button');
-                        if (target) { target.click(); return; }
-                    }
-                }
-
-                // 4) Last-resort fallback for page-1 cars whose .el is still live
-                if (car.el && document.contains(car.el)) {
-                    const t = car.el.querySelector('input[type="radio"], a.enlist-link:not(.remove), button') || car.el;
-                    t.click();
+                //    and click its selection target.
+                const nameEl = document.querySelector(`.model-car-name-${car.carId}`);
+                const liveLi = nameEl ? nameEl.closest('li') : null;
+                if (liveLi) {
+                    const target = liveLi.querySelector('input[type="radio"], a.enlist-link:not(.remove), button');
+                    if (target) target.click();
                 }
             });
 
@@ -718,7 +780,7 @@
         refreshBtn.title = 'Refresh car list';
         refreshBtn.textContent = '↺ Refresh';
         refreshBtn.addEventListener('click', () => {
-            clearCache();
+            clearCache(getCacheContext());
             wrapper.remove();
             document.querySelectorAll('ul.enlist-list').forEach(l => l.style.display = '');
             document.querySelectorAll('.gallery-wrapper.pagination').forEach(p => p.style.display = '');
@@ -777,14 +839,29 @@
             customOrder = getCustomOrder();
             nicknames   = getNicknames();
 
+            const ctx = getCacheContext();
+            const cached = getCachedCars(ctx);
+
+            if (cached) {
+                carData = cached;
+                firstList.style.display = 'none';
+                buildWidget(firstList);
+                renderGrid();
+                observer.disconnect();
+                _collecting = false;
+                return;
+            }
+
             const loader = showLoading(firstList);
             firstList.style.display = 'none';
 
             try {
                 carData = await collectAllCars(loader);
+                setCachedCars(ctx, carData);
                 loader.remove();
                 buildWidget(firstList);
                 renderGrid();
+                observer.disconnect();
             } catch (e) {
                 loader.remove();
                 firstList.style.display = '';
@@ -798,20 +875,18 @@
     // ─── Observer ────────────────────────────────────────────────────────────────
 
     const observer = new MutationObserver(() => {
+        if (_collecting) return;
         const hasList   = !!document.querySelector('ul.enlist-list');
         const hasWidget = !!(document.getElementById('tcs-wrapper') || document.getElementById('tcs-loading'));
-        if (hasList && !hasWidget && !_collecting) init();
-        if (!hasList && !_collecting) {
-            clearTimeout(_initTimer);
-            ['tcs-wrapper', 'tcs-loading'].forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.remove();
-            });
-        }
+        if (hasList && !hasWidget) init();
     });
 
-    // Observer starts connected for initial page detection.
-    // It is disconnected during pagination and reconnected after buildWidget.
+    // The racing page's React/build chunks load asynchronously, so
+    // ul.enlist-list may not exist yet at script-run time. The observer's
+    // only job is to catch its first appearance; init() disconnects it on
+    // success. Tab switches are full page navigations (plain <a href> tab
+    // links), so each tab gets a fresh script execution — no reconnect logic
+    // is needed for navigating away.
     observer.observe(document.body, { childList: true, subtree: true });
     init();
 
