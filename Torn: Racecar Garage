@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racecar Garage
 // @namespace    https://greasyfork.org/users/CowboyUpp
-// @version      1.6.0
+// @version      1.6.1
 // @description  Your full car collection in one view. Sort, filter and nickname all your cars.
 // @author       CowboyUp
 // @match        https://www.torn.com/*
@@ -16,6 +16,16 @@
 //          contains &id={carId}) and clicking the card navigates directly to
 //          the parts/upgrades page for that car. Falls back to the old
 //          race-selection click if no parts link is found. Tooltip added.
+// v1.6.1 - Fixed click handler for cars collected from fetched (non-page-1)
+//          pages: car.el may be detached from the live document, so
+//          selection now re-resolves the live <li> via .model-car-name-{id}
+//          before clicking, with car.el as a last-resort fallback.
+//          Added context detection (IS_PARTS_PAGE, live join-link lookup)
+//          so cards behave correctly on tab=cars, tab=parts, and the
+//          tab=customrace "choose car to join" page.
+//          upgradeUrl is now stored as an absolute URL via new URL().
+//          Added Dirt/Tarmac/Safety extraction (dirtPts/tarmacPts/safetyPts),
+//          new sort buttons, and stat display on each card.
 
 (function () {
     'use strict';
@@ -30,6 +40,9 @@
     const CUSTOM_ORDER_KEY = 'tcs_custom_order';
     const CACHE_KEY        = 'tcs_car_cache';
     const CACHE_TTL_MS     = 5 * 60 * 1000; // 5 minutes
+
+    // Page-context detection, computed once at load
+    const IS_PARTS_PAGE = location.href.includes('tab=parts');
 
     // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -101,10 +114,16 @@
             const removeLink = el.querySelector('a.enlist-link.remove[id-value]');
             const carId = removeLink ? removeLink.getAttribute('id-value') : `idx-${idx}`;
 
-            // "Select" link — navigates to selectParts page for this car (present on
-            // tab=parts; may also exist on tab=cars for race selection)
+            // "Select" link — navigates to selectParts page for this car.
+            // Only present on tab=parts.
             const actionLink = el.querySelector('a.link.btn-action-tab[step-value="selectParts"]');
             const partsHref = actionLink ? actionLink.getAttribute('href') : '';
+            // Normalize to absolute URL so it survives cross-page collection
+            const upgradeUrl = partsHref ? new URL(partsHref, location.origin).href : null;
+
+            // Race-join link, present only on tab=customrace's join page
+            const joinLink = el.querySelector('a.link.btn-action-joinRace[carid-value]');
+            const joinHref = joinLink ? joinLink.getAttribute('href') : null;
 
             const modelEl = el.querySelector('.model');
             let tornModel = '', carClass = 'A';
@@ -117,6 +136,19 @@
 
             const customNameEl = el.querySelector('[class*="model-car-name-"]');
             const tornCustomName = customNameEl ? customNameEl.textContent.trim() : '';
+
+            // Extract numeric car id from the model-car-name-{id} class —
+            // works on every page (cars, parts, customrace join)
+            let carIdNum = null;
+            if (customNameEl) {
+                const cls = [...customNameEl.classList].find(c => c.startsWith('model-car-name-'));
+                if (cls) {
+                    const m = cls.match(/model-car-name-(\d+)/);
+                    if (m) carIdNum = m[1];
+                }
+            }
+            // Fall back to the remove-link's id-value if the class wasn't found
+            if (!carIdNum && removeLink) carIdNum = removeLink.getAttribute('id-value');
 
             const imgEl = el.querySelector('.enlist-car img');
             const imgSrc = imgEl ? imgEl.src.replace(/large(@\dx)?\.png$/, 'large.png') : '';
@@ -152,7 +184,8 @@
             }
 
             return {
-                el, carId, itemId, tornModel, tornCustomName, carClass, imgSrc, partsHref,
+                el, carId, carIdNum, itemId, tornModel, tornCustomName, carClass, imgSrc,
+                partsHref, upgradeUrl, joinHref,
                 topSpeedMph:  getListedStat('Top Speed'),
                 zeroSixty:    getListedStat('0-60'),
                 brakeDist:    getListedStat('Brake Dist'),
@@ -164,6 +197,9 @@
                 accelPts:     getBarStat('Acceleration'),
                 brakingPts:   getBarStat('Braking'),
                 handlingPts:  getBarStat('Handling'),
+                dirtPts:      getBarStat('Dirt'),
+                tarmacPts:    getBarStat('Tarmac'),
+                safetyPts:    getBarStat('Safety'),
             };
         });
     }
@@ -423,7 +459,10 @@
             const card = document.createElement('div');
             card.className = 'tcs-car-card';
             card.dataset.carId = car.carId;
-            if (car.partsHref) card.title = 'Click to manage parts/upgrades';
+
+            // Context-aware tooltip
+            if (IS_PARTS_PAGE && car.upgradeUrl) card.title = 'Click to manage parts/upgrades';
+            else if (car.joinHref) card.title = 'Click to select this car for the race';
 
             const badgeColor = CLASS_COLORS[car.carClass] || '#888';
 
@@ -493,6 +532,9 @@
             [
                 ['Speed',    car.topSpeedMph != null ? car.topSpeedMph + ' mph' : null],
                 ['0-60',     car.zeroSixty   != null ? car.zeroSixty + 's'      : null],
+                ['Dirt',     car.dirtPts     != null ? String(car.dirtPts)      : null],
+                ['Tarmac',   car.tarmacPts   != null ? String(car.tarmacPts)    : null],
+                ['Safety',   car.safetyPts   != null ? String(car.safetyPts)    : null],
                 ['Upgrades', car.upgrades    != null ? String(car.upgrades)      : null],
                 ['W%',       car.winPct      != null ? car.winPct + '%'          : null],
             ].forEach(([label, val]) => {
@@ -503,7 +545,10 @@
                 const vEl = document.createElement('span');
                 vEl.className = 'tcs-stat-val' + (
                     (label === 'Upgrades' && sortKey === 'upgrades') ||
-                    (label === 'W%' && sortKey === 'winPct') ? ' hl' : '');
+                    (label === 'W%' && sortKey === 'winPct') ||
+                    (label === 'Dirt' && sortKey === 'dirtPts') ||
+                    (label === 'Tarmac' && sortKey === 'tarmacPts') ||
+                    (label === 'Safety' && sortKey === 'safetyPts') ? ' hl' : '');
                 vEl.textContent = val;
                 statsEl.appendChild(lbl);
                 statsEl.appendChild(vEl);
@@ -515,11 +560,39 @@
                 if (e.target === handle || e.target.classList.contains('tcs-edit-btn')) return;
                 document.querySelectorAll('.tcs-car-card').forEach(c => c.classList.remove('selected'));
                 card.classList.add('selected');
-                if (car.partsHref) {
-                    // Navigate to the upgrades/parts page for this car
-                    window.location.href = car.partsHref;
-                } else if (car.el) {
-                    // Fallback: trigger the original race-selection control
+
+                // 1) Parts page: navigate to the upgrades/parts page for this car
+                if (IS_PARTS_PAGE && car.upgradeUrl) {
+                    window.location.href = car.upgradeUrl;
+                    return;
+                }
+
+                // 2) Race-join page: look up the live join link by car id.
+                //    carData may include cars from fetched (non-page-1) pages
+                //    whose .el is detached from the live document, so we must
+                //    re-resolve via a fresh querySelector.
+                const liveJoinLink = car.carIdNum
+                    ? document.querySelector(`a.link.btn-action-joinRace[carid-value="${car.carIdNum}"]`)
+                    : null;
+                if (liveJoinLink) {
+                    liveJoinLink.click();
+                    return;
+                }
+
+                // 3) tab=cars (or anything else): re-resolve the live <li> by id
+                //    before clicking — car.el may belong to a detached document
+                //    if this car came from a fetched page.
+                if (car.carIdNum) {
+                    const nameEl = document.querySelector(`.model-car-name-${car.carIdNum}`);
+                    const liveLi = nameEl ? nameEl.closest('li') : null;
+                    if (liveLi) {
+                        const target = liveLi.querySelector('input[type="radio"], a.enlist-link:not(.remove), button');
+                        if (target) { target.click(); return; }
+                    }
+                }
+
+                // 4) Last-resort fallback for page-1 cars whose .el is still live
+                if (car.el && document.contains(car.el)) {
                     const t = car.el.querySelector('input[type="radio"], a.enlist-link:not(.remove), button') || car.el;
                     t.click();
                 }
@@ -616,6 +689,9 @@
             { key: 'speedPts',    label: 'Speed'    },
             { key: 'accelPts',    label: 'Accel'    },
             { key: 'handlingPts', label: 'Handling' },
+            { key: 'dirtPts',     label: 'Dirt'     },
+            { key: 'tarmacPts',   label: 'Tarmac'   },
+            { key: 'safetyPts',   label: 'Safety'   },
             { key: 'upgrades',    label: 'Upgrades' },
             { key: 'winPct',      label: 'Win%'     },
             { key: 'name',        label: 'Name'     },
