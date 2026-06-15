@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.4.0
-// @description  Tracks your crime chain live across all Crimes 2.0 sub-menus.
+// @version      4.6.0
+// @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @run-at       document-idle
@@ -14,141 +14,269 @@
 // @updateURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.meta.js
 // ==/UserScript==
 
-// =============================================================================
-// CHANGELOG
-// =============================================================================
-// 4.4.0 — Light / Dark Mode Toggle
-//   - Added ☀️/🌙 theme toggle button next to the gear icon.
-//   - Dark mode: existing neon palette preserved (#00ff66 / #ffaa00 / #ff3344).
-//   - Light mode: readable non-neon palette (#16a34a / #d97706 / #dc2626).
-//   - Widget surface, popover, text, and ring track adapt to the active theme.
-//   - Theme persisted via GM_setValue (key: cct_theme_v4).
-// -----------------------------------------------------------------------------
-// 4.3.2 — UI Text Adjustment
-//   - Increased font size of the inner-ring chain count from 10px to 12px.
-//   - Adjusted positioning slightly to keep alignment precise.
-// =============================================================================
-
 (function () {
     'use strict';
 
-    // =========================================================================
-    // CONFIG
-    // =========================================================================
-    const STORAGE_KEY_CHAIN  = 'cct_chain_v4';
+    const VERSION = '4.6.0';
+    const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
-    const STORAGE_KEY_THEME  = 'cct_theme_v4';
-    const USE_API            = true;
-    const CHAIN_CAP_DISPLAY  = 100;
+    const STORAGE_KEY_THEME = 'cct_theme_v4';
+    const STORAGE_KEY_LAST_EVENT = 'cct_last_event_v4';
+    const USE_API = true;
+    const CHAIN_CAP_DISPLAY = 100;
+    const OUTCOME_DEDUPE_MS = 3500;
 
-    // =========================================================================
-    // STATE
-    // =========================================================================
-    let chain     = parseInt(GM_getValue(STORAGE_KEY_CHAIN, '0'), 10) || 0;
-    let isDark    = GM_getValue(STORAGE_KEY_THEME, 'dark') !== 'light';
-    let observer  = null;
+    let chain = clampChain(parseInt(GM_getValue(STORAGE_KEY_CHAIN, '0'), 10) || 0);
+    let isDark = GM_getValue(STORAGE_KEY_THEME, 'dark') !== 'light';
+    let observer = null;
+    let lastEvent = readLastEvent();
+    let syncTimer = null;
 
-    // =========================================================================
-    // STORAGE
-    // =========================================================================
+    const THEME = {
+        dark: {
+            widgetBg: 'rgba(255,255,255,0.07)',
+            widgetBorder: 'rgba(255,255,255,0.12)',
+            ringTrack: 'rgba(255,255,255,0.10)',
+            popoverBg: '#1e1e1e',
+            popoverBorder: 'rgba(255,255,255,0.15)',
+            popoverColor: '#ccc',
+            inputBg: 'rgba(255,255,255,0.06)',
+            inputBorder: 'rgba(255,255,255,0.15)',
+            inputFocus: 'rgba(255,255,255,0.4)',
+            saveBg: 'rgba(255,255,255,0.08)',
+            saveBorder: 'rgba(255,255,255,0.18)',
+            saveBgHover: 'rgba(255,255,255,0.16)',
+            labelOpacity: '0.4',
+            statusOpacity: '0.8',
+            gearOpacity: '0.45',
+            gearHover: '0.8',
+            chainLow: '#00ff66',
+            chainMid: '#ffaa00',
+            chainHigh: '#ff3344',
+        },
+        light: {
+            widgetBg: 'rgba(0,0,0,0.05)',
+            widgetBorder: 'rgba(0,0,0,0.14)',
+            ringTrack: 'rgba(0,0,0,0.12)',
+            popoverBg: '#ffffff',
+            popoverBorder: 'rgba(0,0,0,0.15)',
+            popoverColor: '#222',
+            inputBg: 'rgba(0,0,0,0.04)',
+            inputBorder: 'rgba(0,0,0,0.18)',
+            inputFocus: 'rgba(0,0,0,0.45)',
+            saveBg: 'rgba(0,0,0,0.06)',
+            saveBorder: 'rgba(0,0,0,0.18)',
+            saveBgHover: 'rgba(0,0,0,0.13)',
+            labelOpacity: '0.45',
+            statusOpacity: '1',
+            gearOpacity: '0.55',
+            gearHover: '0.85',
+            chainLow: '#16a34a',
+            chainMid: '#d97706',
+            chainHigh: '#dc2626',
+        },
+    };
+
+    const OUTCOME_RULES = [
+        { type: 'critical', re: /\bcritical(?:ly)?\b|critical\s+failure|crit\s+fail/i },
+        { type: 'fail', re: /\bfail(?:ed|ure)?\b|\bbusted\b|\bbust\b|unsuccessful/i },
+        { type: 'success', re: /\bsuccess(?:ful|fully)?\b|\bcompleted\b|you\s+managed\s+to/i },
+    ];
+
+    const OUTCOME_CONTAINER_SELECTOR = [
+        '[class*="result" i]',
+        '[class*="outcome" i]',
+        '[class*="message" i]',
+        '[class*="notification" i]',
+        '[class*="toast" i]',
+        '[class*="crime" i][class*="success" i]',
+        '[class*="crime" i][class*="fail" i]',
+    ].join(',');
+
+    const RADIUS = 10;
+    const CIRC = 2 * Math.PI * RADIUS;
+
+    function clampChain(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return 0;
+        return Math.max(0, Math.floor(n));
+    }
+
+    function safeGet(key, fallback) {
+        return typeof GM_getValue === 'function' ? GM_getValue(key, fallback) : fallback;
+    }
+
+    function safeSet(key, value) {
+        if (typeof GM_setValue === 'function') GM_setValue(key, value);
+    }
+
+    function readLastEvent() {
+        try {
+            return JSON.parse(safeGet(STORAGE_KEY_LAST_EVENT, '{}')) || {};
+        } catch (_) {
+            return {};
+        }
+    }
+
     function saveChain() {
-        if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY_CHAIN, String(chain));
+        safeSet(STORAGE_KEY_CHAIN, String(chain));
     }
 
     function getApiKey() {
-        return typeof GM_getValue === 'function' ? GM_getValue(STORAGE_KEY_APIKEY, '') : '';
+        return safeGet(STORAGE_KEY_APIKEY, '');
     }
 
     function saveApiKey(key) {
-        const sanitized = key.replace(/\s+/g, '');
-        if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY_APIKEY, sanitized);
+        const sanitized = String(key || '').replace(/\s+/g, '');
+        safeSet(STORAGE_KEY_APIKEY, sanitized);
         return sanitized;
     }
 
     function saveTheme() {
-        if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY_THEME, isDark ? 'dark' : 'light');
+        safeSet(STORAGE_KEY_THEME, isDark ? 'dark' : 'light');
     }
 
-    // =========================================================================
-    // THEME
-    // =========================================================================
-    // Dark: neon palette
-    // Light: muted but clearly readable equivalents at full opacity on white
-    const THEME = {
-        dark: {
-            widgetBg:      'rgba(255,255,255,0.07)',
-            widgetBorder:  'rgba(255,255,255,0.12)',
-            ringTrack:     'rgba(255,255,255,0.10)',
-            popoverBg:     '#1e1e1e',
-            popoverBorder: 'rgba(255,255,255,0.15)',
-            popoverColor:  '#ccc',
-            inputBg:       'rgba(255,255,255,0.06)',
-            inputBorder:   'rgba(255,255,255,0.15)',
-            inputFocus:    'rgba(255,255,255,0.4)',
-            saveBg:        'rgba(255,255,255,0.08)',
-            saveBorder:    'rgba(255,255,255,0.18)',
-            saveBgHover:   'rgba(255,255,255,0.16)',
-            labelOpacity:  '0.4',
-            statusOpacity: '0.8',
-            gearOpacity:   '0.35',
-            gearHover:     '0.75',
-            chainLow:      '#00ff66',   // neon green  < 30
-            chainMid:      '#ffaa00',   // neon amber  30–59
-            chainHigh:     '#ff3344',   // neon red    ≥ 60
-        },
-        light: {
-            widgetBg:      'rgba(0,0,0,0.05)',
-            widgetBorder:  'rgba(0,0,0,0.14)',
-            ringTrack:     'rgba(0,0,0,0.12)',
-            popoverBg:     '#ffffff',
-            popoverBorder: 'rgba(0,0,0,0.15)',
-            popoverColor:  '#222',
-            inputBg:       'rgba(0,0,0,0.04)',
-            inputBorder:   'rgba(0,0,0,0.18)',
-            inputFocus:    'rgba(0,0,0,0.45)',
-            saveBg:        'rgba(0,0,0,0.06)',
-            saveBorder:    'rgba(0,0,0,0.18)',
-            saveBgHover:   'rgba(0,0,0,0.13)',
-            labelOpacity:  '0.45',
-            statusOpacity: '1',
-            gearOpacity:   '0.4',
-            gearHover:     '0.8',
-            chainLow:      '#16a34a',   // green-700   < 30
-            chainMid:      '#d97706',   // amber-600   30–59
-            chainHigh:     '#dc2626',   // red-600     ≥ 60
-        },
-    };
+    function saveLastEvent(event) {
+        lastEvent = event;
+        safeSet(STORAGE_KEY_LAST_EVENT, JSON.stringify(event));
+    }
 
-    function t() { return isDark ? THEME.dark : THEME.light; }
+    function escapeHTML(value) {
+        return String(value || '').replace(/[&<>"]/g, (ch) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+        }[ch]));
+    }
 
-    // =========================================================================
-    // OUTCOME LOGIC (DOM Monitoring)
-    // =========================================================================
-    const RE_CRITICAL = /critical/i;
-    const RE_FAIL     = /fail|bust/i;
-    const RE_SUCCESS  = /success/i;
+    function normalizeText(text) {
+        return String(text || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 500);
+    }
 
-    function applyOutcome(text) {
-        if (!text) return;
-        const tx = text.toLowerCase();
+    function hashText(text) {
+        let hash = 0;
+        for (let i = 0; i < text.length; i++) {
+            hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+        }
+        return String(hash);
+    }
 
-        if (RE_CRITICAL.test(tx)) {
+    function t() {
+        return isDark ? THEME.dark : THEME.light;
+    }
+
+    function classifyOutcome(text) {
+        const clean = normalizeText(text);
+        if (!clean) return null;
+
+        for (const rule of OUTCOME_RULES) {
+            if (rule.re.test(clean)) return { type: rule.type, text: clean };
+        }
+        return null;
+    }
+
+    function isDuplicateOutcome(outcome) {
+        const now = Date.now();
+        const signature = `${outcome.type}:${hashText(outcome.text)}`;
+        return lastEvent.signature === signature && now - Number(lastEvent.time || 0) < OUTCOME_DEDUPE_MS;
+    }
+
+    function applyOutcomeFromText(text) {
+        const outcome = classifyOutcome(text);
+        if (!outcome || isDuplicateOutcome(outcome)) return;
+
+        if (outcome.type === 'critical') {
             chain = 0;
-        } else if (RE_FAIL.test(tx)) {
-            chain = chain > 0 ? Math.floor(chain / 2) : 0;
-        } else if (RE_SUCCESS.test(tx)) {
-            chain++;
-        } else {
-            return;
+        } else if (outcome.type === 'fail') {
+            chain = Math.floor(chain / 2);
+        } else if (outcome.type === 'success') {
+            chain += 1;
         }
 
+        chain = clampChain(chain);
         saveChain();
-        render();
+        saveLastEvent({
+            signature: `${outcome.type}:${hashText(outcome.text)}`,
+            time: Date.now(),
+            type: outcome.type,
+        });
+        render(true);
     }
 
-    // =========================================================================
-    // CSS
-    // =========================================================================
+    function chainColor(n) {
+        const th = t();
+        if (n < 30) return th.chainLow;
+        if (n < 60) return th.chainMid;
+        return th.chainHigh;
+    }
+
+    function statusText(n) {
+        if (n === 0) return 'No active chain';
+        if (n < 10) return 'Building...';
+        if (n < 30) return 'On a roll';
+        if (n < 60) return 'Hot streak';
+        return 'Unstoppable';
+    }
+
+    function findCrimesApp() {
+        return document.querySelector('.crimes-app') || document.querySelector('[class*="crimes-app"]') || document.querySelector('main');
+    }
+
+    function findWidgetAnchor(root) {
+        return root.querySelector('[class*="heading" i]') ||
+            root.querySelector('[class*="appHeader" i]') ||
+            root.querySelector('h1,h2,h3,h4') ||
+            root;
+    }
+
+    function findNativeChainBadge() {
+        // Locate the native "CRIME CHAIN" label, then find the numeric
+        // value displayed alongside it (Torn's own chain counter).
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let labelNode = null;
+        let node;
+        while ((node = walker.nextNode())) {
+            const txt = node.nodeValue;
+            if (txt && /crime\s*chain/i.test(txt)) {
+                labelNode = node;
+                break;
+            }
+        }
+        if (!labelNode) return null;
+
+        // Walk up a few ancestor levels looking for a container that also
+        // holds a short numeric text node (the chain count badge).
+        let container = labelNode.parentElement;
+        for (let i = 0; i < 5 && container; i++) {
+            const candidates = container.querySelectorAll('*');
+            for (const el of candidates) {
+                if (el.closest('#cct-root')) continue;
+                if (el.children.length > 0) continue; // want leaf nodes
+                const text = (el.textContent || '').trim();
+                if (/^\d{1,4}$/.test(text)) {
+                    return { element: el, value: parseInt(text, 10) };
+                }
+            }
+            container = container.parentElement;
+        }
+        return null;
+    }
+
+    function syncFromNativeBadge() {
+        const badge = findNativeChainBadge();
+        if (!badge) return false;
+        if (badge.value !== chain) {
+            chain = clampChain(badge.value);
+            saveChain();
+            render(true);
+        }
+        return true;
+    }
+
     function injectCSS() {
         if (document.querySelector('#cct-global-styles')) return;
         const style = document.createElement('style');
@@ -162,8 +290,8 @@
                 vertical-align: middle;
                 font-family: inherit;
                 position: relative;
+                z-index: 20;
             }
-
             #cct-widget {
                 display: inline-flex;
                 align-items: center;
@@ -172,33 +300,23 @@
                 border-radius: 20px;
                 cursor: default;
                 user-select: none;
-                /* surface set dynamically via applyTheme() */
             }
-
             #cct-ring-wrap {
                 position: relative;
                 width: 28px;
                 height: 28px;
                 flex-shrink: 0;
             }
-
-            #cct-ring-wrap svg {
-                transform: rotate(-90deg);
-            }
-
-            #cct-ring-bg {
-                fill: none;
-                stroke-width: 3;
-                /* stroke set dynamically */
-            }
-
+            #cct-ring-wrap svg { transform: rotate(-90deg); }
+            #cct-ring-bg,
             #cct-ring-arc {
                 fill: none;
                 stroke-width: 3;
+            }
+            #cct-ring-arc {
                 stroke-linecap: round;
                 transition: stroke-dashoffset 0.4s ease, stroke 0.4s ease;
             }
-
             #cct-ring-label {
                 position: absolute;
                 inset: 0;
@@ -207,18 +325,14 @@
                 justify-content: center;
                 font-size: 12px;
                 font-weight: 700;
-                letter-spacing: -0.5px;
                 pointer-events: none;
                 line-height: 1;
             }
-
             #cct-text {
                 display: flex;
                 flex-direction: column;
-                gap: 0px;
                 line-height: 1.15;
             }
-
             #cct-label {
                 font-size: 9px;
                 font-weight: 600;
@@ -226,36 +340,29 @@
                 letter-spacing: 0.07em;
                 color: inherit;
             }
-
             #cct-status {
                 font-size: 11px;
                 font-weight: 600;
                 color: inherit;
+                min-width: 74px;
             }
-
             @keyframes cct-flash {
-                0%   { opacity: 1; }
-                40%  { opacity: 0.25; }
+                0% { opacity: 1; }
+                40% { opacity: 0.25; }
                 100% { opacity: 1; }
             }
-
-            #cct-status.cct-flash {
-                animation: cct-flash 0.35s ease;
-            }
-
-            /* Gear + Theme toggle share the same base style */
+            #cct-status.cct-flash { animation: cct-flash 0.35s ease; }
             .cct-icon-btn {
-                font-size: 13px;
+                font-size: 11px;
                 cursor: pointer;
                 line-height: 1;
-                transition: opacity 0.15s;
+                transition: opacity 0.15s, background 0.15s;
                 background: none;
                 border: none;
                 color: inherit;
-                padding: 2px 4px;
+                padding: 3px 5px;
                 border-radius: 4px;
             }
-
             #cct-api-popover {
                 display: none;
                 position: absolute;
@@ -270,11 +377,7 @@
                 gap: 8px;
                 font-size: 12px;
             }
-
-            #cct-api-popover.cct-open {
-                display: flex;
-            }
-
+            #cct-api-popover.cct-open { display: flex; }
             #cct-api-popover label {
                 font-size: 10px;
                 font-weight: 600;
@@ -283,22 +386,23 @@
                 opacity: 0.5;
                 color: inherit;
             }
-
-            #cct-api-row {
+            #cct-api-row,
+            #cct-manual-row {
                 display: flex;
                 align-items: center;
                 gap: 6px;
             }
-
-            #cct-api-input {
-                width: 170px;
+            #cct-api-input,
+            #cct-chain-input {
                 padding: 4px 7px;
                 font-size: 12px;
                 border-radius: 5px;
                 outline: none;
             }
-
-            #cct-api-save {
+            #cct-api-input { width: 170px; }
+            #cct-chain-input { width: 54px; }
+            #cct-api-save,
+            #cct-chain-save {
                 padding: 4px 9px;
                 font-size: 11px;
                 border-radius: 5px;
@@ -306,129 +410,87 @@
                 transition: background 0.15s;
                 white-space: nowrap;
             }
-
             #cct-api-hint {
                 font-size: 10px;
-                opacity: 0.45;
+                opacity: 0.55;
             }
         `;
         document.head.appendChild(style);
     }
 
-    // =========================================================================
-    // THEME APPLICATION (updates live CSS on existing DOM)
-    // =========================================================================
     function applyTheme() {
         const th = t();
-
-        // Widget surface
         const widget = document.querySelector('#cct-widget');
         if (widget) {
             widget.style.background = th.widgetBg;
-            widget.style.border     = `1px solid ${th.widgetBorder}`;
+            widget.style.border = `1px solid ${th.widgetBorder}`;
         }
 
-        // Ring track
         const ringBg = document.querySelector('#cct-ring-bg');
         if (ringBg) ringBg.style.stroke = th.ringTrack;
 
-        // Label / status opacity
         const lbl = document.querySelector('#cct-label');
         if (lbl) lbl.style.opacity = th.labelOpacity;
 
         const status = document.querySelector('#cct-status');
         if (status) status.style.opacity = th.statusOpacity;
 
-        // Popover
         const popover = document.querySelector('#cct-api-popover');
         if (popover) {
-            popover.style.background   = th.popoverBg;
-            popover.style.border       = `1px solid ${th.popoverBorder}`;
-            popover.style.color        = th.popoverColor;
+            popover.style.background = th.popoverBg;
+            popover.style.border = `1px solid ${th.popoverBorder}`;
+            popover.style.color = th.popoverColor;
         }
 
-        // Input
-        const input = document.querySelector('#cct-api-input');
-        if (input) {
+        document.querySelectorAll('#cct-api-input,#cct-chain-input').forEach((input) => {
             input.style.background = th.inputBg;
-            input.style.border     = `1px solid ${th.inputBorder}`;
-            input.style.color      = th.popoverColor;
+            input.style.border = `1px solid ${th.inputBorder}`;
+            input.style.color = th.popoverColor;
             input.onfocus = () => { input.style.borderColor = th.inputFocus; };
-            input.onblur  = () => { input.style.borderColor = th.inputBorder; };
-        }
+            input.onblur = () => { input.style.borderColor = th.inputBorder; };
+        });
 
-        // Save button
-        const save = document.querySelector('#cct-api-save');
-        if (save) {
-            save.style.background = th.saveBg;
-            save.style.border     = `1px solid ${th.saveBorder}`;
-            save.style.color      = th.popoverColor;
-            save.onmouseenter = () => { save.style.background = th.saveBgHover; };
-            save.onmouseleave = () => { save.style.background = th.saveBg; };
-        }
+        document.querySelectorAll('#cct-api-save,#cct-chain-save').forEach((btn) => {
+            btn.style.background = th.saveBg;
+            btn.style.border = `1px solid ${th.saveBorder}`;
+            btn.style.color = th.popoverColor;
+            btn.onmouseenter = () => { btn.style.background = th.saveBgHover; };
+            btn.onmouseleave = () => { btn.style.background = th.saveBg; };
+        });
 
-        // Icon buttons (gear + theme toggle)
-        document.querySelectorAll('.cct-icon-btn').forEach(btn => {
+        document.querySelectorAll('.cct-icon-btn').forEach((btn) => {
             btn.style.opacity = th.gearOpacity;
             btn.onmouseenter = () => { btn.style.opacity = th.gearHover; };
             btn.onmouseleave = () => { btn.style.opacity = th.gearOpacity; };
         });
 
-        // Theme toggle emoji
         const toggle = document.querySelector('#cct-theme-toggle');
         if (toggle) toggle.textContent = isDark ? '☀️' : '🌙';
 
-        // Re-render arc + label color with new palette
-        render();
-    }
-
-    // =========================================================================
-    // WIDGET CREATION
-    // =========================================================================
-    const RADIUS = 10;
-    const CIRC   = 2 * Math.PI * RADIUS;
-
-    function chainColor(n) {
-        const th = t();
-        if (n < 30) return th.chainLow;
-        if (n < 60) return th.chainMid;
-        return th.chainHigh;
-    }
-
-    function statusText(n) {
-        if (n === 0)  return 'No active chain';
-        if (n < 10)   return 'Building…';
-        if (n < 30)   return 'On a roll';
-        if (n < 60)   return 'Hot streak';
-        return 'Unstoppable';
+        render(false);
     }
 
     function renderWidget() {
         if (document.querySelector('#cct-root')) return;
 
-        const root = document.querySelector('.crimes-app');
+        const root = findCrimesApp();
         if (!root) return;
 
-        const anchor =
-            root.querySelector('[class*="heading"]') ||
-            root.querySelector('[class*="appHeader"]') ||
-            root.querySelector('h4');
-
+        const anchor = findWidgetAnchor(root);
         if (!anchor) return;
 
         const key = getApiKey();
-        const el  = document.createElement('span');
+        const el = document.createElement('span');
         el.id = 'cct-root';
-
         el.innerHTML = `
             <div id="cct-widget">
                 <div id="cct-ring-wrap">
-                    <svg width="28" height="28" viewBox="0 0 28 28">
-                        <circle id="cct-ring-bg"  cx="14" cy="14" r="${RADIUS}"/>
+                    <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+                        <circle id="cct-ring-bg" cx="14" cy="14" r="${RADIUS}"></circle>
                         <circle id="cct-ring-arc" cx="14" cy="14" r="${RADIUS}"
                             stroke-dasharray="${CIRC}"
                             stroke-dashoffset="${CIRC}"
-                            stroke="#00ff66"/>
+                            stroke="#00ff66"></circle>
                     </svg>
                     <div id="cct-ring-label">0</div>
                 </div>
@@ -437,24 +499,27 @@
                     <div id="cct-status">No active chain</div>
                 </div>
             </div>
-            <button id="cct-theme-toggle" class="cct-icon-btn"
-                title="Toggle light / dark mode">${isDark ? '☀️' : '🌙'}</button>
+            <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? '☀️' : '🌙'}</button>
             ${USE_API ? `
-            <button id="cct-gear" class="cct-icon-btn" title="API key settings">⚙</button>
+            <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">⚙️</button>
             <div id="cct-api-popover">
                 <label>Minimum Access API Key</label>
                 <div id="cct-api-row">
                     <input id="cct-api-input" type="password" placeholder="your public key"
-                        value="${key}" spellcheck="false" autocomplete="off"/>
-                    <button id="cct-api-save">Save Key</button>
+                        value="${escapeHTML(key)}" spellcheck="false" autocomplete="off">
+                    <button id="cct-api-save" type="button">Save Key</button>
                 </div>
-                <span id="cct-api-hint">${key ? '✓ Running' : 'Enter a key or leave blank for offline session tracking'}</span>
+                <label>Manual correction</label>
+                <div id="cct-manual-row">
+                    <input id="cct-chain-input" type="number" min="0" step="1" value="${chain}">
+                    <button id="cct-chain-save" type="button">Set Chain</button>
+                </div>
+                <span id="cct-api-hint">${key ? 'API key saved' : 'Offline session tracking'}</span>
             </div>` : ''}
         `;
 
         anchor.appendChild(el);
 
-        // Theme toggle
         el.querySelector('#cct-theme-toggle').addEventListener('click', (e) => {
             e.stopPropagation();
             isDark = !isDark;
@@ -462,142 +527,188 @@
             applyTheme();
         });
 
-        if (USE_API) {
-            const gear    = el.querySelector('#cct-gear');
-            const popover = el.querySelector('#cct-api-popover');
-
-            gear.addEventListener('click', (e) => {
-                e.stopPropagation();
-                popover.classList.toggle('cct-open');
-            });
-
-            document.addEventListener('click', (e) => {
-                if (!el.contains(e.target)) popover.classList.remove('cct-open');
-            });
-
-            el.querySelector('#cct-api-save').addEventListener('click', async () => {
-                const input    = el.querySelector('#cct-api-input');
-                const hint     = el.querySelector('#cct-api-hint');
-                const cleanKey = saveApiKey(input.value);
-
-                if (!cleanKey) {
-                    hint.textContent = 'Using offline session tracker mode';
-                    return;
-                }
-
-                hint.textContent = 'Verifying with Torn...';
-                try {
-                    await verifyPublicAPI(cleanKey);
-                    hint.textContent = '✓ authenticated successfully';
-                } catch (e) {
-                    hint.textContent = 'Using offline session mode (API bypassed)';
-                }
-            });
-        }
-
+        if (USE_API) wireSettings(el);
         applyTheme();
     }
 
-    // =========================================================================
-    // RENDER (arc + label + status)
-    // =========================================================================
-    function render() {
-        const arc    = document.querySelector('#cct-ring-arc');
-        const label  = document.querySelector('#cct-ring-label');
-        const status = document.querySelector('#cct-status');
-        if (!arc || !label || !status) return;
+    function wireSettings(el) {
+        const gear = el.querySelector('#cct-gear');
+        const popover = el.querySelector('#cct-api-popover');
 
-        const pct    = Math.min(chain / CHAIN_CAP_DISPLAY, 1);
-        const offset = CIRC * (1 - pct);
-        const color  = chainColor(chain);
+        gear.addEventListener('click', (e) => {
+            e.stopPropagation();
+            popover.classList.toggle('cct-open');
+        });
 
-        arc.style.strokeDashoffset = offset;
-        arc.style.stroke           = color;
-        label.textContent          = chain;
-        label.style.color          = color;
+        document.addEventListener('click', (e) => {
+            if (!el.contains(e.target)) popover.classList.remove('cct-open');
+        });
 
-        status.textContent = statusText(chain);
-        status.classList.remove('cct-flash');
-        void status.offsetWidth;
-        status.classList.add('cct-flash');
+        el.querySelector('#cct-api-save').addEventListener('click', async () => {
+            const input = el.querySelector('#cct-api-input');
+            const hint = el.querySelector('#cct-api-hint');
+            const cleanKey = saveApiKey(input.value);
+
+            if (!cleanKey) {
+                hint.textContent = 'Offline session tracking';
+                return;
+            }
+
+            hint.textContent = 'Verifying with Torn...';
+            try {
+                await verifyPublicAPI(cleanKey);
+                hint.textContent = 'API key saved';
+            } catch (e) {
+                hint.textContent = 'API check failed; offline tracking continues';
+            }
+        });
+
+        el.querySelector('#cct-chain-save').addEventListener('click', () => {
+            const input = el.querySelector('#cct-chain-input');
+            chain = clampChain(input.value);
+            input.value = chain;
+            saveChain();
+            render(true);
+        });
     }
 
-    // =========================================================================
-    // DOM OBSERVER
-    // =========================================================================
+    function render(animate) {
+        const arc = document.querySelector('#cct-ring-arc');
+        const label = document.querySelector('#cct-ring-label');
+        const status = document.querySelector('#cct-status');
+        const manual = document.querySelector('#cct-chain-input');
+        if (!arc || !label || !status) return;
+
+        const pct = Math.min(chain / CHAIN_CAP_DISPLAY, 1);
+        const offset = CIRC * (1 - pct);
+        const color = chainColor(chain);
+
+        arc.style.strokeDashoffset = offset;
+        arc.style.stroke = color;
+        label.textContent = String(chain);
+        label.style.color = color;
+        status.textContent = statusText(chain);
+        if (manual && document.activeElement !== manual) manual.value = chain;
+
+        if (animate) {
+            status.classList.remove('cct-flash');
+            void status.offsetWidth;
+            status.classList.add('cct-flash');
+        }
+    }
+
+    function isVisibleElement(el) {
+        if (!el || el.closest('#cct-root')) return false;
+        if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+        return Boolean(el.offsetParent || el.getClientRects().length);
+    }
+
+    function inspectPossibleOutcomeNode(node) {
+        const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
+
+        const candidates = [];
+        if (element.matches && element.matches(OUTCOME_CONTAINER_SELECTOR)) candidates.push(element);
+        if (element.closest) {
+            const closest = element.closest(OUTCOME_CONTAINER_SELECTOR);
+            if (closest) candidates.push(closest);
+        }
+        if (element.querySelectorAll) candidates.push(...element.querySelectorAll(OUTCOME_CONTAINER_SELECTOR));
+
+        for (const candidate of new Set(candidates)) {
+            if (!isVisibleElement(candidate)) continue;
+            if (candidate.dataset && candidate.dataset.cctSeen === '1') continue;
+
+            const text = normalizeText(candidate.textContent);
+            const outcome = classifyOutcome(text);
+            if (!outcome) continue;
+
+            if (candidate.dataset) candidate.dataset.cctSeen = '1';
+            applyOutcomeFromText(text);
+            break;
+        }
+    }
+
     function startDOMObserver() {
         if (observer) observer.disconnect();
 
-        const root = document.querySelector('.crimes-app');
+        const root = findCrimesApp();
         if (!root) return;
 
         observer = new MutationObserver((mutations) => {
-            if (!document.querySelector('#cct-root')) {
-                renderWidget();
-            }
+            if (!document.querySelector('#cct-root')) renderWidget();
 
-            for (const m of mutations) {
-                for (const node of m.addedNodes) {
-                    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            const synced = syncFromNativeBadge();
 
-                    const targetNode = node.matches('[class*="result"],[class*="outcome"],[class*="message"],[class*="notification"]')
-                        ? node
-                        : node.querySelector('[class*="result"],[class*="outcome"],[class*="message"],[class*="notification"]');
-
-                    if (targetNode) {
-                        applyOutcome(targetNode.textContent);
-                    }
+            if (!synced) {
+                for (const mutation of mutations) {
+                    for (const node of mutation.addedNodes) inspectPossibleOutcomeNode(node);
+                    if (mutation.type === 'characterData') inspectPossibleOutcomeNode(mutation.target);
                 }
             }
         });
 
-        observer.observe(root, { childList: true, subtree: true });
+        observer.observe(root, { childList: true, characterData: true, subtree: true });
     }
 
     async function verifyPublicAPI(key) {
-        const url  = `https://api.torn.com/user/?selections=crimes&key=${key}`;
-        const res  = await fetch(url);
+        const url = `https://api.torn.com/user/?selections=crimes&key=${encodeURIComponent(key)}`;
+        const res = await fetch(url);
         const data = await res.json();
-        if (data.error) throw new Error(data.error.error);
-        render();
+        if (data.error) throw new Error(data.error.error || 'Torn API error');
+        return data;
     }
 
-    // =========================================================================
-    // SPA ROUTING RE-SYNC
-    // =========================================================================
     function runSyncLoop() {
-        renderWidget();
-        startDOMObserver();
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(() => {
+            renderWidget();
+            startDOMObserver();
+            syncFromNativeBadge();
+            render(false);
+        }, 100);
     }
 
-    // =========================================================================
-    // INIT
-    // =========================================================================
     async function waitForApp(timeout = 15000) {
-        const t0 = Date.now();
-        while (Date.now() - t0 < timeout) {
-            const el = document.querySelector('.crimes-app');
-            if (el) return el;
-            await new Promise(r => setTimeout(r, 250));
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+            const app = findCrimesApp();
+            if (app) return app;
+            await new Promise((resolve) => setTimeout(resolve, 250));
         }
         return null;
     }
 
+    function watchSpaNavigation() {
+        const originalPushState = history.pushState;
+        const originalReplaceState = history.replaceState;
+
+        history.pushState = function (...args) {
+            const result = originalPushState.apply(this, args);
+            runSyncLoop();
+            return result;
+        };
+
+        history.replaceState = function (...args) {
+            const result = originalReplaceState.apply(this, args);
+            runSyncLoop();
+            return result;
+        };
+
+        window.addEventListener('popstate', runSyncLoop);
+        window.addEventListener('hashchange', runSyncLoop);
+    }
+
     async function init() {
         injectCSS();
+        watchSpaNavigation();
 
         const app = await waitForApp();
         if (!app) return;
 
         runSyncLoop();
-
-        window.addEventListener('hashchange', () => {
-            setTimeout(runSyncLoop, 150);
-        });
-
-        console.log('[CCT v4.4.0] Light/dark mode toggle added.');
+        console.log(`[CCT v${VERSION}] Hardened crime chain tracker loaded.`);
     }
 
     init();
-
 })();
