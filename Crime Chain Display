@@ -96,6 +96,10 @@
     const RADIUS = 10;
     const CIRC = 2 * Math.PI * RADIUS;
 
+    const MOON_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.05 8.05 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .35-2.43A1 1 0 0 0 8.1 2.3a10.14 10.14 0 1 0 13.5 13.27 1 1 0 0 0-.04-2.57z"/></svg>';
+    const SUN_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+    const GEAR_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
     function clampChain(value) {
         const n = Number(value);
         if (!Number.isFinite(n)) return 0;
@@ -362,7 +366,11 @@
                 color: inherit;
                 padding: 3px 5px;
                 border-radius: 4px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
             }
+            .cct-icon-btn svg { display: block; }
             #cct-api-popover {
                 display: none;
                 position: absolute;
@@ -465,7 +473,7 @@
         });
 
         const toggle = document.querySelector('#cct-theme-toggle');
-        if (toggle) toggle.textContent = isDark ? '☀️' : '🌙';
+        if (toggle) toggle.innerHTML = isDark ? SUN_ICON : MOON_ICON;
 
         render(false);
     }
@@ -499,9 +507,9 @@
                     <div id="cct-status">No active chain</div>
                 </div>
             </div>
-            <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? '☀️' : '🌙'}</button>
+            <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? SUN_ICON : MOON_ICON}</button>
             ${USE_API ? `
-            <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">⚙️</button>
+            <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">${GEAR_ICON}</button>
             <div id="cct-api-popover">
                 <label>Minimum Access API Key</label>
                 <div id="cct-api-row">
