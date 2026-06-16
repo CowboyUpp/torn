@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.5.3
+// @version      2.6.0
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -86,64 +86,22 @@ function carName(carImg) {
 
 // Car classes — sourced from https://wiki.torn.com/wiki/Cars
 const CAR_CLASSES = {
-    '77': 'D',  // Tabata RM2
-    '78': 'A',  // Edomondo NSX
-    '79': 'C',  // Echo Quadrato
-    '80': 'B',  // Bavaria M5
-    '81': 'C',  // Bavaria Z8
-    '82': 'C',  // Chevalier CZ06
-    '83': 'B',  // Dart Rampager
-    '84': 'C',  // Knight Firebrand
-    '85': 'A',  // Volt GT
-    '86': 'D',  // Invader H3
-    '87': 'B',  // Echo S4
-    '88': 'C',  // Edomondo IR
-    '89': 'D',  // Edomondo ACD
-    '90': 'E',  // Edomondo Localé
-    '91': 'D',  // Verpestung Insecta
-    '92': 'D',  // Chevalier CVR
-    '93': 'B',  // Volt MNG
-    '94': 'E',  // Trident
-    '95': 'C',  // Oceania SS
-    '494': 'E', // Limoen Saxon
-    '495': 'E', // Nano Pioneer
-    '496': 'E', // Vita Bravo
-    '497': 'E', // Zaibatsu Macro
-    '498': 'E', // Çagoutte 10-6
-    '499': 'E', // Papani Colé
-    '500': 'E', // Bedford Racer
-    '501': 'E', // Stålhög 860
-    '502': 'D', // Alpha Milano 156
-    '503': 'D', // Bavaria X5
-    '504': 'D', // Coche Basurero
-    '505': 'D', // Bedford Nova
-    '506': 'D', // Verpestung Sport
-    '507': 'C', // Echo S3
-    '508': 'C', // Volt RS
-    '509': 'C', // Edomondo S2
-    '510': 'C', // Nano Cavalier
-    '511': 'B', // Colina Tanprice
-    '512': 'B', // Cosmos EX
-    '513': 'B', // Yotsuhada EVX
-    '514': 'B', // Sturmfahrt 111
-    '515': 'B', // Tsubasa Impressor
-    '516': 'B', // Wington GGU
-    '517': 'A', // Weston Marlin 177
-    '518': 'A', // Echo R8
-    '519': 'A', // Stormatti Casteon
-    '520': 'A', // Lolo 458
-    '521': 'A', // Lambrini Torobravo
-    '522': 'A', // Veloria LFA
-    '523': 'A', // Mercia SLR
-    '524': 'A', // Zaibatsu GT-R
+    '77': 'D',  '78': 'A',  '79': 'C',  '80': 'B',  '81': 'C',
+    '82': 'C',  '83': 'B',  '84': 'C',  '85': 'A',  '86': 'D',
+    '87': 'B',  '88': 'C',  '89': 'D',  '90': 'E',  '91': 'D',
+    '92': 'D',  '93': 'B',  '94': 'E',  '95': 'C',  '494': 'E',
+    '495': 'E', '496': 'E', '497': 'E', '498': 'E', '499': 'E',
+    '500': 'E', '501': 'E', '502': 'D', '503': 'D', '504': 'D',
+    '505': 'D', '506': 'D', '507': 'C', '508': 'C', '509': 'C',
+    '510': 'C', '511': 'B', '512': 'B', '513': 'B', '514': 'B',
+    '515': 'B', '516': 'B', '517': 'A', '518': 'A', '519': 'A',
+    '520': 'A', '521': 'A', '522': 'A', '523': 'A', '524': 'A',
 };
 
 function carClass(carImg) {
     return CAR_CLASSES[carKey(carImg)] || null;
 }
 
-// Returns an HTML badge string for a given car image URL.
-// Colours: A=gold, B=silver, C=blue, D=green, E=grey
 const CLASS_BADGE_STYLE = {
     'A': 'background:#7a5c00;color:#ffd700;border:1px solid #ffd700;',
     'B': 'background:#2a2a2a;color:#c0c0c0;border:1px solid #c0c0c0;',
@@ -162,7 +120,6 @@ function classBadgeHtml(carImg) {
 // ─── Improved Track Name Normalizer ───────────────────────────────────────────
 function normalizeTrackName(titleText) {
     if (!titleText) return '';
-
     let cleaned = titleText
         .split(/\s*-\s*(Race (started|finished|will Start|in progress)|Waiting|Cancelled|Starts:|lap|Lap|\d+\s+seconds?)/i)[0]
         .replace(/\s*-\s*\d+\s*laps?.*$/i, '')
@@ -170,23 +127,65 @@ function normalizeTrackName(titleText) {
         .replace(/\s*-\s*Race.*$/i, '')
         .replace(/\s*-\s*Waiting.*$/i, '')
         .trim();
-
     return cleaned || titleText.trim();
+}
+
+// ─── Date helpers ──────────────────────────────────────────────────────────────
+// Returns a full ISO timestamp string (used for storage).
+function nowIso() {
+    return new Date().toISOString();
+}
+
+// Returns YYYY-MM-DD portion of an ISO string.
+function isoToDate(iso) {
+    return (iso || '').split('T')[0];
+}
+
+// Returns today's YYYY-MM-DD string.
+function todayDate() {
+    return new Date().toISOString().split('T')[0];
+}
+
+// How many whole days ago was a given ISO timestamp?
+function daysAgo(iso) {
+    if (!iso) return Infinity;
+    const recDate = new Date(isoToDate(iso)); // midnight of that day
+    const today   = new Date(todayDate());
+    return Math.round((today - recDate) / 86400000);
+}
+
+// Age icon prefix: 🟢 today, 🟡 within 7 days, blank otherwise.
+function agePrefixHtml(iso) {
+    const d = daysAgo(iso);
+    if (d === 0) return '<span title="Set today">🟢 </span>';
+    if (d <= 7)  return '<span title="Set this week">🟡 </span>';
+    return '';
+}
+
+// Build a date <td> with full-timestamp tooltip, age icon, and today CSS class.
+// `iso` = the ISO timestamp string for this specific record (speedDate or lapDate).
+function dateCellHtml(iso, cssClass) {
+    const displayDate = isoToDate(iso) || '–';
+    const tooltip     = iso || '';
+    const todayClass  = isoToDate(iso) === todayDate() ? ` ${cssClass}` : '';
+    const prefix      = agePrefixHtml(iso);
+    return `<td class="rslogDateCell${todayClass}" title="${tooltip}">${prefix}${displayDate}</td>`;
 }
 
 // ─── Update functions ──────────────────────────────────────────────────────────
 function updateTopSpeed(trackName, speed, carImg, trackLen) {
-    // Proportional floor: filters early-race near-zero samples without punishing
-    // short technical tracks. Min 10 mph, scales with track length (×10 per mile).
     const minSpeed = Math.max(10, trackLen * 10);
     if (speed < minSpeed) return false;
 
     const log = getSpeedLog();
     const key = trackName + '|' + carKey(carImg);
     if (!log[key] || speed > (log[key].topSpeed || 0)) {
-        if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, bestLapMs: 0, date: new Date().toISOString().split('T')[0] };
-        log[key].topSpeed = speed; // raw float, full precision
-        log[key].date = new Date().toISOString().split('T')[0];
+        if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, bestLapMs: 0 };
+        log[key].topSpeed  = speed;
+        // [SUGGESTION 1] Separate timestamp for speed record
+        log[key].speedDate = nowIso();
+        // Keep legacy `date` in sync for CSV/older consumers
+        log[key].date      = isoToDate(log[key].speedDate);
         saveSpeedLog(log);
         return true;
     }
@@ -197,10 +196,13 @@ function updateBestLap(trackName, carImg, bestLapMs) {
     if (!bestLapMs || bestLapMs <= 0) return false;
     const log = getSpeedLog();
     const key = trackName + '|' + carKey(carImg);
-    if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, bestLapMs: 0, date: new Date().toISOString().split('T')[0] };
+    if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, bestLapMs: 0 };
     if (!log[key].bestLapMs || bestLapMs < log[key].bestLapMs) {
         log[key].bestLapMs = bestLapMs;
-        log[key].date = new Date().toISOString().split('T')[0];
+        // [SUGGESTION 1] Separate timestamp for lap record
+        log[key].lapDate   = nowIso();
+        // Keep legacy `date` pointing to the most-recently-updated record
+        log[key].date      = isoToDate(log[key].lapDate);
         saveSpeedLog(log);
         return true;
     }
@@ -209,13 +211,13 @@ function updateBestLap(trackName, carImg, bestLapMs) {
 
 function formatLapTime(ms) {
     if (!ms || ms <= 0) return '–';
-    const m = Math.floor(ms / 60000);
-    const s = Math.floor((ms % 60000) / 1000);
+    const m  = Math.floor(ms / 60000);
+    const s  = Math.floor((ms % 60000) / 1000);
     const cs = Math.floor((ms % 1000) / 10);
     return m + 'm ' + String(s).padStart(2, '0') + '.' + String(cs).padStart(2, '0') + 's';
 }
 
-// ─── Migration (cleans old messy entries + purges implausible top speeds) ─────
+// ─── Migration ────────────────────────────────────────────────────────────────
 function migrateSpeedLog() {
     let log = getSpeedLog();
     const migrated = {};
@@ -227,19 +229,24 @@ function migrateSpeedLog() {
 
         if (cleanTrack !== track) changed = true;
 
-        // Purge corrupted car entries — imagePath was mistakenly used as car URL,
-        // producing SVG markup strings instead of item image URLs.
         if (data.car && (data.car.includes('<svg') || data.car.includes('<!DOCTYPE svg'))) {
             data.car = '';
             changed = true;
-            console.log('[Racing Logger] Cleared corrupted car image for', cleanTrack);
         }
 
-        // Zero out implausible top speeds (below absolute minimum floor of 10 mph)
         if ((data.topSpeed || 0) > 0 && data.topSpeed < 10) {
             data.topSpeed = 0;
             changed = true;
-            console.log('[Racing Logger] Cleared implausible top speed for', cleanTrack, '(was', data.topSpeed, 'mph)');
+        }
+
+        // [SUGGESTION 1] Back-fill split date fields from legacy `date` if missing
+        if (data.date && !data.speedDate && data.topSpeed > 0) {
+            data.speedDate = data.date + 'T00:00:00.000Z';
+            changed = true;
+        }
+        if (data.date && !data.lapDate && data.bestLapMs > 0) {
+            data.lapDate = data.date + 'T00:00:00.000Z';
+            changed = true;
         }
 
         const newKey = cleanTrack + '|' + carKey(data.car);
@@ -248,10 +255,12 @@ function migrateSpeedLog() {
             migrated[newKey] = { ...data, track: cleanTrack };
         } else {
             if ((data.topSpeed || 0) > (migrated[newKey].topSpeed || 0)) {
-                migrated[newKey].topSpeed = data.topSpeed;
+                migrated[newKey].topSpeed  = data.topSpeed;
+                migrated[newKey].speedDate = data.speedDate;
             }
             if (data.bestLapMs && (!migrated[newKey].bestLapMs || data.bestLapMs < migrated[newKey].bestLapMs)) {
                 migrated[newKey].bestLapMs = data.bestLapMs;
+                migrated[newKey].lapDate   = data.lapDate;
             }
             if (data.date) migrated[newKey].date = data.date;
         }
@@ -300,6 +309,14 @@ GM_addStyle(`
     #rslogLobbyPanel td.rslogCar { width: 42px; padding: 2px 4px; }
     #rslogLobbyPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; }
     #rslogLobbyFooter { margin-top: 7px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+    /* ── [SUGGESTION 2] Today highlight for date cells ── */
+    .rslogPanel td.rslogDateCell { cursor: default; }
+    .rslogPanel td.rslogDateToday { color: #00ff88 !important; font-weight: bold; }
+    .rslogPanel td.rslogDateTodayLap { color: #00ff88 !important; font-weight: bold; }
+    #rslogLobbyPanel td.rslogDateCell { cursor: default; }
+    #rslogLobbyPanel td.rslogDateToday { color: #00ff88 !important; font-weight: bold; }
+    #rslogLobbyPanel td.rslogDateTodayLap { color: #00ff88 !important; font-weight: bold; }
 `);
 
 // ─── UI Helpers ────────────────────────────────────────────────────────────────
@@ -378,7 +395,7 @@ function injectWidget() {
     $('#rslogSpeedClearBtn').on('click', () => {
         if (confirm('Clear ALL top speed records?')) {
             const log = getSpeedLog();
-            Object.keys(log).forEach(k => { delete log[k].topSpeed; if (!log[k].bestLapMs) delete log[k]; });
+            Object.keys(log).forEach(k => { delete log[k].topSpeed; delete log[k].speedDate; if (!log[k].bestLapMs) delete log[k]; });
             saveSpeedLog(log);
             renderSpeedTable();
         }
@@ -387,7 +404,7 @@ function injectWidget() {
     $('#rslogLapClearBtn').on('click', () => {
         if (confirm('Clear ALL best lap records?')) {
             const log = getSpeedLog();
-            Object.keys(log).forEach(k => { delete log[k].bestLapMs; if (!log[k].topSpeed) delete log[k]; });
+            Object.keys(log).forEach(k => { delete log[k].bestLapMs; delete log[k].lapDate; if (!log[k].topSpeed) delete log[k]; });
             saveSpeedLog(log);
             renderLapTable();
         }
@@ -406,15 +423,17 @@ function renderSpeedTable() {
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
         const isCurrent = (trackName === currentTrack);
-        const carHtml = data.car
+        const carHtml   = data.car
             ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
             : '–';
+        // [SUGGESTION 1+2+3+4] Use speedDate for accurate date; tooltip + age icon + today colour
+        const speedIso  = data.speedDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
         tbody.append(`
             <tr class="${isCurrent ? 'rslogCurrentTrack' : ''}">
                 <td>${escapeHtml(trackName)}</td>
                 <td class="rslogCar" style="width:58px;">${carHtml}</td>
                 <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
-                <td>${data.date || '–'}</td>
+                ${dateCellHtml(speedIso, 'rslogDateToday')}
             </tr>
         `);
     }
@@ -431,15 +450,17 @@ function renderLapTable() {
     }
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
-        const carHtml = data.car
+        const carHtml   = data.car
             ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
             : '–';
+        // [SUGGESTION 1+2+3+4] Use lapDate for accurate date; tooltip + age icon + today colour
+        const lapIso    = data.lapDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
         tbody.append(`
             <tr>
                 <td>${escapeHtml(trackName)}</td>
                 <td class="rslogCar" style="width:58px;">${carHtml}</td>
                 <td class="rslogBestLap">${formatLapTime(data.bestLapMs)}</td>
-                <td>${data.date || '–'}</td>
+                ${dateCellHtml(lapIso, 'rslogDateTodayLap')}
             </tr>
         `);
     }
@@ -448,32 +469,34 @@ function renderLapTable() {
 // ─── CSV Exports ───────────────────────────────────────────────────────────────
 function downloadSpeedCsv() {
     const log = getSpeedLog();
-    let csv = 'Track,Car,Class,Top Speed (mph),Date\n';
+    let csv = 'Track,Car,Class,Top Speed (mph),Date,Speed Timestamp\n';
     Object.entries(log).forEach(([, data]) => {
         if (!data.topSpeed) return;
         const trackName = data.track || '';
         const cls = carClass(data.car) || '';
-        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${data.topSpeed},"${data.date || ''}"\n`;
+        const dateDisplay = isoToDate(data.speedDate || data.date || '');
+        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${data.topSpeed},"${dateDisplay}","${data.speedDate || ''}"\n`;
     });
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
     a.href = url; a.download = 'torn_top_speeds.csv'; a.click();
     URL.revokeObjectURL(url);
 }
 
 function downloadLapCsv() {
     const log = getSpeedLog();
-    let csv = 'Track,Car,Class,Best Lap,Best Lap (ms),Date\n';
+    let csv = 'Track,Car,Class,Best Lap,Best Lap (ms),Date,Lap Timestamp\n';
     Object.entries(log).forEach(([, data]) => {
         if (!data.bestLapMs) return;
         const trackName = data.track || '';
         const cls = carClass(data.car) || '';
-        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${data.date || ''}"\n`;
+        const dateDisplay = isoToDate(data.lapDate || data.date || '');
+        csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${dateDisplay}","${data.lapDate || ''}"\n`;
     });
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
     a.href = url; a.download = 'torn_best_laps.csv'; a.click();
     URL.revokeObjectURL(url);
 }
@@ -493,7 +516,7 @@ function launchFirework() {
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
+    const cy = rect.top  + rect.height / 2;
 
     const canvas = document.createElement('canvas');
     canvas.width = window.innerWidth; canvas.height = window.innerHeight;
@@ -533,23 +556,19 @@ function launchFirework() {
 function parseBestLapFromResponse(data) {
     try {
         if (!data || !data.timeData || data.timeData.status < 3) return;
-        const cars      = data.raceData?.cars;
-        const trackData = data.raceData?.trackData;
+        const cars       = data.raceData?.cars;
+        const trackData  = data.raceData?.trackData;
         const playerName = data.user?.playername;
         const totalLaps  = data.laps;
         if (!cars || !trackData || !playerName || !totalLaps) return;
 
-        // FIX [4]: track from payload (confirmed field: raceData.title), car from DOM.
-        // raceData.imagePath/imageID are the track SVG outline — NOT the car image.
         const trackNameRaw = data.raceData?.title
             || (() => {
                 const el = document.querySelector('div.title-black.t-overflow');
                 return el ? el.textContent.trim() : '';
             })();
         const trackName = normalizeTrackName(trackNameRaw) || currentTrack;
-
-        const carImg = parseCarImg() || currentCar;
-
+        const carImg    = parseCarImg() || currentCar;
         if (!trackName || !carImg) return;
 
         const encoded = cars[playerName];
@@ -558,7 +577,6 @@ function parseBestLapFromResponse(data) {
         const trackIntervals = trackData.intervals.length;
         const decoded = atob(encoded);
         const intervals = decoded.split(',').map(Number);
-
         if (intervals.length < trackIntervals) return;
 
         const completedLaps = Math.floor(intervals.length / trackIntervals);
@@ -572,12 +590,9 @@ function parseBestLapFromResponse(data) {
         }
         if (bestLapSec === Infinity) return;
 
-        const bestLapMs = Math.round(bestLapSec * 1000);
-
-        const isNewRecord = updateBestLap(trackName, carImg, bestLapMs);
-        if (isNewRecord) {
-            launchFirework();
-        }
+        const bestLapMs    = Math.round(bestLapSec * 1000);
+        const isNewRecord  = updateBestLap(trackName, carImg, bestLapMs);
+        if (isNewRecord) launchFirework();
         if ($('#rslogLapPanelContent').is(':visible')) renderLapTable();
     } catch (e) {}
 }
@@ -601,12 +616,12 @@ function startSpeedLoop() {
         const trackInfo = $('#racingupdatesnew').find('div.track-info');
         if (trackInfo.length < 1) { maybeClear(); return; }
 
-        const titleEl = document.querySelector('div.title-black.t-overflow');
+        const titleEl  = document.querySelector('div.title-black.t-overflow');
         const titleText = titleEl ? titleEl.textContent.trim() : '';
-        currentTrack = normalizeTrackName(titleText);
+        currentTrack   = normalizeTrackName(titleText);
 
-        const len = parseFloat(trackInfo.attr('data-length'));
-        const compl = getCompletion();
+        const len    = parseFloat(trackInfo.attr('data-length'));
+        const compl  = getCompletion();
         const foundCar = parseCarImg();
         if (foundCar) currentCar = foundCar;
 
@@ -614,16 +629,12 @@ function startSpeedLoop() {
 
         if (last_compl >= 0) {
             const speed = (compl - last_compl) / 100 * len * 3600000 / POLL_MS;
-
-            // FIX [1]: raised floor from >0 to >10 to filter near-zero lap-wrap spikes
             if (speed > 10 && speed < 400) {
                 $('#rslogSpeed').text(speed.toFixed(2) + ' mph');
-
                 if (speed > sessionTopSpeed) {
                     sessionTopSpeed = speed;
                     $('#rslogSessionTopVal').text(speed.toFixed(2));
                 }
-
                 if (updateTopSpeed(currentTrack, speed, currentCar, len)) {
                     $('#rslogNewRecord').stop(true, true).show().delay(2000).fadeOut(500);
                     launchFirework();
@@ -667,7 +678,7 @@ function injectLobbyPanel() {
     $('#racingAdditionalContainer').prepend(html);
 
     $('#rslogLobbyBtn').on('click', function () {
-        const panel = $('#rslogLobbyPanel');
+        const panel  = $('#rslogLobbyPanel');
         const wasOpen = panel.is(':visible');
         panel.toggle();
         $(this).text(wasOpen ? '▼ Speed & Lap Log' : '▲ Speed & Lap Log');
@@ -683,7 +694,8 @@ function injectLobbyPanel() {
         Object.entries(log).forEach(([, data]) => {
             if (!data.topSpeed) return;
             const cls = carClass(data.car) || '';
-            csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${data.topSpeed},"${data.date||''}"\n`;
+            const dateDisplay = isoToDate(data.speedDate || data.date || '');
+            csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${data.topSpeed},"${dateDisplay}"\n`;
         });
         if (copyToClipboard(csv)) {
             $('#rslogLobbySpeedCopy').text('✓ Copied!');
@@ -697,7 +709,8 @@ function injectLobbyPanel() {
         Object.entries(log).forEach(([, data]) => {
             if (!data.bestLapMs) return;
             const cls = carClass(data.car) || '';
-            csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${data.date||''}"\n`;
+            const dateDisplay = isoToDate(data.lapDate || data.date || '');
+            csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${dateDisplay}"\n`;
         });
         if (copyToClipboard(csv)) {
             $('#rslogLobbyLapCopy').text('✓ Copied!');
@@ -725,14 +738,15 @@ function renderLobbySpeedTable() {
     }
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
-        const carHtml = data.car
+        const carHtml   = data.car
             ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
             : '–';
+        const speedIso  = data.speedDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
         tbody.append(`
             <tr><td>${escapeHtml(trackName)}</td>
             <td class="rslogCar" style="width:58px;">${carHtml}</td>
             <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
-            <td>${data.date || '–'}</td></tr>
+            ${dateCellHtml(speedIso, 'rslogDateToday')}</tr>
         `);
     }
 }
@@ -748,14 +762,15 @@ function renderLobbyLapTable() {
     }
     for (const [key, data] of entries) {
         const trackName = data.track || key.split('|')[0];
-        const carHtml = data.car
+        const carHtml   = data.car
             ? `<img src="${data.car}" title="${carName(data.car) || 'Unknown'}">${classBadgeHtml(data.car)}`
             : '–';
+        const lapIso    = data.lapDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
         tbody.append(`
             <tr><td>${escapeHtml(trackName)}</td>
             <td class="rslogCar" style="width:58px;">${carHtml}</td>
             <td class="rslogBestLap">${formatLapTime(data.bestLapMs)}</td>
-            <td>${data.date || '–'}</td></tr>
+            ${dateCellHtml(lapIso, 'rslogDateTodayLap')}</tr>
         `);
     }
 }
@@ -766,11 +781,11 @@ function cleanupRaceState() {
     ['rslogWrapper', 'rslogLobbyBtn', 'rslogLobbyPanel'].forEach(id => {
         document.getElementById(id)?.remove();
     });
-    currentTrack = '';
-    currentCar = '';
-    last_compl = -1.0;
+    currentTrack    = '';
+    currentCar      = '';
+    last_compl      = -1.0;
     sessionTopSpeed = 0;
-    _initialized = false; // allow re-init after navigation
+    _initialized    = false;
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────
@@ -780,7 +795,6 @@ function watchForRaceStart() {
     if (_raceObserver) return;
     _raceObserver = new MutationObserver(() => {
         if (document.getElementById('racingdetails') && !document.getElementById('rslogWrapper')) {
-            // New race view — clean up stale state from any previous race first
             cleanupRaceState();
             injectWidget();
             startSpeedLoop();
@@ -795,7 +809,6 @@ function watchForRaceStart() {
     _raceObserver.observe(document.body, { childList: true, subtree: true });
 }
 
-// SPA navigation cleanup — fires when Torn navigates away from racing page
 let _currentHref = location.href;
 const _navObserver = new MutationObserver(() => {
     if (location.href !== _currentHref) {
