@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.6.0
+// @version      2.6.1
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -154,22 +154,28 @@ function daysAgo(iso) {
     return Math.round((today - recDate) / 86400000);
 }
 
-// Age icon prefix: 🟢 today, 🟡 within 7 days, blank otherwise.
-function agePrefixHtml(iso) {
+// Returns an age CSS class for the date cell dot:
+//   rslogDotToday (green)  — set today
+//   rslogDotWeek  (yellow) — set within 7 days
+//   rslogDotOld   (grey)   — older
+function ageDotClass(iso) {
     const d = daysAgo(iso);
-    if (d === 0) return '<span title="Set today">🟢 </span>';
-    if (d <= 7)  return '<span title="Set this week">🟡 </span>';
-    return '';
+    if (d === 0) return 'rslogDotToday';
+    if (d <= 7)  return 'rslogDotWeek';
+    return 'rslogDotOld';
 }
 
-// Build a date <td> with full-timestamp tooltip, age icon, and today CSS class.
-// `iso` = the ISO timestamp string for this specific record (speedDate or lapDate).
-function dateCellHtml(iso, cssClass) {
+// Build a date <td> with:
+//   • CSS ::before dot (no emoji, no extra text, no layout impact)
+//   • full ISO timestamp as tooltip
+//   • today-highlight class on the text when record is from today
+function dateCellHtml(iso, todayCssClass) {
     const displayDate = isoToDate(iso) || '–';
-    const tooltip     = iso || '';
-    const todayClass  = isoToDate(iso) === todayDate() ? ` ${cssClass}` : '';
-    const prefix      = agePrefixHtml(iso);
-    return `<td class="rslogDateCell${todayClass}" title="${tooltip}">${prefix}${displayDate}</td>`;
+    const tooltip     = iso ? iso.replace('T', ' ').replace('Z', ' UTC') : '';
+    const isToday     = isoToDate(iso) === todayDate();
+    const textClass   = isToday ? ` ${todayCssClass}` : '';
+    const dotClass    = ageDotClass(iso);
+    return `<td class="rslogDateCell ${dotClass}${textClass}" title="${tooltip}">${displayDate}</td>`;
 }
 
 // ─── Update functions ──────────────────────────────────────────────────────────
@@ -310,13 +316,16 @@ GM_addStyle(`
     #rslogLobbyPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; }
     #rslogLobbyFooter { margin-top: 7px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
-    /* ── [SUGGESTION 2] Today highlight for date cells ── */
-    .rslogPanel td.rslogDateCell { cursor: default; }
-    .rslogPanel td.rslogDateToday { color: #00ff88 !important; font-weight: bold; }
-    .rslogPanel td.rslogDateTodayLap { color: #00ff88 !important; font-weight: bold; }
-    #rslogLobbyPanel td.rslogDateCell { cursor: default; }
-    #rslogLobbyPanel td.rslogDateToday { color: #00ff88 !important; font-weight: bold; }
-    #rslogLobbyPanel td.rslogDateTodayLap { color: #00ff88 !important; font-weight: bold; }
+    /* ── Date cell: CSS dot via ::before, no emoji, no layout impact ── */
+    .rslogDateCell { position: relative; padding-left: 18px !important; cursor: default; white-space: nowrap; }
+    .rslogDateCell::before { content: ''; position: absolute; left: 5px; top: 50%; transform: translateY(-50%); width: 7px; height: 7px; border-radius: 50%; }
+    /* Dot colours by age */
+    .rslogDotToday::before { background: #00ff88; box-shadow: 0 0 4px #00ff88; }
+    .rslogDotWeek::before  { background: #ffd700; }
+    .rslogDotOld::before   { background: #444; }
+    /* Text colour when record is from today */
+    .rslogDateToday    { color: #00ff88 !important; font-weight: bold; }
+    .rslogDateTodayLap { color: #00ff88 !important; font-weight: bold; }
 `);
 
 // ─── UI Helpers ────────────────────────────────────────────────────────────────
