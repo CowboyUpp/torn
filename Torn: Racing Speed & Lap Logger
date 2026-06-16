@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.6.1
+// @version      2.6.2
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -665,12 +665,12 @@ function injectLobbyPanel() {
             <div style="display:flex; gap:12px; flex-wrap:wrap;">
                 <div style="flex:1; min-width:220px;">
                     <h4 style="margin:4px 0; color:#ff9900;">Top Speeds</h4>
-                    <table><colgroup><col style="width:28%"><col style="width:22%"><col style="width:26%"><col style="width:24%"></colgroup>
+                    <table><colgroup><col style="width:28%"><col style="width:20%"><col style="width:22%"><col style="width:30%"></colgroup>
                     <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogLobbySpeedBody"></tbody></table>
                 </div>
                 <div style="flex:1; min-width:220px;">
                     <h4 style="margin:4px 0; color:#00cfff;">Best Laps</h4>
-                    <table><colgroup><col style="width:28%"><col style="width:22%"><col style="width:26%"><col style="width:24%"></colgroup>
+                    <table><colgroup><col style="width:28%"><col style="width:20%"><col style="width:22%"><col style="width:30%"></colgroup>
                     <thead><tr><th>Track</th><th>Car</th><th>Best Lap</th><th>Date</th></tr></thead><tbody id="rslogLobbyLapBody"></tbody></table>
                 </div>
             </div>
