@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Safe Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.0.0
+// @version      1.1.0
 // @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -13,12 +13,14 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.torn.com
+// @downloadURL  https://update.greasyfork.org/scripts/583629/Torn%20City%20Safe%20Finder.user.js
+// @updateURL    https://update.greasyfork.org/scripts/583629/Torn%20City%20Safe%20Finder.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -395,38 +397,82 @@
         const css = `
             #tcfs-fab {
                 position: fixed;
-                width: 52px;
-                height: 52px;
-                border: 1px solid rgba(255,255,255,.22);
-                border-radius: 50%;
-                background: radial-gradient(circle at 34% 28%, #ffe5a3 0%, #d09b39 32%, #2f2118 100%);
-                color: #fff8db;
-                box-shadow: 0 8px 24px rgba(0,0,0,.44);
-                cursor: pointer;
                 z-index: 2147483000;
                 display: flex;
                 align-items: center;
-                justify-content: center;
+                gap: 10px;
+                padding: 10px 16px;
+                
+                /* Gritty Steel Texturing & Industrial Bevel System */
+                background: linear-gradient(135deg, #444444 0%, #2b2b2b 50%, #1f1f1f 100%);
+                border: 2px solid #555555;
+                border-top-color: #777777;
+                border-left-color: #666666;
+                border-bottom-color: #333333;
+                border-right-color: #444444;
+                border-radius: 6px;
+                
+                /* Heavy Dimensional Drop Shadows */
+                box-shadow: 
+                    inset 0 1px 0px rgba(255,255,255,0.15),
+                    inset 0 -1px 3px rgba(0,0,0,0.6),
+                    0 4px 12px rgba(0, 0, 0, 0.65),
+                    0 0 1px rgba(0,0,0,0.9);
+                
+                cursor: pointer;
                 user-select: none;
                 touch-action: none;
-                font: 800 14px/1 Arial, sans-serif;
+                font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            }
+            #tcfs-fab .cfc-icon {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                opacity: 0.8;
+                transition: transform 0.2s ease, opacity 0.2s ease;
+            }
+            #tcfs-fab .cfc-label {
+                color: #d1c7bd;
+                font-size: 13px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.9);
             }
             #tcfs-fab .tcfs-badge {
-                position: absolute;
-                top: -4px;
-                right: -4px;
-                min-width: 18px;
-                height: 18px;
-                padding: 0 4px;
-                border-radius: 9px;
-                background: #d9534f;
-                color: #fff;
+                background-color: #1a1a1a;
+                color: #85B200; /* Torn Safe Green Accent */
                 font-size: 11px;
-                line-height: 18px;
-                text-align: center;
-                box-shadow: 0 2px 7px rgba(0,0,0,.38);
+                font-weight: bold;
+                padding: 2px 6px;
+                border-radius: 3px;
+                border: 1px solid #333333;
+                box-shadow: inset 0 1px 3px rgba(0,0,0,0.8);
                 display: none;
-                box-sizing: border-box;
+            }
+            #tcfs-fab:hover {
+                background: linear-gradient(135deg, #555555 0%, #363636 50%, #262626 100%);
+                border-color: #777777;
+                border-top-color: #999999;
+                border-left-color: #888888;
+                box-shadow: 
+                    inset 0 1px 0px rgba(255,255,255,0.25),
+                    inset 0 -1px 3px rgba(0,0,0,0.5),
+                    0 6px 14px rgba(0, 0, 0, 0.75),
+                    0 0 4px rgba(255, 184, 71, 0.15);
+            }
+            #tcfs-fab:hover .cfc-label {
+                color: #fff3e3;
+            }
+            #tcfs-fab:hover .cfc-icon {
+                opacity: 1;
+                transform: scale(1.05);
+            }
+            #tcfs-fab:active {
+                background: linear-gradient(135deg, #222222 0%, #1f1f1f 100%);
+                box-shadow: 
+                    inset 0 2px 4px rgba(0,0,0,0.8),
+                    0 2px 5px rgba(0, 0, 0, 0.5);
             }
             #tcfs-panel {
                 position: fixed;
@@ -817,7 +863,18 @@
         fab.id = 'tcfs-fab';
         fab.type = 'button';
         fab.title = 'City items';
-        fab.innerHTML = '<span>CF</span><span class="tcfs-badge"></span>';
+        
+        // Formatted Option 1 inner element setup (incorporating standard map loot abstract inline vectors)
+        fab.innerHTML = `
+            <div class="cfc-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d1c7bd" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M2 22 18 6M16 4l4 4M19 3l1.5 1.5M14 2l8 8" />
+                    <path d="M12 11a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" fill="rgba(0,0,0,0.3)" />
+                </svg>
+            </div>
+            <div class="cfc-label">City Find Collect</div>
+            <span class="tcfs-badge"></span>
+        `;
         document.body.appendChild(fab);
         badge = fab.querySelector('.tcfs-badge');
 
@@ -856,8 +913,8 @@
 
         makeFabDraggable();
         placeFab(
-            settings.fabX == null ? window.innerWidth - 70 : settings.fabX,
-            settings.fabY == null ? window.innerHeight - 150 : settings.fabY
+            settings.fabX == null ? window.innerWidth - 220 : settings.fabX,
+            settings.fabY == null ? window.innerHeight - 80 : settings.fabY
         );
 
         panel.addEventListener('click', onPanelClick);
@@ -958,599 +1015,667 @@
             <div class="tcfs-setting-row">
                 <label>
                     <input type="checkbox" data-setting="showImages" ${settings.showImages ? 'checked' : ''}>
-                    Show item images
+                    Show item images in list
                 </label>
-                <button class="tcfs-smallbtn" type="button" data-action="clear-history">Clear old</button>
             </div>
-            <div class="tcfs-setting-note">Image mode may load Torn item assets. Leave it off for the strictest no-extra-asset setup.</div>
             <div class="tcfs-setting-row">
                 <label>
                     <input type="checkbox" data-setting="apiEnabled" ${settings.apiEnabled ? 'checked' : ''}>
-                    Use Public API values/categories
+                    Fetch market values via Torn Public API
                 </label>
-                <button class="tcfs-smallbtn" type="button" data-action="open-api">Open key page</button>
+            </div>
+            <div id="tcfs-api-block" style="display: ${settings.apiEnabled ? 'block' : 'none'}; padding-left: 22px; margin-bottom: 6px;">
+                <div class="tcfs-setting-row">
+                    <input type="password" data-setting="apiKey" placeholder="Public API Key (16 chars)" value="${escapeAttr(settings.apiKey)}" maxlength="16" autocomplete="off">
+                    <button class="tcfs-smallbtn" type="button" data-action="save-api">Save Key</button>
+                    <button class="tcfs-smallbtn" type="button" data-action="open-api" title="Get Key from Torn Preferences">Get Key</button>
+                </div>
+                <div class="tcfs-setting-note">
+                    Status: <strong>${escapeHtml(metaStatus)}</strong>${busyMeta ? ' (Syncing...)' : ''}. Cached values refresh auto every 12 hours.
+                    <br><button class="tcfs-smallbtn" type="button" data-action="refresh-meta" style="margin-top:5px;" ${busyMeta ? 'disabled' : ''}>Force Update Now</button>
+                </div>
             </div>
             <div class="tcfs-setting-row">
-                <input type="password" data-setting="apiKey" placeholder="Public API key" value="${escapeAttr(settings.apiKey)}" autocomplete="off" spellcheck="false">
-                <button class="tcfs-smallbtn" type="button" data-action="save-api">Save</button>
-                <button class="tcfs-smallbtn" type="button" data-action="refresh-meta">Refresh</button>
+                <label style="flex: initial;">Max history logs:</label>
+                <select data-setting="historyLimit" style="width: 80px; height:26px; padding:0 3px;">
+                    <option value="100" ${Number(settings.historyLimit) === 100 ? 'selected' : ''}>100</option>
+                    <option value="250" ${Number(settings.historyLimit) === 250 ? 'selected' : ''}>250</option>
+                    <option value="500" ${Number(settings.historyLimit) === 500 ? 'selected' : ''}>500</option>
+                    <option value="1000" ${Number(settings.historyLimit) === 1000 ? 'selected' : ''}>1000</option>
+                </select>
             </div>
-            <div class="tcfs-setting-note">Use a Public key from Torn's API preferences. Stored locally only. Metadata: ${escapeHtml(metaStatus)}.</div>
         `;
 
-        settingsEl.querySelectorAll('[data-setting="showImages"], [data-setting="apiEnabled"]').forEach((input) => {
-            input.addEventListener('change', () => {
-                const settingName = input.dataset.setting;
-                settings[input.dataset.setting] = input.checked;
+        settingsEl.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+            box.addEventListener('change', (event) => {
+                const name = event.target.dataset.setting;
+                settings[name] = event.target.checked;
                 saveSettings();
-                renderSettings();
-                if (settingName === 'showImages') clearMarkers();
-                syncMarkers(visibleActiveItems());
+
+                if (name === 'apiEnabled') {
+                    document.getElementById('tcfs-api-block').style.display = settings.apiEnabled ? 'block' : 'none';
+                    if (settings.apiEnabled && !itemMetaFetchedAt) fetchItemMetadata(false);
+                }
                 render();
-                if (settingName === 'apiEnabled' && input.checked) fetchItemMetadata(false);
             });
+        });
+
+        settingsEl.querySelector('select[data-setting="historyLimit"]').addEventListener('change', (event) => {
+            settings.historyLimit = Math.max(50, parseInt(event.target.value, 10) || 500);
+            saveSettings();
+            trimHistory();
+            saveHistory();
+            render();
         });
     }
 
     function saveApiSettings() {
-        const keyInput = settingsEl.querySelector('[data-setting="apiKey"]');
-        settings.apiKey = cleanText(keyInput ? keyInput.value : '').replace(/\s+/g, '');
-        settings.apiEnabled = Boolean(settings.apiKey) && settings.apiEnabled;
-        saveSettings();
-        renderSettings();
+        const input = settingsEl.querySelector('input[data-setting="apiKey"]');
+        if (!input) return;
 
-        if (!settings.apiKey) {
-            metaStatus = 'Off';
-            toast('API key cleared');
-            render();
+        const key = cleanText(input.value);
+        if (key && key.length !== 16) {
+            showToast('API Key must be exactly 16 characters long.');
             return;
         }
 
-        if (!settings.apiEnabled) {
-            settings.apiEnabled = true;
-            saveSettings();
-            renderSettings();
+        settings.apiKey = key;
+        saveSettings();
+        showToast('API key locally saved.');
+        fetchItemMetadata(true);
+    }
+
+    function togglePanel(forceOpen) {
+        const next = forceOpen === undefined ? !panel.classList.contains('tcfs-open') : Boolean(forceOpen);
+        if (next) {
+            panel.classList.add('tcfs-open');
+            anchorPanel();
+        } else {
+            panel.classList.remove('tcfs-open');
+        }
+        settings.panelOpen = next;
+        saveSettings();
+    }
+
+    function placeFab(left, top) {
+        if (!fab) return;
+        const pad = 10;
+        const w = fab.offsetWidth || 150;
+        const h = fab.offsetHeight || 38;
+
+        const x = Math.max(pad, Math.min(window.innerWidth - w - pad, left));
+        const y = Math.max(pad, Math.min(window.innerHeight - h - pad, top));
+
+        fab.style.left = x + 'px';
+        fab.style.top = y + 'px';
+
+        settings.fabX = x;
+        settings.fabY = y;
+        saveSettings();
+    }
+
+    function anchorPanel() {
+        if (!fab || !panel) return;
+        const fRect = fab.getBoundingClientRect();
+        const pW = panel.offsetWidth || 380;
+        const pH = panel.offsetHeight || 500;
+        const pad = 12;
+
+        let left = fRect.left + (fRect.width / 2) - (pW / 2);
+        if (left + pW > window.innerWidth - pad) left = window.innerWidth - pW - pad;
+        if (left < pad) left = pad;
+
+        let top = fRect.top - pH - pad;
+        if (top < pad) {
+            top = fRect.bottom + pad;
+            if (top + pH > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - pH - pad);
         }
 
-        fetchItemMetadata(true);
+        panel.style.left = left + 'px';
+        panel.style.top = top + 'px';
     }
 
     function makeFabDraggable() {
         let dragging = false;
-        let moved = false;
-        let offsetX = 0;
-        let offsetY = 0;
         let startX = 0;
         let startY = 0;
+        let moveX = 0;
+        let moveY = 0;
 
-        fab.addEventListener('pointerdown', (event) => {
-            dragging = true;
-            moved = false;
-            startX = event.clientX;
-            startY = event.clientY;
-            const rect = fab.getBoundingClientRect();
-            offsetX = event.clientX - rect.left;
-            offsetY = event.clientY - rect.top;
-            fab.setPointerCapture(event.pointerId);
-            event.preventDefault();
-        });
+        fab.addEventListener('mousedown', onStart);
+        fab.addEventListener('touchstart', onStart, { passive: false });
 
-        fab.addEventListener('pointermove', (event) => {
-            if (!dragging) return;
-            if (Math.abs(event.clientX - startX) > 5 || Math.abs(event.clientY - startY) > 5) moved = true;
-            placeFab(event.clientX - offsetX, event.clientY - offsetY);
-        });
+        function onStart(event) {
+            if (event.button && event.button !== 0) return;
+            const clientX = event.touches ? event.touches[0].clientX : event.clientX;
+            const clientY = event.touches ? event.touches[0].clientY : event.clientY;
 
-        fab.addEventListener('pointerup', (event) => {
-            if (!dragging) return;
             dragging = false;
-            try {
-                fab.releasePointerCapture(event.pointerId);
-            } catch (_) {}
+            const rect = fab.getBoundingClientRect();
+            startX = clientX - rect.left;
+            startY = clientY - rect.top;
 
-            if (moved) {
-                const rect = fab.getBoundingClientRect();
-                settings.fabX = rect.left;
-                settings.fabY = rect.top;
-                saveSettings();
-                if (panel.classList.contains('tcfs-open')) anchorPanel();
-            } else {
-                togglePanel();
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onEnd);
+            window.addEventListener('touchmove', onMove, { passive: false });
+            window.addEventListener('touchend', onEnd);
+        }
+
+        function onMove(event) {
+            const clientX = event.touches ? event.touches[0].clientX : event.clientX;
+            const clientY = event.touches ? event.touches[0].clientY : event.clientY;
+
+            if (!dragging) {
+                dragging = true;
+                if (event.cancelable) event.preventDefault();
             }
-        });
-    }
 
-    function placeFab(x, y) {
-        const left = Math.max(6, Math.min(Number(x) || 6, window.innerWidth - 58));
-        const top = Math.max(6, Math.min(Number(y) || 6, window.innerHeight - 58));
-        fab.style.left = left + 'px';
-        fab.style.top = top + 'px';
-    }
+            moveX = clientX - startX;
+            moveY = clientY - startY;
+            placeFab(moveX, moveY);
+        }
 
-    function togglePanel(force) {
-        const open = force === undefined ? !panel.classList.contains('tcfs-open') : Boolean(force);
-        panel.classList.toggle('tcfs-open', open);
-        settings.panelOpen = open;
-        saveSettings();
+        function onEnd() {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onEnd);
+            window.removeEventListener('touchmove', onMove);
+            window.removeEventListener('touchend', onEnd);
 
-        if (open) {
-            anchorPanel();
-            syncNow(true);
+            if (!dragging) {
+                togglePanel();
+            } else if (panel.classList.contains('tcfs-open')) {
+                anchorPanel();
+            }
         }
     }
 
-    function anchorPanel() {
-        const rect = fab.getBoundingClientRect();
-        const width = Math.min(380, window.innerWidth - 20);
-        let left = rect.left + rect.width / 2 - width / 2;
-        left = Math.max(10, Math.min(left, window.innerWidth - width - 10));
-        panel.style.width = width + 'px';
-        panel.style.left = left + 'px';
-
-        if (rect.top > window.innerHeight / 2) {
-            panel.style.bottom = (window.innerHeight - rect.top + 10) + 'px';
-            panel.style.top = 'auto';
-        } else {
-            panel.style.top = (rect.bottom + 10) + 'px';
-            panel.style.bottom = 'auto';
-        }
-    }
-
-    function markerHtml(item) {
-        const label = escapeHtml(item.title);
-        const body = settings.showImages && item.itemId
-            ? `<img src="https://www.torn.com/images/items/${encodeURIComponent(item.itemId)}/small.png" alt="">`
-            : escapeHtml(initials(item.title));
-
-        return `
-            <div class="tcfs-map-pin" title="${escapeAttr(item.title)}">
-                <div class="tcfs-map-label">${label}</div>
-                <div class="tcfs-map-dot">${body}</div>
-                <div class="tcfs-map-tail"></div>
-            </div>
-        `;
-    }
-
-    function initials(title) {
-        const words = cleanText(title).split(/\s+/).filter(Boolean);
-        const letters = words.length > 1 ? words[0][0] + words[1][0] : cleanText(title).slice(0, 2);
-        return (letters || 'IT').toUpperCase();
-    }
-
-    function itemVisual(record) {
-        if (settings.showImages && record.itemId) {
-            return `<img src="https://www.torn.com/images/items/${encodeURIComponent(record.itemId)}/small.png" alt="">`;
-        }
-        return `<div class="tcfs-token">${escapeHtml(initials(record.title))}</div>`;
-    }
-
-    function syncMarkers(items) {
-        if (!tornReady()) return;
-        const L = getLeaflet();
-        const map = getTorn().map.lmap;
-        const visibleKeys = new Set(items.map((item) => item.key));
-
-        items.forEach((item) => {
-            if (markers[item.key]) return;
-            const latLng = getLatLng(item);
-            if (!latLng) return;
-
-            const icon = L.divIcon({
-                className: 'tcfs-map-icon',
-                html: markerHtml(item),
-                iconSize: [72, 64],
-                iconAnchor: [36, 62]
-            });
-
-            const marker = L.marker(latLng, {
-                icon,
-                interactive: true,
-                keyboard: false,
-                zIndexOffset: 900000
-            }).addTo(map);
-
-            marker.on('click', (event) => {
-                try {
-                    if (event && event.originalEvent) {
-                        event.originalEvent.preventDefault();
-                        event.originalEvent.stopPropagation();
-                    }
-                } catch (_) {}
-
-                selectedKey = item.key;
-                settings.tab = 'active';
-                saveSettings();
-                togglePanel(true);
-                render();
-            });
-
-            markers[item.key] = marker;
-        });
-
-        Object.keys(markers).forEach((key) => {
-            if (!visibleKeys.has(key)) removeMarker(key);
-        });
-    }
-
-    function removeMarker(key) {
-        if (!markers[key]) return;
-        try {
-            getTorn().map.lmap.removeLayer(markers[key]);
-        } catch (_) {}
-        delete markers[key];
-    }
-
-    function clearMarkers() {
-        Object.keys(markers).forEach(removeMarker);
-    }
-
-    function setMarkersHidden(hidden) {
-        Object.values(markers).forEach((marker) => {
-            try {
-                const el = marker.getElement && marker.getElement();
-                if (!el) return;
-                if (hidden) {
-                    el.dataset.tcfsOldDisplay = el.style.display || '';
-                    el.style.setProperty('display', 'none', 'important');
-                    el.style.setProperty('pointer-events', 'none', 'important');
-                } else {
-                    el.style.display = el.dataset.tcfsOldDisplay || '';
-                    el.style.removeProperty('pointer-events');
-                    delete el.dataset.tcfsOldDisplay;
-                }
-            } catch (_) {}
-        });
-    }
-
-    function centerItemByKey(key, zoomIn) {
-        const item = activeItems.find((entry) => entry.key === key) || historyMap[key];
-        if (!item || !tornReady()) {
-            toast('Item is not available on the map right now');
-            return;
+    function showToast(message) {
+        if (!message) return;
+        let toast = document.getElementById('tcfs-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'tcfs-toast';
+            document.body.appendChild(toast);
         }
 
-        const latLng = getLatLng(item);
+        clearTimeout(toastTimer);
+        toast.innerHTML = cleanText(message);
+        toast.classList.add('tcfs-show');
+
+        toastTimer = setTimeout(() => {
+            toast.classList.remove('tcfs-show');
+        }, 3400);
+    }
+
+    function centerItemByKey(key, forceZoom) {
+        if (!key || !tornReady()) return;
+        const record = historyMap[key];
+        if (!record) return;
+
+        const latLng = getLatLng(record);
         if (!latLng) {
-            toast('Could not locate this item on the map');
+            showToast('Unable to parse coordinates for this item position.');
             return;
         }
 
         try {
-            const map = getTorn().map.lmap;
-            const zoom = zoomIn ? Math.max(map.getZoom(), PICKUP_ZOOM) : map.getZoom();
-            map.setView(latLng, zoom, { animate: true });
-        } catch (_) {
-            toast('Map move failed');
-        }
+            const lmap = getTorn().map.lmap;
+            if (forceZoom) {
+                lmap.setView(latLng, PICKUP_ZOOM, { animate: true });
+            } else {
+                lmap.panTo(latLng, { animate: true });
+            }
+        } catch (_) {}
     }
 
     function revealForManualPickup(key) {
-        if (!key) return;
-        centerItemByKey(key, true);
-        setMarkersHidden(true);
+        if (!key || !tornReady()) return;
+        const record = historyMap[key];
+        if (!record) return;
+
+        const pin = markers[key];
+        if (!pin) {
+            showToast('Map pin context missing. Try centering on it first.');
+            return;
+        }
+
         clearTimeout(revealTimer);
-        revealTimer = setTimeout(() => setMarkersHidden(false), REVEAL_MS);
-        toast('Marker hidden. Click the original Torn item on the map.');
+        selectedKey = key;
+        centerItemByKey(key, true);
+
+        try {
+            const el = pin.getElement();
+            if (el) {
+                const dot = el.querySelector('.tcfs-map-dot');
+                if (dot) {
+                    dot.style.pointerEvents = 'none';
+                    dot.style.opacity = '0.05';
+                }
+                const label = el.querySelector('.tcfs-map-label');
+                if (label) label.style.opacity = '0.05';
+                const tail = el.querySelector('.tcfs-map-tail');
+                if (tail) tail.style.opacity = '0.05';
+            }
+        } catch (_) {}
+
+        showToast('Overlay hidden for 10s. Click the asset directly to pick up.');
+
+        revealTimer = setTimeout(() => {
+            renderMapPins();
+        }, REVEAL_MS);
     }
 
     function markPicked(key) {
-        if (!key || !historyMap[key]) return;
-        historyMap[key].status = 'picked';
-        historyMap[key].pickedAt = Date.now();
-        historyMap[key].goneAt = historyMap[key].goneAt || Date.now();
+        if (!key) return;
+        const record = historyMap[key];
+        if (!record) return;
+
+        record.status = 'picked';
+        record.pickedAt = Date.now();
         saveHistory();
-        removeMarker(key);
+
         if (selectedKey === key) selectedKey = null;
-        render();
-        updateBadge();
-        toast('Marked as picked');
+        showToast(`Logged "${escapeHtml(record.title)}" as manually collected.`);
+        syncNow(false);
     }
 
     function restoreRecord(key) {
-        if (!key || !historyMap[key]) return;
-        historyMap[key].status = 'gone';
-        historyMap[key].pickedAt = null;
+        if (!key) return;
+        const record = historyMap[key];
+        if (!record) return;
+
+        record.status = 'active';
+        record.pickedAt = null;
+        record.goneAt = null;
         saveHistory();
-        render();
-        syncMarkers(visibleActiveItems());
+
+        showToast(`Restored "${escapeHtml(record.title)}" to active trackers.`);
+        syncNow(false);
     }
 
     function clearGoneHistory() {
+        let count = 0;
         Object.keys(historyMap).forEach((key) => {
-            if (historyMap[key].status !== 'active') delete historyMap[key];
+            const status = historyMap[key].status;
+            if (status === 'gone' || status === 'picked') {
+                delete historyMap[key];
+                count++;
+            }
         });
-        saveHistory();
-        selectedKey = selectedKey && historyMap[selectedKey] ? selectedKey : null;
-        render();
-        toast('Old history cleared');
+
+        if (count > 0) {
+            saveHistory();
+            if (selectedKey && !historyMap[selectedKey]) selectedKey = null;
+            showToast(`Cleared ${count} past historical logs.`);
+            render();
+        } else {
+            showToast('No inactive logs found to purge.');
+        }
     }
 
-    function sortedRecords(records) {
-        const query = cleanText(settings.search).toLowerCase();
-        const filtered = query
-            ? records.filter((record) => {
-                const haystack = [record.title, getRecordCategory(record), record.itemId].join(' ').toLowerCase();
-                return haystack.includes(query);
-            })
-            : records.slice();
+    function getImageUrl(itemId) {
+        if (!itemId) return '';
+        return `https://www.torn.com/images/items/${itemId}/medium.png`;
+    }
 
-        filtered.sort((a, b) => {
-            if (settings.sort === 'value') {
-                const av = getRecordValue(a);
-                const bv = getRecordValue(b);
-                if (av == null && bv == null) return Number(b.foundAt || 0) - Number(a.foundAt || 0);
-                if (av == null) return 1;
-                if (bv == null) return -1;
-                return bv - av;
+    function buildRowToken(itemId, title) {
+        if (settings.showImages && itemId) {
+            return `<img src="${getImageUrl(itemId)}" alt="Item" loading="lazy">`;
+        }
+        const token = cleanText(title).slice(0, 2);
+        return `<div class="tcfs-token">${escapeHtml(token)}</div>`;
+    }
+
+    function matchFilter(record, searchLow) {
+        if (!searchLow) return true;
+        if (String(record.itemId).includes(searchLow)) return true;
+        if (record.title.toLowerCase().includes(searchLow)) return true;
+        if (getRecordCategory(record).toLowerCase().includes(searchLow)) return true;
+        return false;
+    }
+
+    function getSortedRecords() {
+        const searchLow = cleanText(settings.search).toLowerCase();
+        const records = Object.values(historyMap).filter((r) => {
+            if (settings.tab === 'active') return r.status === 'active';
+            return r.status === 'gone' || r.status === 'picked';
+        }).filter((r) => matchFilter(r, searchLow));
+
+        const mode = settings.sort;
+        records.sort((a, b) => {
+            if (mode === 'name') return a.title.localeCompare(b.title);
+            if (mode === 'category') return getRecordCategory(a).localeCompare(getRecordCategory(b));
+            if (mode === 'value') {
+                const valA = getRecordValue(a) || 0;
+                const valB = getRecordValue(b) || 0;
+                return valB - valA;
             }
-            if (settings.sort === 'category') {
-                const ac = getRecordCategory(a);
-                const bc = getRecordCategory(b);
-                return ac.localeCompare(bc) || cleanText(a.title).localeCompare(cleanText(b.title));
-            }
-            if (settings.sort === 'name') {
-                return cleanText(a.title).localeCompare(cleanText(b.title));
-            }
-            return Number(b.foundAt || 0) - Number(a.foundAt || 0);
+            const timeA = Number(a.foundAt || 0);
+            const timeB = Number(b.foundAt || 0);
+            return timeB - timeA;
         });
 
-        return filtered;
+        return records;
+    }
+
+    function renderSummary(records) {
+        const summaryEl = panel.querySelector('.tcfs-summary');
+        if (!summaryEl) return;
+
+        let totalVal = 0;
+        let hasVal = false;
+        records.forEach((r) => {
+            const v = getRecordValue(r);
+            if (v !== null) {
+                totalVal += v;
+                hasVal = true;
+            }
+        });
+
+        const countStr = `${records.length} ${settings.tab === 'active' ? 'active lookups' : 'logged tracks'}`;
+        const valStr = hasVal ? ` &middot; Total Value: <span class="tcfs-pill">${formatMoney(totalVal)}</span>` : '';
+        const clearBtn = settings.tab === 'history' && records.length > 0 ? `<button class="tcfs-smallbtn" type="button" data-action="clear-history" style="margin-left:auto; height:24px; padding:0 6px;">Clear Archive</button>` : '';
+
+        summaryEl.innerHTML = `<div>${countStr}${valStr}</div>${clearBtn}`;
+    }
+
+    function renderDetailBlock() {
+        if (!detailEl) return;
+        if (!selectedKey || !historyMap[selectedKey]) {
+            detailEl.innerHTML = '';
+            detailEl.classList.remove('tcfs-open');
+            return;
+        }
+
+        const record = historyMap[selectedKey];
+        const val = getRecordValue(record);
+        const cat = getRecordCategory(record);
+
+        let statusLine = `Seen: ${formatShortTime(record.lastSeenAt)}`;
+        if (record.status === 'picked') statusLine = `Collected: ${formatTime(record.pickedAt)}`;
+        if (record.status === 'gone') statusLine = `Vanished: ${formatTime(record.goneAt)}`;
+
+        const actionBtn = record.status === 'active' 
+            ? `<button type="button" data-action="reveal" title="Hide wrapper box temporarily to allow click-through pickup">Reveal Asset</button>
+               <button type="button" data-action="picked" title="Log this item as picked manual">Mark Collected</button>`
+            : `<button type="button" data-action="restore" title="Restore back into active tracking metrics">Restore Item</button><div></div>`;
+
+        detailEl.innerHTML = `
+            ${buildRowToken(record.itemId, record.title)}
+            <div>
+                <div class="tcfs-detail-name" title="${escapeAttr(record.title)}">${escapeHtml(record.title)}</div>
+                <div class="tcfs-detail-meta">
+                    Loc: [${record.x}, ${record.y}] &middot; ${escapeHtml(cat)}
+                    <br>${val !== null ? `<span class="tcfs-pill tcfs-teal">${formatMoney(val)}</span>` : '<span class="tcfs-pill">Value unknown</span>'} &middot; ${statusLine}
+                </div>
+            </div>
+            <div class="tcfs-detail-actions">
+                <button type="button" data-action="center" title="Snap city map directly onto these coordinates">Center Camera</button>
+                ${actionBtn}
+            </div>
+        `;
+        detailEl.classList.add('tcfs-open');
     }
 
     function render() {
-        if (!panel || !listEl) return;
+        if (!panel || !panel.classList.contains('tcfs-open')) return;
 
-        const active = visibleActiveItems().map(enrichItem);
-        const records = settings.tab === 'active'
-            ? active.map((item) => historyMap[item.key] || makeRecord(item, Date.now()))
-            : Object.values(historyMap);
-
-        panel.querySelectorAll('[data-tab]').forEach((button) => {
-            button.classList.toggle('tcfs-active', button.dataset.tab === settings.tab);
+        panel.querySelectorAll('[data-tab]').forEach((btn) => {
+            btn.classList.toggle('tcfs-active', btn.dataset.tab === settings.tab);
         });
 
         const searchInput = panel.querySelector('[data-role="search"]');
-        if (searchInput && document.activeElement !== searchInput) searchInput.value = settings.search || '';
+        if (searchInput && searchInput.value !== settings.search) searchInput.value = settings.search;
         const sortSelect = panel.querySelector('[data-role="sort"]');
-        if (sortSelect) sortSelect.value = settings.sort || 'date';
+        if (sortSelect && sortSelect.value !== settings.sort) sortSelect.value = settings.sort;
 
-        renderSummary(active);
-        renderSelected();
+        const records = getSortedRecords();
+        renderSummary(records);
+        renderDetailBlock();
 
-        const sorted = sortedRecords(records);
-        if (!sorted.length) {
-            listEl.innerHTML = `<div class="tcfs-empty">${settings.tab === 'active' ? 'No city items visible right now.' : 'No item history yet.'}</div>`;
+        if (records.length === 0) {
+            listEl.innerHTML = `<div class="tcfs-empty">${settings.search ? 'No search results found matching filters.' : 'No tracked item context matching this category.'}</div>`;
             return;
         }
 
-        listEl.innerHTML = sorted.map((record) => rowHtml(record)).join('');
-    }
+        listEl.innerHTML = records.map((r) => {
+            const isSel = r.key === selectedKey;
+            const val = getRecordValue(r);
+            const cat = getRecordCategory(r);
 
-    function renderSummary(active) {
-        const summary = panel.querySelector('.tcfs-summary');
-        const activeCount = active.length;
-        const historyCount = Object.keys(historyMap).length;
-        const valued = active.map(getRecordValue).filter((value) => typeof value === 'number');
-        const total = valued.length ? valued.reduce((sum, value) => sum + value, 0) : null;
+            let subText = `[${r.x}, ${r.y}] &middot; ${escapeHtml(cat)}`;
+            if (val !== null) subText += ` &middot; <span style="color:#ffe1a0; font-weight:700;">${formatMoney(val)}</span>`;
 
-        summary.innerHTML = `
-            <span class="tcfs-pill">${activeCount} active</span>
-            <span class="tcfs-pill tcfs-teal">${historyCount} logged</span>
-            <span>${formatMoney(total)}</span>
-            <span style="margin-left:auto">${escapeHtml(metaStatus)}</span>
-        `;
-    }
-
-    function renderSelected() {
-        const record = selectedKey ? historyMap[selectedKey] : null;
-        if (!record) {
-            detailEl.classList.remove('tcfs-open');
-            detailEl.innerHTML = '';
-            return;
-        }
-
-        detailEl.classList.add('tcfs-open');
-        detailEl.dataset.key = record.key;
-        detailEl.innerHTML = `
-            ${itemVisual(record)}
-            <div>
-                <div class="tcfs-detail-name">${escapeHtml(record.title)}</div>
-                <div class="tcfs-detail-meta">${escapeHtml(getRecordCategory(record))} | ${formatMoney(getRecordValue(record))} | ${escapeHtml(record.status || 'seen')}</div>
-            </div>
-            <div class="tcfs-detail-actions" data-key="${escapeAttr(record.key)}">
-                <button type="button" data-action="center">Center</button>
-                <button type="button" data-action="reveal">Reveal</button>
-                <button type="button" data-action="${record.status === 'picked' ? 'restore' : 'picked'}">${record.status === 'picked' ? 'Restore' : 'Picked'}</button>
-            </div>
-        `;
-    }
-
-    function rowHtml(record) {
-        const active = record.status === 'active';
-        const selected = record.key === selectedKey;
-        const value = getRecordValue(record);
-        const category = getRecordCategory(record);
-        const time = settings.sort === 'date' ? formatShortTime(record.foundAt) : formatTime(record.foundAt);
-
-        return `
-            <div class="tcfs-row ${selected ? 'tcfs-selected' : ''}" data-key="${escapeAttr(record.key)}">
-                ${itemVisual(record)}
-                <div class="tcfs-row-main">
-                    <div class="tcfs-row-name">${escapeHtml(record.title)}</div>
-                    <div class="tcfs-row-meta">
-                        <span>${escapeHtml(category)}</span>
-                        <span>${formatMoney(value)}</span>
-                        <span>${escapeHtml(record.status || 'seen')}</span>
-                        <span>${escapeHtml(time)}</span>
+            return `
+                <div class="tcfs-row ${isSel ? 'tcfs-selected' : ''}" data-key="${escapeAttr(r.key)}" data-action="select" style="cursor:pointer;">
+                    ${buildRowToken(r.itemId, r.title)}
+                    <div class="tcfs-row-main">
+                        <div class="tcfs-row-name" title="${escapeAttr(r.title)}">${escapeHtml(r.title)}</div>
+                        <div class="tcfs-row-meta">${subText}</div>
                     </div>
                 </div>
-                <div class="tcfs-actions">
-                    <button type="button" data-action="select">Details</button>
-                    <button type="button" data-action="center" ${active ? '' : 'disabled'}>Center</button>
-                    ${active
-                        ? '<button type="button" data-action="reveal">Reveal</button>'
-                        : `<button type="button" data-action="${record.status === 'picked' ? 'restore' : 'picked'}">${record.status === 'picked' ? 'Restore' : 'Picked'}</button>`}
-                </div>
-            </div>
-        `;
+            `;
+        }).join('');
+
+        const selectedRow = listEl.querySelector(`.tcfs-row[data-key="${CSS.escape(selectedKey || '')}"]`);
+        if (selectedRow && !isElementInViewport(selectedRow, listEl)) {
+            selectedRow.scrollIntoView({ block: 'nearest' });
+        }
     }
 
-    function updateBadge() {
+    function isElementInViewport(el, parent) {
+        const e = el.getBoundingClientRect();
+        const p = parent.getBoundingClientRect();
+        return e.top >= p.top && e.bottom <= p.bottom;
+    }
+
+    function updateFabCounter() {
         if (!badge) return;
         const count = visibleActiveItems().length;
-        badge.style.display = count ? 'block' : 'none';
-        badge.textContent = count > 99 ? '99+' : String(count);
-    }
-
-    function toast(message) {
-        let el = document.getElementById('tcfs-toast');
-        if (!el) {
-            el = document.createElement('div');
-            el.id = 'tcfs-toast';
-            document.body.appendChild(el);
+        if (count > 0) {
+            badge.innerText = count;
+            badge.style.display = 'block';
+        } else {
+            badge.style.display = 'none';
         }
-
-        el.textContent = message;
-        el.classList.add('tcfs-show');
-        clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => el.classList.remove('tcfs-show'), 2300);
     }
 
-    function syncNow(userInitiated) {
-        if (!tornReady()) {
-            if (userInitiated) toast('City map is still loading');
-            return;
-        }
+    function clearMarkers() {
+        const L = getLeaflet();
+        const torn = getTorn();
+        if (!L || !torn || !torn.map || !torn.map.lmap) return;
 
-        if (document.visibilityState !== 'visible') return;
-
-        activeItems = getPageItems();
-        updateHistory(activeItems);
-        syncMarkers(visibleActiveItems());
-        updateBadge();
-        render();
+        Object.keys(markers).forEach((key) => {
+            try {
+                markers[key].removeFrom(torn.map.lmap);
+            } catch (_) {}
+        });
+        markers = {};
     }
 
-    function scheduleSync() {
-        clearInterval(syncTimer);
-        syncTimer = setInterval(() => syncNow(false), POLL_MS);
-    }
+    function renderMapPins() {
+        clearMarkers();
+        if (!tornReady()) return;
 
-    function requestText(url) {
-        return new Promise((resolve, reject) => {
-            if (typeof GM_xmlhttpRequest === 'function') {
-                GM_xmlhttpRequest({
-                    method: 'GET',
-                    url,
-                    timeout: 20000,
-                    onload: (response) => resolve(response.responseText || ''),
-                    onerror: () => reject(new Error('API request failed')),
-                    ontimeout: () => reject(new Error('API request timed out'))
-                });
-                return;
+        const L = getLeaflet();
+        const torn = getTorn();
+        const now = Date.now();
+
+        activeItems.forEach((item) => {
+            const record = historyMap[item.key];
+            if (record && record.status === 'picked') return;
+
+            const latLng = getLatLng(item);
+            if (!latLng) return;
+
+            const isSel = item.key === selectedKey;
+            const meta = metadataFor(item.itemId);
+            const labelHtml = escapeHtml(item.title);
+
+            let pinInner = escapeHtml(item.title.slice(0, 2));
+            if (settings.showImages && item.itemId) {
+                pinInner = `<img src="${getImageUrl(item.itemId)}" alt="Pin" loading="lazy">`;
             }
 
-            fetch(url, { credentials: 'omit' })
-                .then((response) => response.text())
-                .then(resolve)
-                .catch(reject);
+            const html = `
+                <div class="tcfs-map-pin" data-key="${escapeAttr(item.key)}">
+                    <div class="tcfs-map-label">${labelHtml}</div>
+                    <div class="tcfs-map-dot" style="
+                        border-color: ${isSel ? '#85B200' : 'rgba(255,255,255,0.9)'}; 
+                        box-shadow: ${isSel ? '0 0 14px #85B200' : '0 3px 11px rgba(0,0,0,0.46)'};
+                    ">
+                        ${pinInner}
+                    </div>
+                    <div class="tcfs-map-tail"></div>
+                </div>
+            `;
+
+            try {
+                const icon = L.divIcon({
+                    html: html,
+                    className: 'tcfs-map-icon',
+                    iconSize: [72, 64],
+                    iconAnchor: [36, 64]
+                });
+
+                const marker = L.marker(latLng, { icon: icon, zIndexOffset: isSel ? 30000 : 20000 });
+                marker.addTo(torn.map.lmap);
+                markers[item.key] = marker;
+            } catch (_) {}
         });
+
+        const container = getTorn().map.lmap.getPane('markerPane');
+        if (container && !container.dataset.tcfsManaged) {
+            container.dataset.tcfsManaged = 'true';
+            container.addEventListener('click', (event) => {
+                const pin = event.target.closest('.tcfs-map-pin');
+                if (!pin) return;
+
+                event.stopPropagation();
+                const key = pin.dataset.key;
+                if (key && historyMap[key]) {
+                    selectedKey = key;
+                    if (!panel.classList.contains('tcfs-open')) togglePanel(true);
+                    render();
+                    renderMapPins();
+                }
+            });
+        }
     }
 
-    async function fetchItemMetadata(force) {
-        if (busyMeta) return;
-        if (!settings.apiEnabled || !settings.apiKey) {
-            metaStatus = 'API off';
-            renderSettings();
-            render();
+    function syncNow(explicitManual) {
+        if (!tornReady()) {
+            if (explicitManual) showToast('Torn city map system is not fully initialized yet.');
             return;
         }
 
-        const age = Date.now() - itemMetaFetchedAt;
-        if (!force && itemMetaFetchedAt && age < METADATA_CACHE_MAX_AGE_MS && Object.keys(itemMeta).length) {
-            metaStatus = 'Cached';
+        const freshItems = getPageItems();
+        activeItems = freshItems;
+
+        updateHistory(freshItems);
+        updateFabCounter();
+        renderMapPins();
+        render();
+
+        if (explicitManual) showToast(`Scan complete. Found ${freshItems.length} active loot target coordinates.`);
+    }
+
+    function fetchItemMetadata(force) {
+        if (!settings.apiEnabled || !settings.apiKey) {
+            metaStatus = 'Off';
             renderSettings();
-            render();
+            return;
+        }
+        if (busyMeta) return;
+
+        const now = Date.now();
+        if (!force && (now - itemMetaFetchedAt < METADATA_CACHE_MAX_AGE_MS)) {
+            metaStatus = 'Cached';
             return;
         }
 
         busyMeta = true;
-        metaStatus = 'Loading values';
+        metaStatus = 'Syncing...';
         renderSettings();
-        render();
 
-        try {
-            const url = 'https://api.torn.com/torn/?selections=items&key=' + encodeURIComponent(settings.apiKey);
-            const text = await requestText(url);
-            const data = JSON.parse(text);
-
-            if (data.error) {
-                throw new Error(data.error.error || data.error.code || 'Torn API error');
-            }
-
-            const nextMeta = {};
-            Object.keys(data.items || {}).forEach((itemId) => {
-                const item = data.items[itemId];
-                if (!item || typeof item !== 'object') return;
-                const value = Number(item.market_value);
-                nextMeta[String(itemId)] = {
-                    title: cleanText(item.name || item.title || ''),
-                    category: cleanText(item.type || item.category || 'Unknown') || 'Unknown',
-                    value: Number.isFinite(value) ? value : null
-                };
-            });
-
-            itemMeta = nextMeta;
-            itemMetaFetchedAt = Date.now();
-            STORE.set('itemMeta', itemMeta);
-            STORE.set('itemMetaFetchedAt', itemMetaFetchedAt);
-            metaStatus = Object.keys(itemMeta).length ? 'Values ready' : 'No values';
-            updateHistory(activeItems);
-            toast('Item values updated');
-        } catch (error) {
-            metaStatus = 'API error';
-            toast('Could not load item values');
-        } finally {
+        if (typeof GM_xmlhttpRequest !== 'function') {
             busyMeta = false;
+            metaStatus = 'No Grant';
             renderSettings();
-            syncMarkers(visibleActiveItems());
-            render();
-        }
-    }
-
-    async function waitForTorn() {
-        const started = Date.now();
-        while (Date.now() - started < 30000) {
-            if (tornReady()) return true;
-            await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-        return false;
-    }
-
-    function watchVisibility() {
-        document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') syncNow(false);
-        });
-    }
-
-    async function boot() {
-        buildUI();
-        watchVisibility();
-        const ready = await waitForTorn();
-        if (!ready) {
-            toast('City map was not detected');
             return;
         }
 
-        syncNow(false);
-        scheduleSync();
-        if (settings.apiEnabled && settings.apiKey) fetchItemMetadata(false);
-        console.log('[Torn City Safe Finder] ready v' + VERSION);
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `https://api.torn.com/torn/?selections=items&key=${settings.apiKey}`,
+            responseType: 'json',
+            timeout: 10000,
+            onload(res) {
+                busyMeta = false;
+                try {
+                    const data = res.response || JSON.parse(res.responseText);
+                    if (data && data.items && typeof data.items === 'object') {
+                        const parsedMeta = {};
+                        Object.keys(data.items).forEach((id) => {
+                            const info = data.items[id];
+                            parsedMeta[String(id)] = {
+                                name: cleanText(info.name || ''),
+                                category: cleanText(info.type || 'Unknown'),
+                                value: Math.max(0, parseInt(info.market_value, 10) || 0)
+                            };
+                        });
+
+                        itemMeta = parsedMeta;
+                        itemMetaFetchedAt = Date.now();
+                        metaStatus = 'Cached';
+
+                        STORE.set('itemMeta', itemMeta);
+                        STORE.set('itemMetaFetchedAt', itemMetaFetchedAt);
+
+                        showToast('Market metadata successfully synced with Torn Public API.');
+                        syncNow(false);
+                    } else if (data && data.error && typeof data.error === 'object') {
+                        metaStatus = 'API Error ' + (data.error.code || '?');
+                        showToast(`API sync warning: ${escapeHtml(data.error.error || 'Unknown error code')}`);
+                    } else {
+                        metaStatus = 'Bad Format';
+                    }
+                } catch (_) {
+                    metaStatus = 'Parse Fail';
+                }
+                renderSettings();
+            },
+            onerror() {
+                busyMeta = false;
+                metaStatus = 'Net Error';
+                renderSettings();
+            },
+            ontimeout() {
+                busyMeta = false;
+                metaStatus = 'Timeout';
+                renderSettings();
+            }
+        });
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', boot);
-    } else {
-        boot();
+    function initLoop() {
+        buildUI();
+        if (settings.apiEnabled && (!itemMetaFetchedAt || Date.now() - itemMetaFetchedAt > METADATA_CACHE_MAX_AGE_MS)) {
+            fetchItemMetadata(false);
+        }
+
+        clearInterval(syncTimer);
+        syncNow(false);
+        syncTimer = setInterval(() => {
+            syncNow(false);
+        }, POLL_MS);
     }
+
+    const startObserver = new MutationObserver((mutations, obs) => {
+        if (document.body && tornReady()) {
+            initLoop();
+            obs.disconnect();
+        }
+    });
+    startObserver.observe(document.documentElement, { childList: true, subtree: true });
 })();
