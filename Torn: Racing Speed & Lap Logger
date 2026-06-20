@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.6.4
+// @version      2.6.5
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -561,6 +561,33 @@ function launchFirework() {
     requestAnimationFrame(draw);
 }
 
+// Robust base64 decode — falls back to manual implementation if atob() fails
+// (Torn PDA's webview can occasionally mangle/restrict the native atob).
+function safeAtob(input) {
+    try {
+        return atob(input);
+    } catch (e) {
+        // Manual base64 decode fallback
+        const keyStr = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+        let output = '';
+        let i = 0;
+        const clean = input.replace(/[^A-Za-z0-9+/=]/g, '');
+        while (i < clean.length) {
+            const enc1 = keyStr.indexOf(clean.charAt(i++));
+            const enc2 = keyStr.indexOf(clean.charAt(i++));
+            const enc3 = keyStr.indexOf(clean.charAt(i++));
+            const enc4 = keyStr.indexOf(clean.charAt(i++));
+            const chr1 = (enc1 << 2) | (enc2 >> 4);
+            const chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+            const chr3 = ((enc3 & 3) << 6) | enc4;
+            output += String.fromCharCode(chr1);
+            if (enc3 !== 64) output += String.fromCharCode(chr2);
+            if (enc4 !== 64) output += String.fromCharCode(chr3);
+        }
+        return output;
+    }
+}
+
 // ─── Best Lap Parser ───────────────────────────────────────────────────────────
 function parseBestLapFromResponse(data) {
     try {
@@ -584,7 +611,7 @@ function parseBestLapFromResponse(data) {
         if (!encoded) return;
 
         const trackIntervals = trackData.intervals.length;
-        const decoded = atob(encoded);
+        const decoded = safeAtob(encoded);
         const intervals = decoded.split(',').map(Number);
         if (intervals.length < trackIntervals) return;
 
