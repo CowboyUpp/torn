@@ -3,7 +3,7 @@
 // @namespace    https://github.com/CowboyUpp/torn
 // @version      1.0.0
 // @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
-// @author       CowboyUpp
+// @author       CowboyUp
 // @match        https://www.torn.com/city.php*
 // @match        https://*.torn.com/city.php*
 // @run-at       document-idle
