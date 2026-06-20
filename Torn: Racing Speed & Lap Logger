@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.2
+// @version      2.7.3
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -415,7 +415,7 @@ function injectWidget() {
                     <span id="rslogSessionTop">Session top: <span id="rslogSessionTopVal">0.00</span> mph</span>
                     <span id="rslogNewRecord">★ NEW RECORD</span>
                     <span class="rslogToggle" id="rslogSpeedToggle">▼ Top Speeds</span>
-                    <span class="rslogInfoIcon" id="rslogWidgetSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded — it can't catch speeds set while the tab is closed.">ⓘ</span>
+                    <span class="rslogInfoIcon" id="rslogWidgetSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded. It can't catch max speeds while the racing tab is closed.">ⓘ</span>
                 </div>
                 <div id="rslogSpeedPanelContent" class="rslogPanel">
                     <table id="rslogSpeedTable">
@@ -850,7 +850,7 @@ function injectLobbyPanel() {
         <div id="rslogLobbyPanel">
             <div style="display:flex; gap:0; flex-wrap:wrap;">
                 <div style="flex:1; min-width:220px; padding-right:10px; border-right:1px solid #333;">
-                    <h4 style="margin:4px 0; color:#ff9900;">Top Speeds <span class="rslogInfoIcon" id="rslogSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded — it can't catch speeds set while the tab is closed.">ⓘ</span></h4>
+                    <h4 style="margin:4px 0; color:#ff9900;">Top Speeds <span class="rslogInfoIcon" id="rslogSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded. It can't catch max speeds while the racing tab is closed.">ⓘ</span></h4>
                     <table><colgroup><col style="width:26%"><col style="width:18%"><col style="width:28%"><col style="width:28%"></colgroup>
                     <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogLobbySpeedBody"></tbody></table>
                 </div>
