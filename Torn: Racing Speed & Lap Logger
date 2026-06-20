@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.1
+// @version      2.7.2
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -359,12 +359,47 @@ GM_addStyle(`
         font-family: "Courier New", Courier, monospace; resize: none; -webkit-user-select: text; user-select: text;
     }
     #rslogCsvModal .rslogCsvBody:focus { outline: 1px solid #fff200; background: #111; }
+
+    /* ── Info icon + tap popover (title tooltip alone doesn't show on touch/PDA) ── */
+    .rslogInfoIcon { display: inline-block; color: #888; font-size: 11px; cursor: help; margin-left: 2px; vertical-align: middle; }
+    .rslogInfoIcon:hover { color: #fff200; }
+    .rslogInfoPopover {
+        display: none; position: absolute; z-index: 100000; max-width: 260px; padding: 8px 10px;
+        background: #1a1a1a; border: 1px solid #fff200; border-radius: 4px; color: #ccc; font-size: 10px;
+        line-height: 1.4; box-shadow: 0 4px 12px rgba(0,0,0,.5); font-family: "Courier New", Courier, monospace;
+    }
 `);
 
 // ─── UI Helpers ────────────────────────────────────────────────────────────────
 function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Tap-to-show popover for info icons (native `title` tooltips don't
+// reliably appear on touch devices / PDA's WebView).
+function wireInfoIcon(iconSelector) {
+    const icon = $(iconSelector);
+    if (icon.length < 1 || icon.data('rslogWired')) return;
+    icon.data('rslogWired', true);
+
+    const popover = $('<div class="rslogInfoPopover"></div>').text(icon.attr('title') || '');
+    icon.removeAttr('title'); // avoid native tooltip stacking with our popover
+    $('body').append(popover);
+
+    icon.on('click', function (e) {
+        e.stopPropagation();
+        const isOpen = popover.is(':visible');
+        $('.rslogInfoPopover').hide();
+        if (isOpen) return;
+        const rect = this.getBoundingClientRect();
+        popover.css({
+            top:  (window.scrollY + rect.bottom + 4) + 'px',
+            left: Math.max(8, window.scrollX + rect.left - 10) + 'px'
+        }).show();
+    });
+
+    $(document).on('click', () => popover.hide());
 }
 
 // ─── Main Race Widget ──────────────────────────────────────────────────────────
@@ -380,6 +415,7 @@ function injectWidget() {
                     <span id="rslogSessionTop">Session top: <span id="rslogSessionTopVal">0.00</span> mph</span>
                     <span id="rslogNewRecord">★ NEW RECORD</span>
                     <span class="rslogToggle" id="rslogSpeedToggle">▼ Top Speeds</span>
+                    <span class="rslogInfoIcon" id="rslogWidgetSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded — it can't catch speeds set while the tab is closed.">ⓘ</span>
                 </div>
                 <div id="rslogSpeedPanelContent" class="rslogPanel">
                     <table id="rslogSpeedTable">
@@ -414,6 +450,8 @@ function injectWidget() {
     } else if ($('#racingupdatesnew').length > 0) {
         $('#racingupdatesnew').prepend(html);
     }
+
+    wireInfoIcon('#rslogWidgetSpeedInfoIcon');
 
     $('#rslogSpeedToggle').on('click', function () {
         const panel = $('#rslogSpeedPanelContent');
@@ -812,7 +850,7 @@ function injectLobbyPanel() {
         <div id="rslogLobbyPanel">
             <div style="display:flex; gap:0; flex-wrap:wrap;">
                 <div style="flex:1; min-width:220px; padding-right:10px; border-right:1px solid #333;">
-                    <h4 style="margin:4px 0; color:#ff9900;">Top Speeds</h4>
+                    <h4 style="margin:4px 0; color:#ff9900;">Top Speeds <span class="rslogInfoIcon" id="rslogSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded — it can't catch speeds set while the tab is closed.">ⓘ</span></h4>
                     <table><colgroup><col style="width:26%"><col style="width:18%"><col style="width:28%"><col style="width:28%"></colgroup>
                     <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th></tr></thead><tbody id="rslogLobbySpeedBody"></tbody></table>
                 </div>
@@ -833,6 +871,8 @@ function injectLobbyPanel() {
     `;
 
     $('#racingAdditionalContainer').prepend(html);
+
+    wireInfoIcon('#rslogSpeedInfoIcon');
 
     $('#rslogLobbyBtn').on('click', function () {
         const panel  = $('#rslogLobbyPanel');
