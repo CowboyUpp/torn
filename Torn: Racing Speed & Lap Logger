@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.6.3
+// @version      2.6.4
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -171,7 +171,7 @@ function ageDotClass(iso) {
 //   • today-highlight class on the text when record is from today
 function dateCellHtml(iso, todayCssClass) {
     const displayDate = isoToDate(iso) || '–';
-    const tooltip     = iso ? iso.replace('T', ' ').replace('Z', ' UTC') : '';
+    const tooltip     = iso ? iso.replace('T', ' ').replace(/\.\d+Z$/, ' UTC') : '';
     const isToday     = isoToDate(iso) === todayDate();
     const textClass   = isToday ? ` ${todayCssClass}` : '';
     const dotClass    = ageDotClass(iso);
