@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.6.5
+// @version      2.7.0
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -16,6 +16,13 @@
 'use strict';
 
 const $ = unsafeWindow.$;
+
+// Detect Torn PDA / in-app WebViews where Blob-download anchors and
+// GM_setClipboard are unreliable or unavailable. Same heuristic used by
+// other Torn racing userscripts targeting PDA compatibility.
+function isPdaWebView() {
+    return /TornPDA|wv;|; wv|FBAN|FBAV|Line\/|Instagram/i.test(navigator.userAgent);
+}
 
 // ─── Torn AJAX hook ────────────────────────────────────────────────────────────
 function tornAjax(callback) {
@@ -326,6 +333,30 @@ GM_addStyle(`
     /* Text colour when record is from today */
     .rslogDateToday    { color: #00ff88 !important; font-weight: bold; }
     .rslogDateTodayLap { color: #00ff88 !important; font-weight: bold; }
+
+    /* ── CSV modal (used on PDA / in-app WebViews where downloads can't trigger) ── */
+    #rslogCsvModal { position: fixed; inset: 0; z-index: 99999; display: none; font-family: "Courier New", Courier, monospace; }
+    #rslogCsvModal .rslogCsvBackdrop { position: absolute; inset: 0; background: rgba(0,0,0,.6); }
+    #rslogCsvModal .rslogCsvPanel {
+        position: absolute; left: 6%; right: 6%; top: 10%; bottom: 10%;
+        background: #161616; color: #eaeaea; border-radius: 6px; display: flex; flex-direction: column;
+        box-shadow: 0 10px 30px rgba(0,0,0,.6); border: 1px solid #333;
+    }
+    #rslogCsvModal .rslogCsvHeader {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 12px; border-bottom: 1px solid #333; font-weight: bold; color: #fff200; font-size: 12px;
+    }
+    #rslogCsvModal .rslogCsvActions button {
+        margin-left: 6px; padding: 5px 10px; background: #2a2a00; color: #fff200; border: 1px solid #fff200;
+        border-radius: 4px; font-family: inherit; font-size: 10px; font-weight: bold; cursor: pointer;
+    }
+    #rslogCsvModal .rslogCsvActions button:hover { background: #3a3a00; }
+    #rslogCsvModal .rslogCsvActions #rslogCsvCloseBtn { background: #1a0000; color: #cc4444; border-color: #882222; }
+    #rslogCsvModal .rslogCsvActions #rslogCsvCloseBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }
+    #rslogCsvModal .rslogCsvBody {
+        flex: 1; margin: 0; padding: 10px 12px; overflow: auto; white-space: pre; font-size: 11px; line-height: 1.4;
+        color: #ccc; -webkit-overflow-scrolling: touch;
+    }
 `);
 
 // ─── UI Helpers ────────────────────────────────────────────────────────────────
@@ -475,7 +506,93 @@ function renderLapTable() {
     }
 }
 
+// ─── CSV Modal (PDA / WebView fallback) ────────────────────────────────────────
+// On real browsers, Blob + <a download> works fine. On Torn PDA's embedded
+// WebView (and other in-app browsers), synthetic download clicks are
+// frequently silently ignored. In that case we show the CSV in a modal so
+// the person can copy or share it manually instead.
+function showCsvModal(csvText, fileName) {
+    let modal = document.getElementById('rslogCsvModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'rslogCsvModal';
+        modal.innerHTML = `
+            <div class="rslogCsvBackdrop"></div>
+            <div class="rslogCsvPanel">
+                <div class="rslogCsvHeader">
+                    <span id="rslogCsvTitle"></span>
+                    <div class="rslogCsvActions">
+                        <button id="rslogCsvCopyBtn" type="button">📋 Copy</button>
+                        <button id="rslogCsvShareBtn" type="button" style="display:none;">📤 Share</button>
+                        <button id="rslogCsvCloseBtn" type="button">✕ Close</button>
+                    </div>
+                </div>
+                <pre class="rslogCsvBody" id="rslogCsvBody"></pre>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        modal.querySelector('#rslogCsvCloseBtn').addEventListener('click', () => { modal.style.display = 'none'; });
+        modal.querySelector('.rslogCsvBackdrop').addEventListener('click', () => { modal.style.display = 'none'; });
+
+        modal.querySelector('#rslogCsvCopyBtn').addEventListener('click', async () => {
+            const text = modal.querySelector('#rslogCsvBody').textContent;
+            const ok = await copyToClipboard(text);
+            const btn = modal.querySelector('#rslogCsvCopyBtn');
+            btn.textContent = ok ? '✓ Copied!' : '✗ Copy failed';
+            setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+        });
+
+        if (navigator.share) {
+            const shareBtn = modal.querySelector('#rslogCsvShareBtn');
+            shareBtn.style.display = '';
+            shareBtn.addEventListener('click', async () => {
+                const text = modal.querySelector('#rslogCsvBody').textContent;
+                const name = modal.querySelector('#rslogCsvTitle').textContent;
+                try { await navigator.share({ title: name, text }); } catch (e) {}
+            });
+        }
+    }
+
+    modal.querySelector('#rslogCsvTitle').textContent = fileName;
+    modal.querySelector('#rslogCsvBody').textContent  = csvText;
+    modal.style.display = 'block';
+}
+
+// ─── Clipboard helper ──────────────────────────────────────────────────────────
+// Prefers the standard navigator.clipboard API (works in PDA's WebView and
+// real browsers alike); falls back to GM_setClipboard, then to prompt().
+async function copyToClipboard(text) {
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch (e) { /* fall through */ }
+
+    if (typeof GM_setClipboard !== 'undefined') {
+        try { GM_setClipboard(text); return true; } catch (e) { /* fall through */ }
+    }
+
+    try { window.prompt('Copy the CSV:', text); return true; } catch (e) { return false; }
+}
+
 // ─── CSV Exports ───────────────────────────────────────────────────────────────
+// On real browsers: trigger a normal file download.
+// On PDA / in-app WebViews: open the CSV modal instead, since Blob downloads
+// are unreliable there.
+function deliverCsv(csv, fileName) {
+    if (isPdaWebView()) {
+        showCsvModal(csv, fileName);
+        return;
+    }
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = fileName; a.click();
+    URL.revokeObjectURL(url);
+}
+
 function downloadSpeedCsv() {
     const log = getSpeedLog();
     let csv = 'Track,Car,Class,Top Speed (mph),Date,Speed Timestamp\n';
@@ -486,11 +603,7 @@ function downloadSpeedCsv() {
         const dateDisplay = isoToDate(data.speedDate || data.date || '');
         csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${data.topSpeed},"${dateDisplay}","${data.speedDate || ''}"\n`;
     });
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = 'torn_top_speeds.csv'; a.click();
-    URL.revokeObjectURL(url);
+    deliverCsv(csv, 'torn_top_speeds.csv');
 }
 
 function downloadLapCsv() {
@@ -503,20 +616,7 @@ function downloadLapCsv() {
         const dateDisplay = isoToDate(data.lapDate || data.date || '');
         csv += `"${trackName.replace(/"/g,'""')}","${(data.car || '').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${dateDisplay}","${data.lapDate || ''}"\n`;
     });
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = 'torn_best_laps.csv'; a.click();
-    URL.revokeObjectURL(url);
-}
-
-// ─── Clipboard helper ──────────────────────────────────────────────────────────
-function copyToClipboard(text) {
-    if (typeof GM_setClipboard !== 'undefined') {
-        GM_setClipboard(text);
-        return true;
-    }
-    return false;
+    deliverCsv(csv, 'torn_best_laps.csv');
 }
 
 // ─── Firework ──────────────────────────────────────────────────────────────────
@@ -724,7 +824,7 @@ function injectLobbyPanel() {
     $('#rslogLobbySpeedCsv').on('click', e => { e.preventDefault(); downloadSpeedCsv(); });
     $('#rslogLobbyLapCsv').on('click', e => { e.preventDefault(); downloadLapCsv(); });
 
-    $('#rslogLobbySpeedCopy').on('click', () => {
+    $('#rslogLobbySpeedCopy').on('click', async () => {
         const log = getSpeedLog();
         let csv = 'Track,Car,Class,Top Speed (mph),Date\n';
         Object.entries(log).forEach(([, data]) => {
@@ -733,13 +833,12 @@ function injectLobbyPanel() {
             const dateDisplay = isoToDate(data.speedDate || data.date || '');
             csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${data.topSpeed},"${dateDisplay}"\n`;
         });
-        if (copyToClipboard(csv)) {
-            $('#rslogLobbySpeedCopy').text('✓ Copied!');
-            setTimeout(() => $('#rslogLobbySpeedCopy').text('📋 Copy Speeds'), 2000);
-        }
+        const ok = await copyToClipboard(csv);
+        $('#rslogLobbySpeedCopy').text(ok ? '✓ Copied!' : '✗ Copy failed');
+        setTimeout(() => $('#rslogLobbySpeedCopy').text('📋 Copy Speeds'), 2000);
     });
 
-    $('#rslogLobbyLapCopy').on('click', () => {
+    $('#rslogLobbyLapCopy').on('click', async () => {
         const log = getSpeedLog();
         let csv = 'Track,Car,Class,Best Lap,Best Lap (ms),Date\n';
         Object.entries(log).forEach(([, data]) => {
@@ -748,10 +847,9 @@ function injectLobbyPanel() {
             const dateDisplay = isoToDate(data.lapDate || data.date || '');
             csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${dateDisplay}"\n`;
         });
-        if (copyToClipboard(csv)) {
-            $('#rslogLobbyLapCopy').text('✓ Copied!');
-            setTimeout(() => $('#rslogLobbyLapCopy').text('📋 Copy Laps'), 2000);
-        }
+        const ok = await copyToClipboard(csv);
+        $('#rslogLobbyLapCopy').text(ok ? '✓ Copied!' : '✗ Copy failed');
+        setTimeout(() => $('#rslogLobbyLapCopy').text('📋 Copy Laps'), 2000);
     });
 
     $('#rslogLobbyClearBtn').on('click', () => {
