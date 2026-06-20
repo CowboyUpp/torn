@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.0
+// @version      2.7.1
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -354,9 +354,11 @@ GM_addStyle(`
     #rslogCsvModal .rslogCsvActions #rslogCsvCloseBtn { background: #1a0000; color: #cc4444; border-color: #882222; }
     #rslogCsvModal .rslogCsvActions #rslogCsvCloseBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }
     #rslogCsvModal .rslogCsvBody {
-        flex: 1; margin: 0; padding: 10px 12px; overflow: auto; white-space: pre; font-size: 11px; line-height: 1.4;
-        color: #ccc; -webkit-overflow-scrolling: touch;
+        flex: 1; margin: 10px 12px; padding: 10px 12px; overflow: auto; white-space: pre; font-size: 11px; line-height: 1.4;
+        color: #ccc; -webkit-overflow-scrolling: touch; background: #0d0d0d; border: 1px solid #333; border-radius: 4px;
+        font-family: "Courier New", Courier, monospace; resize: none; -webkit-user-select: text; user-select: text;
     }
+    #rslogCsvModal .rslogCsvBody:focus { outline: 1px solid #fff200; background: #111; }
 `);
 
 // ─── UI Helpers ────────────────────────────────────────────────────────────────
@@ -527,7 +529,8 @@ function showCsvModal(csvText, fileName) {
                         <button id="rslogCsvCloseBtn" type="button">✕ Close</button>
                     </div>
                 </div>
-                <pre class="rslogCsvBody" id="rslogCsvBody"></pre>
+                <div style="padding:4px 12px 0; color:#888; font-size:10px;">If Copy doesn't work, tap the text below and select all manually.</div>
+                <textarea class="rslogCsvBody" id="rslogCsvBody" readonly></textarea>
             </div>
         `;
         document.body.appendChild(modal);
@@ -536,18 +539,23 @@ function showCsvModal(csvText, fileName) {
         modal.querySelector('.rslogCsvBackdrop').addEventListener('click', () => { modal.style.display = 'none'; });
 
         modal.querySelector('#rslogCsvCopyBtn').addEventListener('click', async () => {
-            const text = modal.querySelector('#rslogCsvBody').textContent;
-            const ok = await copyToClipboard(text);
+            const textarea = modal.querySelector('#rslogCsvBody');
             const btn = modal.querySelector('#rslogCsvCopyBtn');
-            btn.textContent = ok ? '✓ Copied!' : '✗ Copy failed';
+            const ok = await copyToClipboard(textarea.value, textarea);
+            btn.textContent = ok ? '✓ Copied!' : '✗ Tap text below';
             setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
         });
+
+        // Tapping the textarea selects everything, so a manual long-press
+        // copy always works even if every programmatic method is blocked.
+        modal.querySelector('#rslogCsvBody').addEventListener('focus', function () { this.select(); });
+        modal.querySelector('#rslogCsvBody').addEventListener('click', function () { this.select(); });
 
         if (navigator.share) {
             const shareBtn = modal.querySelector('#rslogCsvShareBtn');
             shareBtn.style.display = '';
             shareBtn.addEventListener('click', async () => {
-                const text = modal.querySelector('#rslogCsvBody').textContent;
+                const text = modal.querySelector('#rslogCsvBody').value;
                 const name = modal.querySelector('#rslogCsvTitle').textContent;
                 try { await navigator.share({ title: name, text }); } catch (e) {}
             });
@@ -555,14 +563,17 @@ function showCsvModal(csvText, fileName) {
     }
 
     modal.querySelector('#rslogCsvTitle').textContent = fileName;
-    modal.querySelector('#rslogCsvBody').textContent  = csvText;
+    modal.querySelector('#rslogCsvBody').value = csvText;
     modal.style.display = 'block';
 }
 
 // ─── Clipboard helper ──────────────────────────────────────────────────────────
-// Prefers the standard navigator.clipboard API (works in PDA's WebView and
-// real browsers alike); falls back to GM_setClipboard, then to prompt().
-async function copyToClipboard(text) {
+// Tries every available method in order of reliability. WebViews (Torn PDA,
+// in-app browsers) frequently block navigator.clipboard, GM_setClipboard,
+// AND window.prompt silently with no error — so execCommand('copy') against
+// a real, focused, selected textarea is included as it works in more
+// embedded WebViews than the Clipboard API does.
+async function copyToClipboard(text, sourceTextarea) {
     try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             await navigator.clipboard.writeText(text);
@@ -570,11 +581,21 @@ async function copyToClipboard(text) {
         }
     } catch (e) { /* fall through */ }
 
+    if (sourceTextarea) {
+        try {
+            sourceTextarea.focus();
+            sourceTextarea.select();
+            sourceTextarea.setSelectionRange(0, sourceTextarea.value.length);
+            const ok = document.execCommand('copy');
+            if (ok) return true;
+        } catch (e) { /* fall through */ }
+    }
+
     if (typeof GM_setClipboard !== 'undefined') {
         try { GM_setClipboard(text); return true; } catch (e) { /* fall through */ }
     }
 
-    try { window.prompt('Copy the CSV:', text); return true; } catch (e) { return false; }
+    return false;
 }
 
 // ─── CSV Exports ───────────────────────────────────────────────────────────────
@@ -824,7 +845,7 @@ function injectLobbyPanel() {
     $('#rslogLobbySpeedCsv').on('click', e => { e.preventDefault(); downloadSpeedCsv(); });
     $('#rslogLobbyLapCsv').on('click', e => { e.preventDefault(); downloadLapCsv(); });
 
-    $('#rslogLobbySpeedCopy').on('click', async () => {
+    $('#rslogLobbySpeedCopy').on('click', () => {
         const log = getSpeedLog();
         let csv = 'Track,Car,Class,Top Speed (mph),Date\n';
         Object.entries(log).forEach(([, data]) => {
@@ -833,12 +854,10 @@ function injectLobbyPanel() {
             const dateDisplay = isoToDate(data.speedDate || data.date || '');
             csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${data.topSpeed},"${dateDisplay}"\n`;
         });
-        const ok = await copyToClipboard(csv);
-        $('#rslogLobbySpeedCopy').text(ok ? '✓ Copied!' : '✗ Copy failed');
-        setTimeout(() => $('#rslogLobbySpeedCopy').text('📋 Copy Speeds'), 2000);
+        showCsvModal(csv, 'torn_top_speeds.csv');
     });
 
-    $('#rslogLobbyLapCopy').on('click', async () => {
+    $('#rslogLobbyLapCopy').on('click', () => {
         const log = getSpeedLog();
         let csv = 'Track,Car,Class,Best Lap,Best Lap (ms),Date\n';
         Object.entries(log).forEach(([, data]) => {
@@ -847,9 +866,7 @@ function injectLobbyPanel() {
             const dateDisplay = isoToDate(data.lapDate || data.date || '');
             csv += `"${(data.track||'').replace(/"/g,'""')}","${(data.car||'').replace(/"/g,'""')}",${cls},${formatLapTime(data.bestLapMs)},${data.bestLapMs},"${dateDisplay}"\n`;
         });
-        const ok = await copyToClipboard(csv);
-        $('#rslogLobbyLapCopy').text(ok ? '✓ Copied!' : '✗ Copy failed');
-        setTimeout(() => $('#rslogLobbyLapCopy').text('📋 Copy Laps'), 2000);
+        showCsvModal(csv, 'torn_best_laps.csv');
     });
 
     $('#rslogLobbyClearBtn').on('click', () => {
