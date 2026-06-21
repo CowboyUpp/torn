@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Torn City Safe Finder
+// @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
 // @version      1.1.0
 // @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
