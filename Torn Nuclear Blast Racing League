@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Nuclear Blast Racing League
 // @namespace    torn.com
-// @version      3.0
+// @version      3.1
 // @description  Multi-track faction racing league: skill-bracket teams (steward-assigned snake draft OR open self-signup), race result capture, points standings, real-time sync via a Cloudflare Worker backend, tooltip help throughout.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -12,6 +12,8 @@
 // @connect      *
 // @grant        unsafeWindow
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/583776/Torn%20Nuclear%20Blast%20Racing%20League.user.js
+// @updateURL https://update.greasyfork.org/scripts/583776/Torn%20Nuclear%20Blast%20Racing%20League.meta.js
 // ==/UserScript==
 
 (function () {
@@ -449,29 +451,85 @@
      STYLES
      ============================================================ */
   GM_addStyle(`
-    #trl-btn { position: fixed; bottom: 170px; right: 16px; z-index: 99999; background: #b91c1c; color: #fff; border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.3); font-family: Arial, sans-serif; }
+    #trl-btn { display:inline-block; margin-left:10px; font-size:18px; line-height:1; cursor:pointer; opacity:.7; vertical-align:middle; user-select:none; transition: opacity .15s ease, transform .15s ease; }
+    #trl-btn:hover { opacity:1; transform: scale(1.12); }
     #trl-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 999998; display:flex; align-items:center; justify-content:center; padding: 12px; box-sizing: border-box; }
-    #trl-modal { width: 94vw; max-width: 920px; height: 82vh; max-height: 660px; background: #111827; color: #f3f4f6; border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.6); display: flex; flex-direction: column; font-family: Arial, sans-serif; font-size: 13px; overflow: hidden; }
-    #trl-tabs { display:flex; gap:4px; padding: 10px 14px 0; border-bottom: 1px solid #374151; flex-wrap: wrap; }
-    .trl-tab { padding: 8px 14px; cursor: pointer; border-radius: 6px 6px 0 0; color: #9ca3af; font-weight: 600; font-size: 12px; }
-    .trl-tab.active { background: #1f2937; color: #fff; }
+    #trl-modal { width: 94vw; max-width: 920px; height: 82vh; max-height: 660px; background: #1a2236; color: #f8fafc; border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.6); display: flex; flex-direction: column; font-family: Arial, sans-serif; font-size: 13px; overflow: hidden; }
+    #trl-tabs { display:flex; gap:4px; padding: 10px 14px 0; border-bottom: 1px solid #44546b; flex-wrap: wrap; }
+    .trl-tab { padding: 8px 14px; cursor: pointer; border-radius: 6px 6px 0 0; color: #b3bdd1; font-weight: 600; font-size: 12px; }
+    .trl-tab.active { background: #243044; color: #fff; }
     #trl-body { flex: 1; overflow-y: auto; padding: 14px; }
-    #trl-head { display:flex; align-items:center; gap:8px; padding: 12px 14px; border-bottom: 1px solid #374151; background:#1f2937; flex-wrap: wrap; }
-    #trl-head button { background:none; border:none; color:#9ca3af; cursor:pointer; font-size:14px; }
-    .trl-card { background:#1f2937; border:1px solid #374151; border-radius:8px; padding:12px; margin-bottom:10px; }
-    .trl-btn { padding:6px 12px; border-radius:6px; border:1px solid #4b5563; background:#374151; color:#f3f4f6; font-size:12px; cursor:pointer; font-weight:600; }
+    #trl-head { display:flex; align-items:center; gap:8px; padding: 12px 14px; border-bottom: 1px solid #44546b; background:#243044; flex-wrap: wrap; }
+    #trl-head button { background:none; border:none; color:#b3bdd1; cursor:pointer; font-size:14px; }
+    .trl-card { background:#243044; border:1px solid #44546b; border-radius:8px; padding:12px; margin-bottom:10px; }
+    .trl-btn { padding:6px 12px; border-radius:6px; border:1px solid #5b6a85; background:#374151; color:#f8fafc; font-size:12px; cursor:pointer; font-weight:600; }
     .trl-btn.primary { background:#2563eb; border-color:#2563eb; }
     .trl-btn.danger { background:#7f1d1d; border-color:#991b1b; }
     .trl-table { width:100%; border-collapse: collapse; font-size: 12px; }
-    .trl-table th { text-align:left; color:#9ca3af; padding:6px 8px; border-bottom:1px solid #374151; }
-    .trl-table td { padding:6px 8px; border-bottom:1px solid #1f2937; }
+    .trl-table th { text-align:left; color:#b3bdd1; padding:6px 8px; border-bottom:1px solid #44546b; }
+    .trl-table td { padding:6px 8px; border-bottom:1px solid #2c3a54; }
     .trl-badge { font-size:10px; font-weight:700; padding:2px 6px; border-radius:10px; color:#fff; }
-    .trl-input, .trl-select { background:#111827; border:1px solid #4b5563; color:#f3f4f6; padding:6px 8px; border-radius:6px; font-size:12px; }
-    #trl-capture-banner { position: fixed; bottom: 220px; right: 16px; z-index: 99999; background:#1f2937; border:1px solid #374151; border-radius:8px; padding:10px; color:#f3f4f6; font-family: Arial, sans-serif; font-size:12px; max-width:260px; box-shadow:0 4px 14px rgba(0,0,0,.4); }
-    .trl-tip { display:inline-block; width:14px; height:14px; line-height:14px; text-align:center; border-radius:50%; background:#374151; color:#9ca3af; font-size:10px; cursor:help; position:relative; margin-left:4px; vertical-align:middle; }
-    .trl-tip:hover::after { content: attr(data-tooltip); position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%); background: #000; color: #fff; padding: 7px 10px; border-radius: 6px; font-size: 11px; width: 210px; white-space: normal; z-index: 1000000; box-shadow: 0 2px 10px rgba(0,0,0,.5); line-height:1.4; text-align:left; }
-    .trl-tip:hover::before { content: ''; position: absolute; bottom: 122%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: #000; z-index: 1000000; }
+    .trl-input, .trl-select { background:#161e2e; border:1px solid #5b6a85; color:#f8fafc; padding:6px 8px; border-radius:6px; font-size:12px; }
+    #trl-capture-banner { position: fixed; bottom: 220px; right: 16px; z-index: 99999; background:#243044; border:1px solid #44546b; border-radius:8px; padding:10px; color:#f8fafc; font-family: Arial, sans-serif; font-size:12px; max-width:260px; box-shadow:0 4px 14px rgba(0,0,0,.4); }
+    .trl-tip { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:#38bdf8; color:#0a1628; font-size:11px; font-weight:800; cursor:help; margin-left:5px; vertical-align:middle; }
+    #trl-tooltip-bubble { position: fixed; z-index: 2000000; display:none; background:#05070d; color:#fff; padding:8px 11px; border-radius:8px; font-size:12px; line-height:1.45; font-family: Arial, sans-serif; box-shadow:0 6px 20px rgba(0,0,0,.6); border:1px solid #5b6a85; pointer-events:none; }
+    #trl-tooltip-bubble::after { content:''; position:absolute; left: var(--arrow-left, 16px); bottom:-6px; transform: translateX(-50%); border:6px solid transparent; border-top-color:#05070d; }
+    #trl-tooltip-bubble[data-arrow="top"]::after { bottom:auto; top:-6px; border-top-color:transparent; border-bottom-color:#05070d; }
   `);
+
+  /* ============================================================
+     TOOLTIP BUBBLE (JS-positioned, viewport-clamped)
+     The old pure-CSS hover tooltip got clipped by the modal's own
+     scroll/overflow rules whenever a tip icon was near an edge.
+     This appends one shared bubble to <body> instead, so it's never
+     trapped by any ancestor's overflow, and clamps its position to
+     stay fully on-screen, flipping above/below as needed.
+     ============================================================ */
+  let tooltipEl = null;
+  function ensureTooltipEl() {
+    if (tooltipEl) return tooltipEl;
+    tooltipEl = document.createElement('div');
+    tooltipEl.id = 'trl-tooltip-bubble';
+    document.body.appendChild(tooltipEl);
+    return tooltipEl;
+  }
+
+  function showTooltip(target) {
+    const text = target.getAttribute('data-tooltip');
+    if (!text) return;
+    const el = ensureTooltipEl();
+    el.textContent = text;
+    el.style.width = '220px';
+    el.style.display = 'block';
+
+    const rect = target.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.left + rect.width / 2 - 110;
+    if (left < margin) left = margin;
+    if (left + 220 > window.innerWidth - margin) left = window.innerWidth - margin - 220;
+
+    const bubbleHeight = el.offsetHeight;
+    const placeAbove = rect.top - bubbleHeight - 14 >= margin;
+    const top = placeAbove ? rect.top - bubbleHeight - 10 : rect.bottom + 10;
+    el.dataset.arrow = placeAbove ? 'bottom' : 'top';
+
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+
+    const arrowLeft = Math.max(12, Math.min(220 - 12, rect.left + rect.width / 2 - left));
+    el.style.setProperty('--arrow-left', arrowLeft + 'px');
+  }
+
+  function hideTooltip() { if (tooltipEl) tooltipEl.style.display = 'none'; }
+
+  document.addEventListener('mouseover', (e) => {
+    const t = e.target.closest && e.target.closest('.trl-tip');
+    if (t) showTooltip(t);
+  });
+  document.addEventListener('mouseout', (e) => {
+    const t = e.target.closest && e.target.closest('.trl-tip');
+    if (t) hideTooltip();
+  });
 
   /* ============================================================
      MODAL UI
@@ -479,12 +537,51 @@
   let activeTab = 'standings';
   let currentSeriesId = null;
 
+  /**
+   * Only the racing area should ever get this button — page.php?sid=racing
+   * and its subpages, nothing else on torn.com.
+   */
+  function isRacingPage() {
+    try {
+      const url = new URL(location.href);
+      return url.pathname.includes('page.php') && /sid=racing/i.test(url.search);
+    } catch (e) {
+      return /page\.php/i.test(location.href) && /sid=racing/i.test(location.href);
+    }
+  }
+
+  /**
+   * Best-guess selectors for Torn's racing-page title ("Torn City
+   * Raceway" etc.) — I can't browse a live Torn session to confirm
+   * the exact markup, so this tries a few likely candidates and
+   * falls back to a text-content search. If the icon lands in the
+   * wrong spot, right-click → Inspect on the header text and send
+   * over the element/class so this can be hard-coded precisely.
+   */
+  function findRacingHeader() {
+    const candidates = ['.content-title h4', '.content-title h1', 'h1.title-black', '#skip-to-content-link + div h4'];
+    for (const sel of candidates) {
+      const el = document.querySelector(sel);
+      if (el && el.textContent.trim().length) return el;
+    }
+    const heads = document.querySelectorAll('h1, h2, h3, h4');
+    for (const h of heads) {
+      if (/raceway|racing/i.test(h.textContent)) return h;
+    }
+    return null;
+  }
+
   function injectButton() {
+    if (!isRacingPage()) return;
     if (document.getElementById('trl-btn')) return;
-    const btn = document.createElement('button');
+    const header = findRacingHeader();
+    if (!header) return; // header not rendered yet — the observer below will retry
+
+    const btn = document.createElement('span');
     btn.id = 'trl-btn';
-    btn.textContent = '🏆 Racing League';
-    document.body.appendChild(btn);
+    btn.title = 'Faction Racing League';
+    btn.textContent = '🏁';
+    header.appendChild(btn);
     btn.addEventListener('click', () => {
       if (document.getElementById('trl-backdrop')) { stopSignupPolling(); document.getElementById('trl-backdrop').remove(); }
       else openModal();
@@ -1112,14 +1209,14 @@
      INIT
      ============================================================ */
   function init() {
-    injectButton();
+    if (isRacingPage()) injectButton();
     hookRacingAjax();
   }
 
   const observer = new MutationObserver(() => {
-    if (location.href.includes('sid=racing') || document.getElementById('racingdetails') || document.getElementById('racingAdditionalContainer')) {
-      injectButton();
-    }
+    if (!isRacingPage()) return;
+    if (document.getElementById('trl-btn')) { observer.disconnect(); return; }
+    injectButton();
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
