@@ -3,7 +3,7 @@
 // @namespace    torn.com
 // @version      4.0
 // @description  Faction racing league: pre-assigned skill-bracket teams, race result capture, points standings. No backend required.
-// @author       CowboyUpp
+// @author       CowboyUp
 // @match        https://www.torn.com/page.php*
 // @grant        GM_setValue
 // @grant        GM_getValue
