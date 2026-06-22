@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Nuclear Blast Racing League
 // @namespace    torn.com
-// @version      4.0
+// @version      4.1
 // @description  Faction racing league: pre-assigned skill-bracket teams, race result capture, points standings. No backend required.
 // @author       CowboyUp
 // @match        https://www.torn.com/page.php*
@@ -56,6 +56,17 @@
   const saveRoster = (r) => save(K.ROSTER, r);
   const getTheme   = () => GM_getValue(K.THEME, 'light');
   const setTheme   = (t) => GM_setValue(K.THEME, t);
+
+  /* ============================================================
+     PRE-BUILT CREDENTIALS
+     Fill these in before publishing — stewards never need to
+     enter an API key. Use a Torn Limited Access key:
+     Torn Settings → API → Create Limited Key
+     Permissions needed: Faction (basic) + User (personalstats)
+     You can revoke/replace this key independently of your main one.
+     ============================================================ */
+  const BUILT_IN_API_KEY    = 'GLJQ3AP3cG8jt5Vc';  // replace with your limited key
+  const BUILT_IN_FACTION_ID = '8085';  // replace with your faction ID e.g. '12345'
 
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
   function esc(s) { return (s || '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -572,6 +583,7 @@
     const series = getSeries();
     const roster = getRoster();
     const teams = getTeams();
+    const usingBuiltIn = !!(BUILT_IN_API_KEY && BUILT_IN_FACTION_ID);
 
     // ---- Roster section ----
     let html = `<div class="tnbrl-card">
@@ -579,9 +591,14 @@
       <div class="tnbrl-muted" style="font-size:11px; margin-bottom:8px;">
         ${roster.members.length} members cached ${roster.time ? '&mdash; last updated ' + new Date(roster.time).toLocaleString() : '(never)'}
       </div>
-      <div class="tnbrl-row">
-        <input id="tnbrl-apikey" class="tnbrl-input" placeholder="Torn API key" style="width:200px;" value="${esc(GM_getValue('tnbrl_apikey',''))}">
-        <input id="tnbrl-factionid" class="tnbrl-input" placeholder="Faction ID" style="width:100px;" value="${esc(GM_getValue('tnbrl_factionid',''))}">
+      ${usingBuiltIn
+        ? `<div class="tnbrl-muted" style="font-size:11px; margin-bottom:8px;">Using built-in API credentials — no setup needed.</div>`
+        : `<div class="tnbrl-row">
+            <input id="tnbrl-apikey" class="tnbrl-input" placeholder="Torn API key" style="width:200px;" value="${esc(GM_getValue('tnbrl_apikey',''))}">
+            <input id="tnbrl-factionid" class="tnbrl-input" placeholder="Faction ID" style="width:100px;" value="${esc(GM_getValue('tnbrl_factionid',''))}">
+           </div>`
+      }
+      <div class="tnbrl-row" style="margin-top:6px;">
         <button class="tnbrl-btn primary" id="tnbrl-fetch-roster">↻ Refresh roster</button>
       </div>
       <div id="tnbrl-roster-progress" class="tnbrl-muted" style="font-size:11px; margin-top:6px;"></div>
@@ -666,6 +683,7 @@
     html += `<div class="tnbrl-card">
       <div class="tnbrl-label tnbrl-danger">Danger zone</div>
       <div class="tnbrl-row" style="margin-top:6px;">
+        <button class="tnbrl-btn" id="tnbrl-change-pass">🔑 Change passphrase</button>
         <button class="tnbrl-btn danger" id="tnbrl-clear-results">Clear all race results</button>
         <button class="tnbrl-btn danger" id="tnbrl-clear-all">Reset everything</button>
       </div>
@@ -674,11 +692,26 @@
     body.innerHTML = html;
 
     // ---- Event handlers ----
+    document.getElementById('tnbrl-change-pass').addEventListener('click', async () => {
+      const current = prompt('Enter your current passphrase to confirm:');
+      if (current === null) return;
+      const currentHash = await sha256(current.trim());
+      if (currentHash !== GM_getValue(K.STEWARD, '')) { alert('Wrong — current passphrase didn\'t match.'); return; }
+      const next = prompt('Enter your new passphrase:');
+      if (!next || !next.trim()) return;
+      const confirm2 = prompt('Type the new passphrase again to confirm:');
+      if (next.trim() !== confirm2?.trim()) { alert('They didn\'t match — passphrase not changed.'); return; }
+      GM_setValue(K.STEWARD, await sha256(next.trim()));
+      alert('Passphrase updated.');
+    });
+
+    // ---- Event handlers ----
     document.getElementById('tnbrl-fetch-roster').addEventListener('click', async () => {
-      const apiKey = document.getElementById('tnbrl-apikey').value.trim();
-      const factionId = document.getElementById('tnbrl-factionid').value.trim();
-      if (!apiKey || !factionId) { alert('Need both an API key and faction ID.'); return; }
-      GM_setValue('tnbrl_apikey', apiKey); GM_setValue('tnbrl_factionid', factionId);
+      const apiKey    = BUILT_IN_API_KEY    || document.getElementById('tnbrl-apikey')?.value.trim()    || GM_getValue('tnbrl_apikey', '');
+      const factionId = BUILT_IN_FACTION_ID || document.getElementById('tnbrl-factionid')?.value.trim() || GM_getValue('tnbrl_factionid', '');
+      if (!apiKey || !factionId) { alert('Need both an API key and faction ID — fill them in above.'); return; }
+      if (!BUILT_IN_API_KEY)    GM_setValue('tnbrl_apikey', apiKey);
+      if (!BUILT_IN_FACTION_ID) GM_setValue('tnbrl_factionid', factionId);
       const prog = document.getElementById('tnbrl-roster-progress');
       prog.textContent = 'Starting…';
       const result = await fetchRoster(apiKey, factionId, (done, total) => {
