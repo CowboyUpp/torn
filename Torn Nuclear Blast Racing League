@@ -810,7 +810,13 @@
      element class/ID so I can hard-code it.
      ============================================================ */
   function findHeader() {
-    for (const sel of ['.content-title h4','.content-title h1','.title-black','h1','.linksGroup h4']) {
+    // Torn's racing page uses a CSS-modules class like "titleContainer___dTehe"
+    // — the hash suffix changes with builds, so we match on the base name only.
+    const byBase = document.querySelector('[class*="titleContainer"]');
+    if (byBase) return byBase;
+
+    // Fallbacks in case the class name changes significantly
+    for (const sel of ['.content-title h4', '.content-title h1', 'h4.t-overflow', '.title-black']) {
       const el = document.querySelector(sel);
       if (el && el.textContent.trim()) return el;
     }
@@ -827,7 +833,9 @@
     btn.id = 'tnbrl-btn';
     btn.title = 'Open the Nuclear Blast Racing League panel';
     btn.innerHTML = `<span class="tnbrl-flag">🏁</span> League`;
-    header.appendChild(btn);
+    // Insert after the title container rather than inside it, so we don't
+    // disrupt Torn's own flex layout inside that div.
+    header.parentNode.insertBefore(btn, header.nextSibling);
     btn.addEventListener('click', openModal);
   }
 
