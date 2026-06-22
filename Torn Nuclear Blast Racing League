@@ -1,19 +1,17 @@
 // ==UserScript==
 // @name         Torn Nuclear Blast Racing League
 // @namespace    torn.com
-// @version      3.1
-// @description  Multi-track faction racing league: skill-bracket teams (steward-assigned snake draft OR open self-signup), race result capture, points standings, real-time sync via a Cloudflare Worker backend, tooltip help throughout.
-// @author       cowboyup
-// @match        https://www.torn.com/*
+// @version      4.0
+// @description  Faction racing league: pre-assigned skill-bracket teams, race result capture, points standings. No backend required.
+// @author       CowboyUpp
+// @match        https://www.torn.com/page.php*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
-// @grant        GM_xmlhttpRequest
-// @connect      *
 // @grant        unsafeWindow
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/583776/Torn%20Nuclear%20Blast%20Racing%20League.user.js
-// @updateURL https://update.greasyfork.org/scripts/583776/Torn%20Nuclear%20Blast%20Racing%20League.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/583776/Torn%20Nuclear%20Blast%20Racing%20League.user.js
+// @updateURL    https://update.greasyfork.org/scripts/583776/Torn%20Nuclear%20Blast%20Racing%20League.meta.js
 // ==/UserScript==
 
 (function () {
@@ -22,232 +20,98 @@
   const $ = unsafeWindow.$;
 
   /* ============================================================
-     CONFIG / STORAGE KEYS
+     ONLY RUNS ON RACING PAGES
+     sid=racing, tab=cars, tab=parts, tab=race, tab=customrace,
+     tab=stats — nothing else
      ============================================================ */
-  const K_API_KEY       = 'trl_api_key';
-  const K_FACTION_ID    = 'trl_faction_id';
-  const K_STEWARD_HASH  = 'trl_steward_hash';
-  const K_SERIES        = 'trl_series';        // { [id]: SeriesConfig } — local cache, mirrors backend
-  const K_TEAMS         = 'trl_teams';         // { [seriesId]: Team[] } — local cache, mirrors backend
-  const K_RESULTS       = 'trl_results';       // { [seriesId]: RaceResult[] } — local only, not yet synced
-  const K_ROSTER_CACHE  = 'trl_roster_cache';  // { time, members:[...] } — local cache, mirrors backend
-  const K_MY_NAME       = 'trl_my_name';       // this browser's identity for self-signup
-  const K_WORKER_CONFIG = 'trl_worker_config'; // { url, adminToken } — the Cloudflare Worker backend
-
-  const DEFAULT_POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
+  function isRacingPage() {
+    return /[?&]sid=racing/i.test(location.search);
+  }
 
   /* ============================================================
-     GENERIC STORAGE HELPERS
+     STORAGE HELPERS
      ============================================================ */
-  function loadJSON(key, fallback) {
+  function load(key, fallback) {
     try { return JSON.parse(GM_getValue(key, JSON.stringify(fallback))); }
     catch (e) { return fallback; }
   }
-  function saveJSON(key, value) { GM_setValue(key, JSON.stringify(value)); }
+  function save(key, value) { GM_setValue(key, JSON.stringify(value)); }
 
-  const getSeries       = () => loadJSON(K_SERIES, {});
-  const saveSeries      = (s) => saveJSON(K_SERIES, s);
-  const getTeams        = () => loadJSON(K_TEAMS, {});
-  const saveTeams       = (t) => saveJSON(K_TEAMS, t);
-  const getResults      = () => loadJSON(K_RESULTS, {});
-  const saveResults     = (r) => saveJSON(K_RESULTS, r);
-  const getRosterCache  = () => loadJSON(K_ROSTER_CACHE, { time: 0, members: [] });
-  const saveRosterCache = (c) => saveJSON(K_ROSTER_CACHE, c);
-  const getWorkerConfig  = () => loadJSON(K_WORKER_CONFIG, {});
-  const saveWorkerConfig = (c) => saveJSON(K_WORKER_CONFIG, c);
+  const K = {
+    STEWARD:  'tnbrl_steward_hash',
+    SERIES:   'tnbrl_series',   // { id, name, tracks:[{name,laps}], password, brackets, pointsTable }
+    TEAMS:    'tnbrl_teams',    // Team[]
+    RESULTS:  'tnbrl_results',  // RaceResult[]
+    ROSTER:   'tnbrl_roster',   // { time, members:[{name,skill}] }
+    THEME:    'tnbrl_theme',    // 'light'|'dark'
+  };
 
-  function uid(prefix) { return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-  function escapeHtml(s) { return (s || '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  const getSeries  = () => load(K.SERIES, null);
+  const saveSeries = (s) => save(K.SERIES, s);
+  const getTeams   = () => load(K.TEAMS, []);
+  const saveTeams  = (t) => save(K.TEAMS, t);
+  const getResults = () => load(K.RESULTS, []);
+  const saveResults= (r) => save(K.RESULTS, r);
+  const getRoster  = () => load(K.ROSTER, { time: 0, members: [] });
+  const saveRoster = (r) => save(K.ROSTER, r);
+  const getTheme   = () => GM_getValue(K.THEME, 'light');
+  const setTheme   = (t) => GM_setValue(K.THEME, t);
+
+  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  function esc(s) { return (s || '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   /* ============================================================
-     TOOLTIP HELPER
-     ============================================================ */
-  function tip(text) {
-    return `<span class="trl-tip" data-tooltip="${escapeHtml(text)}">ⓘ</span>`;
-  }
-
-  /* ============================================================
-     STEWARD PASSPHRASE (local UI gate)
-     This is still just a quick client-side lock to keep casual
-     faction members out of the Steward tab. The REAL security
-     boundary is now the Worker's ADMIN_TOKEN, checked server-side
-     on every write — that one can't be bypassed from devtools.
+     STEWARD PASSPHRASE (client-side UI lock only)
      ============================================================ */
   async function sha256(str) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
   }
 
   let stewardUnlocked = false;
 
-  async function trySetOrCheckSteward(pass) {
-    const stored = GM_getValue(K_STEWARD_HASH, '');
+  async function checkSteward(pass) {
+    const stored = GM_getValue(K.STEWARD, '');
     const hash = await sha256(pass);
-    if (!stored) { GM_setValue(K_STEWARD_HASH, hash); stewardUnlocked = true; return { ok: true, firstTime: true }; }
-    if (stored === hash) { stewardUnlocked = true; return { ok: true, firstTime: false }; }
-    return { ok: false };
-  }
-
-  /* ============================================================
-     CLOUDFLARE WORKER BACKEND
-     All of this is optional — if no URL is configured, every
-     function below degrades gracefully and the script falls back
-     to the local-only behavior. Once a URL is set, the Worker
-     becomes the source of truth for series/roster/teams; claims
-     are validated and serialized server-side via Durable Objects.
-     ============================================================ */
-  function gmRequest(opts) {
-    return new Promise((resolve, reject) => {
-      if (typeof GM_xmlhttpRequest === 'undefined') { reject(new Error('GM_xmlhttpRequest unavailable')); return; }
-      GM_xmlhttpRequest({ ...opts, onload: resolve, onerror: reject, ontimeout: () => reject(new Error('timeout')) });
-    });
-  }
-
-  async function apiGetRaw(path) {
-    const cfg = getWorkerConfig();
-    if (!cfg.url) return null;
-    try {
-      const res = await gmRequest({ method: 'GET', url: `${cfg.url}${path}` });
-      if (res.status >= 400) return null;
-      return JSON.parse(res.responseText);
-    } catch (e) { return null; }
-  }
-
-  async function apiPostRaw(path, body, adminRequired) {
-    const cfg = getWorkerConfig();
-    if (!cfg.url) return { ok: false, message: 'No league server connected (🔌 Connect, top of this window).' };
-    const headers = { 'Content-Type': 'application/json' };
-    if (adminRequired) {
-      if (!cfg.adminToken) return { ok: false, message: 'Steward admin token not set (Steward tab).' };
-      headers['Authorization'] = `Bearer ${cfg.adminToken}`;
-    }
-    try {
-      const res = await gmRequest({ method: 'POST', url: `${cfg.url}${path}`, headers, data: JSON.stringify(body || {}) });
-      let parsed = {};
-      try { parsed = JSON.parse(res.responseText); } catch (e) {}
-      if (res.status >= 400) return { ok: false, message: parsed.error || `Server error (HTTP ${res.status})` };
-      return { ok: true, data: parsed };
-    } catch (e) { return { ok: false, message: 'Request failed: ' + (e && e.message ? e.message : e) }; }
-  }
-
-  const apiGetTeams        = (seriesId) => apiGetRaw(`/api/${seriesId}/teams`);
-  const apiGetRoster       = (seriesId) => apiGetRaw(`/api/${seriesId}/roster`);
-  const apiGetSeries       = (seriesId) => apiGetRaw(`/api/${seriesId}/series`);
-  const apiClaim           = (seriesId, name, teamId, bracket) => apiPostRaw(`/api/${seriesId}/claim`, { name, teamId, bracket });
-  const apiRelease         = (seriesId, name, teamId) => apiPostRaw(`/api/${seriesId}/release`, { name, teamId });
-  const apiSetTeams        = (seriesId, teams) => apiPostRaw(`/api/${seriesId}/admin/teams`, { teams }, true);
-  const apiSetRoster       = (seriesId, members, brackets) => apiPostRaw(`/api/${seriesId}/admin/roster`, { members, brackets }, true);
-  const apiSetSeries       = (seriesId, series) => apiPostRaw(`/api/${seriesId}/admin/series`, { series }, true);
-  const apiRegistryReg     = (id, name, active) => apiPostRaw('/api/_registry/register', { id, name, active }, true);
-  const apiRegistryRemove  = (id) => apiPostRaw('/api/_registry/remove', { id }, true);
-
-  async function apiRegistryList() {
-    const resp = await apiGetRaw('/api/_registry/list');
-    return resp && resp.series ? resp.series : [];
-  }
-
-  function connectToBackend() {
-    const cur = getWorkerConfig().url || '';
-    const url = prompt("Paste the league server URL your steward shared with you (e.g. https://your-worker.workers.dev):", cur);
-    if (url === null) return;
-    const cfg = getWorkerConfig();
-    cfg.url = url.trim().replace(/\/+$/, '');
-    saveWorkerConfig(cfg);
-    populateSeriesSelect().then(() => renderTab());
-  }
-
-  /** Pulls series metadata + roster + teams for one series from the
-   * Worker and merges them into local storage. No-ops silently if
-   * no Worker is configured. */
-  async function loadSeriesFromBackend(seriesId) {
-    if (!seriesId) return;
-    const cfg = getWorkerConfig();
-    if (!cfg.url) return;
-
-    const seriesResp = await apiGetSeries(seriesId);
-    if (seriesResp && seriesResp.series) {
-      const all = getSeries();
-      all[seriesId] = seriesResp.series;
-      saveSeries(all);
-    }
-
-    const rosterResp = await apiGetRoster(seriesId);
-    if (rosterResp && rosterResp.members && rosterResp.members.length) {
-      saveRosterCache({ time: Date.now(), members: rosterResp.members });
-      const all = getSeries();
-      if (all[seriesId] && rosterResp.brackets) { all[seriesId].brackets = rosterResp.brackets; saveSeries(all); }
-    }
-
-    const teamsResp = await apiGetTeams(seriesId);
-    if (teamsResp && teamsResp.teams) {
-      const all = getTeams();
-      all[seriesId] = teamsResp.teams;
-      saveTeams(all);
-    }
-  }
-
-  /* ============================================================
-     FACTION ROSTER + RACING SKILL  (Torn API, steward-only)
-     ============================================================ */
-  async function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-  async function fetchWithRetry(url, retries = 3, backoff = 2000) {
-    let wait = backoff;
-    for (let i = 0; i < retries; i++) {
-      try {
-        const res = await fetch(url + (url.includes('?') ? '&' : '?') + 'comment=TRL_League_v3');
-        const d = await res.json();
-        if (d.error && (d.error.code === 5 || d.error.code === 8)) { await delay(wait); wait *= 2; continue; }
-        return d;
-      } catch (e) { await delay(1000); }
-    }
-    return null;
-  }
-
-  async function refreshRoster(apiKey, factionId, onProgress) {
-    const factionData = await fetchWithRetry(`https://api.torn.com/faction/${factionId}?selections=basic&key=${apiKey}`);
-    if (!factionData || factionData.error) return { error: true, message: factionData?.error?.error || 'API request failed' };
-
-    const entries = Object.entries(factionData.members || {});
-    const members = entries.map(([id, m]) => ({ id, name: m.name, position: m.position, skill: 0 }));
-
-    for (let i = 0; i < members.length; i++) {
-      const d = await fetchWithRetry(`https://api.torn.com/user/${members[i].id}?selections=personalstats&key=${apiKey}`);
-      if (d && d.personalstats) members[i].skill = Number(d.personalstats.racingskill) || 0;
-      if (onProgress) onProgress(i + 1, members.length);
-      await delay(650);
-    }
-
-    const cache = { time: Date.now(), members };
-    saveRosterCache(cache);
-    return { error: false, members };
+    if (!stored) { GM_setValue(K.STEWARD, hash); stewardUnlocked = true; return true; }
+    if (stored === hash) { stewardUnlocked = true; return true; }
+    return false;
   }
 
   /* ============================================================
      SKILL BRACKETS
+     Based on the actual Nuclear Blast roster (99 members):
+     Rookie < 11  → 32 members
+     Skilled 11–23 → 34 members
+     Pro ≥ 24     → 33 members
+     Adjust rookieMax / skilledMax in the series config if needed.
      ============================================================ */
+  const BRACKET_COLOR = { Rookie: '#16a34a', Skilled: '#2563eb', Pro: '#b45309' };
+
   function bracketOf(skill, brackets) {
     if (skill < brackets.rookieMax) return 'Rookie';
     if (skill < brackets.skilledMax) return 'Skilled';
     return 'Pro';
   }
-  const BRACKET_COLOR = { Rookie: '#16a34a', Skilled: '#2563eb', Pro: '#b45309' };
 
   /* ============================================================
-     STEWARD-ASSIGNED SNAKE DRAFT
+     SNAKE DRAFT TEAM BUILDER
+     Sort roster by skill desc, deal into teams alternating
+     direction each pass (Pro → Skilled → Rookie).
      ============================================================ */
   function buildTeams(roster, teamCount, teamSize, brackets) {
     const tiers = { Pro: [], Skilled: [], Rookie: [] };
     roster.forEach(m => tiers[bracketOf(m.skill, brackets)].push(m));
     Object.values(tiers).forEach(arr => arr.sort((a, b) => b.skill - a.skill));
 
-    const teams = Array.from({ length: teamCount }, (_, i) => ({ id: uid('team'), name: `Team ${i + 1}`, members: [] }));
+    const teams = Array.from({ length: teamCount }, (_, i) => ({
+      id: uid(), name: `Team ${i + 1}`, members: []
+    }));
 
     ['Pro', 'Skilled', 'Rookie'].forEach(bracket => {
       const pool = tiers[bracket];
-      let idx = 0, dir = 1, guard = 0, p = 0;
-      while (p < pool.length && guard < pool.length * teamCount * 3) {
-        guard++;
+      let idx = 0, dir = 1, p = 0, guard = 0;
+      while (p < pool.length && guard++ < pool.length * teamCount * 3) {
         const team = teams[idx];
         if (team.members.length < teamSize) {
           team.members.push({ ...pool[p], bracket });
@@ -263,962 +127,721 @@
   }
 
   /* ============================================================
-     OPEN SELF-SIGNUP TEAMS — local fallback logic
-     Used directly when no Worker is connected. When a Worker IS
-     connected, claims go through apiClaim/apiRelease instead (see
-     the Sign Up tab handlers below) and these are just the offline
-     fallback so the feature still works for a single browser.
+     TORN API ROSTER FETCH (steward only, runs once per season)
+     Pulls Racing Skill for every faction member via the API.
+     Rate-limited to ~90 requests/min to stay well within limits.
      ============================================================ */
-  function createOpenTeams(teamCount, slotShape) {
-    return Array.from({ length: teamCount }, (_, i) => ({
-      id: uid('team'), name: `Team ${i + 1}`,
-      slotShape: { ...slotShape },
-      members: [],
-    }));
-  }
+  async function fetchRoster(apiKey, factionId, onProgress) {
+    async function apiFetch(url) {
+      try {
+        const r = await fetch(url + (url.includes('?') ? '&' : '?') + 'comment=TNBRL_v4');
+        return await r.json();
+      } catch (e) { return null; }
+    }
 
-  function claimSlotLocal(seriesId, teamId, bracket) {
-    const myName = GM_getValue(K_MY_NAME, '');
-    if (!myName) return { ok: false, message: 'Pick who you are first (top of this tab).' };
+    const faction = await apiFetch(`https://api.torn.com/faction/${factionId}?selections=basic&key=${apiKey}`);
+    if (!faction || faction.error) return { error: faction?.error?.error || 'API call failed' };
 
-    const rosterMember = getRosterCache().members.find(m => m.name.toLowerCase() === myName.toLowerCase());
-    if (!rosterMember) return { ok: false, message: "You're not in the cached roster — ask the steward to refresh it." };
+    const entries = Object.entries(faction.members || {});
+    const members = entries.map(([id, m]) => ({ id, name: m.name, skill: 0 }));
 
-    const series = getSeries()[seriesId];
-    const myBracket = bracketOf(rosterMember.skill, series.brackets);
-    if (myBracket !== bracket) return { ok: false, message: `You're bracketed as ${myBracket}, not ${bracket}.` };
+    for (let i = 0; i < members.length; i++) {
+      await new Promise(r => setTimeout(r, 680));
+      const d = await apiFetch(`https://api.torn.com/user/${members[i].id}?selections=personalstats&key=${apiKey}`);
+      if (d && d.personalstats) members[i].skill = Number(d.personalstats.racingskill) || 0;
+      if (onProgress) onProgress(i + 1, members.length);
+    }
 
-    const allTeams = getTeams();
-    const teams = allTeams[seriesId] || [];
-    const alreadyOn = teams.find(t => t.members.some(m => m.name.toLowerCase() === myName.toLowerCase()));
-    if (alreadyOn) return { ok: false, message: `You're already on ${alreadyOn.name} — leave that slot first to switch.` };
-
-    const team = teams.find(t => t.id === teamId);
-    if (!team) return { ok: false, message: 'Team not found.' };
-    const filled = team.members.filter(m => m.bracket === bracket).length;
-    const cap = (team.slotShape && team.slotShape[bracket]) || 0;
-    if (filled >= cap) return { ok: false, message: 'That slot just got taken — pick another.' };
-
-    team.members.push({ name: rosterMember.name, bracket, skill: rosterMember.skill, claimedAt: Date.now() });
-    saveTeams(allTeams);
-    return { ok: true };
-  }
-
-  function releaseSlotLocal(seriesId, teamId) {
-    const myName = GM_getValue(K_MY_NAME, '');
-    const allTeams = getTeams();
-    const team = (allTeams[seriesId] || []).find(t => t.id === teamId);
-    if (!team) return;
-    team.members = team.members.filter(m => m.name.toLowerCase() !== myName.toLowerCase());
-    saveTeams(allTeams);
-  }
-
-  function pickIdentity(rerender) {
-    const roster = getRosterCache().members;
-    if (!roster.length) { alert('No roster cached yet — connect to the league server (🔌 Connect) or ask your steward to refresh it.'); return; }
-    const name = prompt("Type your exact Torn name as it appears in the faction roster:", GM_getValue(K_MY_NAME, ''));
-    if (!name) return;
-    const match = roster.find(m => m.name.toLowerCase() === name.trim().toLowerCase());
-    if (!match) { alert("Name not found in the cached roster. Check spelling, or ask the steward to refresh it."); return; }
-    GM_setValue(K_MY_NAME, match.name);
-    if (rerender) rerender();
-  }
-
-  let signupPollInterval = null;
-  function stopSignupPolling() { if (signupPollInterval) { clearInterval(signupPollInterval); signupPollInterval = null; } }
-  function startSignupPolling(body) {
-    stopSignupPolling();
-    const cfg = getWorkerConfig();
-    if (!cfg.url) return;
-    signupPollInterval = setInterval(async () => {
-      if (!document.body.contains(body)) { stopSignupPolling(); return; }
-      await loadSeriesFromBackend(currentSeriesId);
-      renderSignUpTab(body);
-    }, 10000);
+    return { members };
   }
 
   /* ============================================================
      RACE RESULT CAPTURE
-     Still local-only — this part hasn't moved to the Worker yet.
-     Standings/Races tabs reflect whatever races THIS browser has
-     captured; two people's local race lists can differ until that
-     gets synced too. Flagging this as a known remaining gap.
+     Hooks Torn's racing AJAX, decodes every racer's interval
+     data (same technique as the Speed & Lap Logger), assigns
+     finish positions, and scores points.
+     Caveat: status >= 3 is assumed "usable data" but hasn't been
+     verified live — use the manual capture button if the auto-
+     banner doesn't fire at race end.
      ============================================================ */
-  function normalizeTrackName(titleText) {
-    if (!titleText) return '';
-    return titleText
-      .split(/\s*-\s*(Race (started|finished|will Start|in progress)|Waiting|Cancelled|Starts:|lap|Lap|\d+\s+seconds?)/i)[0]
+  function normalizeTrack(title) {
+    if (!title) return '';
+    return title
+      .split(/\s*-\s*(Race (started|finished|will Start|in progress)|Waiting|Cancelled|Starts:|lap|Lap|\d+\s+sec)/i)[0]
       .replace(/\s*-\s*\d+\s*laps?.*$/i, '')
       .replace(/\s*-\s*Starts:.*$/i, '')
-      .trim() || titleText.trim();
+      .trim();
   }
 
-  function decodeAllRacers(data) {
+  function decodeRacers(data) {
     const cars = data?.raceData?.cars;
-    const trackData = data?.raceData?.trackData;
-    if (!cars || !trackData || !trackData.intervals) return [];
-    const trackIntervals = trackData.intervals.length;
+    const intervals = data?.raceData?.trackData?.intervals;
+    if (!cars || !intervals) return [];
 
     const out = [];
-    for (const [playerName, encoded] of Object.entries(cars)) {
+    for (const [name, encoded] of Object.entries(cars)) {
       try {
         const decoded = atob(encoded);
-        const intervals = decoded.split(',').map(Number).filter(n => !isNaN(n));
-        const completedLaps = Math.floor(intervals.length / trackIntervals);
-        const totalMs = Math.round(intervals.reduce((a, b) => a + b, 0) * 1000);
-        if (totalMs > 0) out.push({ name: playerName, totalMs, completedLaps });
-      } catch (e) { /* skip unparseable entry */ }
+        const laps = decoded.split(',').map(Number).filter(n => !isNaN(n));
+        const lapsCompleted = Math.floor(laps.length / intervals.length);
+        const totalMs = Math.round(laps.reduce((a, b) => a + b, 0) * 1000);
+        if (totalMs > 0) out.push({ name, totalMs, lapsCompleted });
+      } catch (e) {}
     }
-    out.sort((a, b) => b.completedLaps - a.completedLaps || a.totalMs - b.totalMs);
+    out.sort((a, b) => b.lapsCompleted - a.lapsCompleted || a.totalMs - b.totalMs);
     out.forEach((r, i) => { r.position = i + 1; });
     return out;
   }
 
-  function raceKeyFor(track, racers) {
-    const names = racers.map(r => r.name).sort().join(',');
-    return `${track}::${names}::${racers.length}`;
-  }
-
-  function pointsForPosition(pos, table) { return table[pos - 1] ?? 0; }
-
-  function findMatchingSeries(track) {
+  function logRace(track, racers) {
     const series = getSeries();
-    return Object.values(series).filter(s => s.active && s.tracks.some(t => t.name.toLowerCase() === track.toLowerCase()));
-  }
-
-  function captureRace(seriesId, track, racers) {
-    const series = getSeries()[seriesId];
-    if (!series) return { ok: false, message: 'Series not found.' };
-
-    const results = getResults();
-    if (!results[seriesId]) results[seriesId] = [];
-
-    const key = raceKeyFor(track, racers);
-    if (results[seriesId].some(r => r.key === key)) {
-      return { ok: false, message: 'This exact race is already logged for this series.' };
+    if (!series) return { ok: false, msg: 'No series set up yet — open the Steward tab.' };
+    if (!series.tracks.some(t => t.name.toLowerCase() === track.toLowerCase())) {
+      return { ok: false, msg: `"${track}" isn't in this series' track list.` };
     }
 
-    const roster = getRosterCache().members;
-    const teams = (getTeams()[seriesId] || []);
-    const nameToTeam = {};
-    teams.forEach(t => t.members.forEach(m => { nameToTeam[m.name.toLowerCase()] = t; }));
-    const nameToSkill = {};
-    roster.forEach(m => { nameToSkill[m.name.toLowerCase()] = m.skill; });
+    const results = getResults();
+    const key = `${track}::${racers.map(r => r.name).sort().join(',')}`;
+    if (results.some(r => r.key === key)) return { ok: false, msg: 'This race is already logged.' };
+
+    const roster = getRoster().members;
+    const teams = getTeams();
+    const byName = n => roster.find(m => m.name.toLowerCase() === n.toLowerCase());
+    const teamOf = n => teams.find(t => t.members.some(m => m.name.toLowerCase() === n.toLowerCase()));
+    const pts = series.pointsTable;
 
     const standings = racers.map(r => {
-      const skill = nameToSkill[r.name.toLowerCase()];
-      const bracket = skill !== undefined ? bracketOf(skill, series.brackets) : 'Unranked';
-      const team = nameToTeam[r.name.toLowerCase()];
+      const member = byName(r.name);
+      const bracket = member ? bracketOf(member.skill, series.brackets) : 'Unranked';
+      const team = teamOf(r.name);
       return {
-        name: r.name, totalMs: r.totalMs, position: r.position,
-        points: pointsForPosition(r.position, series.pointsTable),
-        bracket, teamId: team ? team.id : null,
+        name: r.name, position: r.position, totalMs: r.totalMs,
+        points: pts[r.position - 1] ?? 0, bracket,
+        teamId: team ? team.id : null,
       };
     });
 
-    results[seriesId].push({ id: uid('race'), key, track, capturedAt: Date.now(), standings });
+    results.push({ id: uid(), key, track, capturedAt: Date.now(), standings });
     saveResults(results);
     return { ok: true, count: standings.length };
   }
 
   /* ============================================================
-     STANDINGS COMPUTATION
+     STANDINGS
      ============================================================ */
-  function computeStandings(seriesId) {
-    const races = getResults()[seriesId] || [];
-    const teams = getTeams()[seriesId] || [];
+  function standings() {
+    const results = getResults();
+    const teams = getTeams();
+    const drivers = {}, teamPts = {};
+    teams.forEach(t => { teamPts[t.id] = 0; });
 
-    const indiv = {};
-    const teamPoints = {};
-    teams.forEach(t => { teamPoints[t.id] = 0; });
-
-    races.forEach(race => {
+    results.forEach(race => {
       race.standings.forEach(s => {
-        if (!indiv[s.name]) indiv[s.name] = { name: s.name, bracket: s.bracket, points: 0, races: 0 };
-        indiv[s.name].points += s.points;
-        indiv[s.name].races += 1;
-        if (s.teamId && teamPoints[s.teamId] !== undefined) teamPoints[s.teamId] += s.points;
+        if (!drivers[s.name]) drivers[s.name] = { name: s.name, bracket: s.bracket, points: 0, races: 0 };
+        drivers[s.name].points += s.points;
+        drivers[s.name].races += 1;
+        if (s.teamId && teamPts[s.teamId] !== undefined) teamPts[s.teamId] += s.points;
       });
     });
 
-    const indivList = Object.values(indiv).sort((a, b) => b.points - a.points);
-    const teamList = teams.map(t => ({ ...t, points: teamPoints[t.id] || 0 })).sort((a, b) => b.points - a.points);
+    const driverList = Object.values(drivers).sort((a, b) => b.points - a.points);
+    const teamList = teams.map(t => ({ ...t, points: teamPts[t.id] || 0 })).sort((a, b) => b.points - a.points);
+    return { driverList, teamList };
+  }
 
-    return { indivList, teamList, raceCount: races.length };
+  function fmtMs(ms) {
+    const m = Math.floor(ms / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    const cs = Math.floor((ms % 1000) / 10);
+    return `${m}m ${String(s).padStart(2,'0')}.${String(cs).padStart(2,'0')}s`;
+  }
+
+  function downloadCsv(csv, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = name; a.click();
   }
 
   /* ============================================================
-     STYLES
+     STYLES — light default, dark class on modal
      ============================================================ */
   GM_addStyle(`
-    #trl-btn { display:inline-block; margin-left:10px; font-size:18px; line-height:1; cursor:pointer; opacity:.7; vertical-align:middle; user-select:none; transition: opacity .15s ease, transform .15s ease; }
-    #trl-btn:hover { opacity:1; transform: scale(1.12); }
-    #trl-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 999998; display:flex; align-items:center; justify-content:center; padding: 12px; box-sizing: border-box; }
-    #trl-modal { width: 94vw; max-width: 920px; height: 82vh; max-height: 660px; background: #1a2236; color: #f8fafc; border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.6); display: flex; flex-direction: column; font-family: Arial, sans-serif; font-size: 13px; overflow: hidden; }
-    #trl-tabs { display:flex; gap:4px; padding: 10px 14px 0; border-bottom: 1px solid #44546b; flex-wrap: wrap; }
-    .trl-tab { padding: 8px 14px; cursor: pointer; border-radius: 6px 6px 0 0; color: #b3bdd1; font-weight: 600; font-size: 12px; }
-    .trl-tab.active { background: #243044; color: #fff; }
-    #trl-body { flex: 1; overflow-y: auto; padding: 14px; }
-    #trl-head { display:flex; align-items:center; gap:8px; padding: 12px 14px; border-bottom: 1px solid #44546b; background:#243044; flex-wrap: wrap; }
-    #trl-head button { background:none; border:none; color:#b3bdd1; cursor:pointer; font-size:14px; }
-    .trl-card { background:#243044; border:1px solid #44546b; border-radius:8px; padding:12px; margin-bottom:10px; }
-    .trl-btn { padding:6px 12px; border-radius:6px; border:1px solid #5b6a85; background:#374151; color:#f8fafc; font-size:12px; cursor:pointer; font-weight:600; }
-    .trl-btn.primary { background:#2563eb; border-color:#2563eb; }
-    .trl-btn.danger { background:#7f1d1d; border-color:#991b1b; }
-    .trl-table { width:100%; border-collapse: collapse; font-size: 12px; }
-    .trl-table th { text-align:left; color:#b3bdd1; padding:6px 8px; border-bottom:1px solid #44546b; }
-    .trl-table td { padding:6px 8px; border-bottom:1px solid #2c3a54; }
-    .trl-badge { font-size:10px; font-weight:700; padding:2px 6px; border-radius:10px; color:#fff; }
-    .trl-input, .trl-select { background:#161e2e; border:1px solid #5b6a85; color:#f8fafc; padding:6px 8px; border-radius:6px; font-size:12px; }
-    #trl-capture-banner { position: fixed; bottom: 220px; right: 16px; z-index: 99999; background:#243044; border:1px solid #44546b; border-radius:8px; padding:10px; color:#f8fafc; font-family: Arial, sans-serif; font-size:12px; max-width:260px; box-shadow:0 4px 14px rgba(0,0,0,.4); }
-    .trl-tip { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:#38bdf8; color:#0a1628; font-size:11px; font-weight:800; cursor:help; margin-left:5px; vertical-align:middle; }
-    #trl-tooltip-bubble { position: fixed; z-index: 2000000; display:none; background:#05070d; color:#fff; padding:8px 11px; border-radius:8px; font-size:12px; line-height:1.45; font-family: Arial, sans-serif; box-shadow:0 6px 20px rgba(0,0,0,.6); border:1px solid #5b6a85; pointer-events:none; }
-    #trl-tooltip-bubble::after { content:''; position:absolute; left: var(--arrow-left, 16px); bottom:-6px; transform: translateX(-50%); border:6px solid transparent; border-top-color:#05070d; }
-    #trl-tooltip-bubble[data-arrow="top"]::after { bottom:auto; top:-6px; border-top-color:transparent; border-bottom-color:#05070d; }
+    #tnbrl-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      margin-left: 10px; padding: 3px 9px;
+      border: 2px solid #c0a060; border-radius: 12px;
+      background: linear-gradient(135deg, #f5e6c0 0%, #e8d090 50%, #f5e6c0 100%);
+      color: #5a3a0a; font-weight: 700; font-size: 13px; cursor: pointer;
+      box-shadow: inset 0 1px 2px rgba(255,255,255,.6), 0 1px 3px rgba(0,0,0,.25);
+      vertical-align: middle; user-select: none; line-height: 1.3;
+      transition: filter .15s, transform .1s;
+    }
+    #tnbrl-btn:hover { filter: brightness(1.08); transform: scale(1.04); }
+    #tnbrl-btn .tnbrl-flag { font-size: 15px; }
+    #tnbrl-btn::before {
+      content: '';
+      display: inline-block; width: 12px; height: 12px;
+      background:
+        repeating-conic-gradient(#5a3a0a 0% 25%, #e8d090 0% 50%) 0 0 / 6px 6px;
+      border-radius: 2px; border: 1px solid #5a3a0a; flex-shrink: 0;
+    }
+
+    #tnbrl-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:999998; display:flex; align-items:center; justify-content:center; padding:12px; box-sizing:border-box; }
+
+    #tnbrl-modal {
+      --bg:#f4f5f7; --bg-card:#fff; --bg-input:#fff; --bg-head:#eef0f4;
+      --border:#d0d4db; --text:#1a1f2e; --muted:#667085; --link:#2563eb;
+      --row-alt:#f9fafb; --danger:#dc2626; --warn-bg:#fff7ed; --warn-border:#f59e0b;
+      width:94vw; max-width:900px; height:82vh; max-height:640px;
+      background:var(--bg); color:var(--text); border:1px solid var(--border);
+      border-radius:12px; box-shadow:0 12px 36px rgba(0,0,0,.3);
+      display:flex; flex-direction:column; font-family:Arial,sans-serif; font-size:13px; overflow:hidden;
+    }
+    #tnbrl-modal.dark {
+      --bg:#1a2236; --bg-card:#243044; --bg-input:#161e2e; --bg-head:#1f2d40;
+      --border:#3a4a62; --text:#f0f4f8; --muted:#8fa0b8; --link:#60a5fa;
+      --row-alt:#1f2940; --danger:#f87171; --warn-bg:#3f2d12; --warn-border:#92400e;
+    }
+    #tnbrl-head { display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--border); background:var(--bg-head); flex-wrap:wrap; }
+    #tnbrl-head button { background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; padding:2px 4px; }
+    #tnbrl-head button:hover { color:var(--text); }
+    #tnbrl-tabs { display:flex; gap:3px; padding:8px 14px 0; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+    .tnbrl-tab { padding:7px 13px; cursor:pointer; border-radius:6px 6px 0 0; color:var(--muted); font-weight:600; font-size:12px; user-select:none; }
+    .tnbrl-tab:hover { color:var(--text); }
+    .tnbrl-tab.active { background:var(--bg-card); color:var(--text); }
+    #tnbrl-body { flex:1; overflow-y:auto; padding:14px; color:var(--text); }
+    .tnbrl-card { background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:10px; }
+    .tnbrl-btn { padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text); font-size:12px; cursor:pointer; font-weight:600; }
+    .tnbrl-btn:hover { filter:brightness(.95); }
+    .tnbrl-btn.primary { background:#2563eb; border-color:#2563eb; color:#fff; }
+    .tnbrl-btn.danger  { background:#dc2626; border-color:#dc2626; color:#fff; }
+    .tnbrl-input, .tnbrl-select { background:var(--bg-input); border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:6px; font-size:12px; width:100%; box-sizing:border-box; }
+    .tnbrl-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .tnbrl-table th { text-align:left; color:var(--muted); padding:6px 8px; border-bottom:1px solid var(--border); font-weight:600; }
+    .tnbrl-table td { padding:6px 8px; border-bottom:1px solid var(--border); }
+    .tnbrl-table tr:nth-child(even) td { background:var(--row-alt); }
+    .tnbrl-badge { font-size:10px; font-weight:700; padding:2px 7px; border-radius:10px; color:#fff; white-space:nowrap; }
+    .tnbrl-muted { color:var(--muted); }
+    .tnbrl-danger { color:var(--danger); }
+    .tnbrl-row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+    .tnbrl-label { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+    .tnbrl-warn { background:var(--warn-bg); border:1px solid var(--warn-border); border-radius:6px; padding:9px 12px; margin-bottom:10px; font-size:12px; }
+
+    #tnbrl-capture-banner {
+      position:fixed; bottom:200px; right:16px; z-index:99999;
+      background:#fff; border:1px solid #d0d4db; border-radius:8px; padding:12px;
+      color:#1a1f2e; font-family:Arial,sans-serif; font-size:12px;
+      max-width:260px; box-shadow:0 4px 14px rgba(0,0,0,.18);
+    }
+    .tnbrl-tip {
+      display:inline-flex; align-items:center; justify-content:center;
+      width:15px; height:15px; border-radius:50%; background:#2563eb; color:#fff;
+      font-size:10px; font-weight:800; cursor:help; margin-left:4px; vertical-align:middle; flex-shrink:0;
+    }
+    #tnbrl-tooltip {
+      position:fixed; z-index:2000000; display:none; max-width:220px;
+      background:#111; color:#fff; padding:8px 11px; border-radius:8px;
+      font-size:12px; line-height:1.45; font-family:Arial,sans-serif;
+      box-shadow:0 6px 20px rgba(0,0,0,.5); pointer-events:none;
+    }
   `);
 
   /* ============================================================
-     TOOLTIP BUBBLE (JS-positioned, viewport-clamped)
-     The old pure-CSS hover tooltip got clipped by the modal's own
-     scroll/overflow rules whenever a tip icon was near an edge.
-     This appends one shared bubble to <body> instead, so it's never
-     trapped by any ancestor's overflow, and clamps its position to
-     stay fully on-screen, flipping above/below as needed.
+     TOOLTIP (JS-positioned, viewport-clamped)
      ============================================================ */
   let tooltipEl = null;
-  function ensureTooltipEl() {
+  function ensureTip() {
     if (tooltipEl) return tooltipEl;
     tooltipEl = document.createElement('div');
-    tooltipEl.id = 'trl-tooltip-bubble';
+    tooltipEl.id = 'tnbrl-tooltip';
     document.body.appendChild(tooltipEl);
     return tooltipEl;
   }
-
-  function showTooltip(target) {
-    const text = target.getAttribute('data-tooltip');
+  function showTip(target) {
+    const text = target.getAttribute('data-tip');
     if (!text) return;
-    const el = ensureTooltipEl();
+    const el = ensureTip();
     el.textContent = text;
-    el.style.width = '220px';
     el.style.display = 'block';
-
-    const rect = target.getBoundingClientRect();
-    const margin = 8;
-    let left = rect.left + rect.width / 2 - 110;
-    if (left < margin) left = margin;
-    if (left + 220 > window.innerWidth - margin) left = window.innerWidth - margin - 220;
-
-    const bubbleHeight = el.offsetHeight;
-    const placeAbove = rect.top - bubbleHeight - 14 >= margin;
-    const top = placeAbove ? rect.top - bubbleHeight - 10 : rect.bottom + 10;
-    el.dataset.arrow = placeAbove ? 'bottom' : 'top';
-
+    const r = target.getBoundingClientRect(), m = 8, w = 220;
+    let left = r.left + r.width / 2 - w / 2;
+    left = Math.max(m, Math.min(left, window.innerWidth - w - m));
+    const h = el.offsetHeight;
+    const top = r.top - h - 10 >= m ? r.top - h - 10 : r.bottom + 10;
     el.style.left = left + 'px';
     el.style.top = top + 'px';
-
-    const arrowLeft = Math.max(12, Math.min(220 - 12, rect.left + rect.width / 2 - left));
-    el.style.setProperty('--arrow-left', arrowLeft + 'px');
   }
+  function hideTip() { if (tooltipEl) tooltipEl.style.display = 'none'; }
+  document.addEventListener('mouseover', e => { const t = e.target.closest && e.target.closest('.tnbrl-tip'); if (t) showTip(t); });
+  document.addEventListener('mouseout', e => { const t = e.target.closest && e.target.closest('.tnbrl-tip'); if (t) hideTip(); });
 
-  function hideTooltip() { if (tooltipEl) tooltipEl.style.display = 'none'; }
-
-  document.addEventListener('mouseover', (e) => {
-    const t = e.target.closest && e.target.closest('.trl-tip');
-    if (t) showTooltip(t);
-  });
-  document.addEventListener('mouseout', (e) => {
-    const t = e.target.closest && e.target.closest('.trl-tip');
-    if (t) hideTooltip();
-  });
+  function tip(text) { return `<span class="tnbrl-tip" data-tip="${esc(text)}">i</span>`; }
 
   /* ============================================================
-     MODAL UI
+     MODAL
      ============================================================ */
   let activeTab = 'standings';
-  let currentSeriesId = null;
-
-  /**
-   * Only the racing area should ever get this button — page.php?sid=racing
-   * and its subpages, nothing else on torn.com.
-   */
-  function isRacingPage() {
-    try {
-      const url = new URL(location.href);
-      return url.pathname.includes('page.php') && /sid=racing/i.test(url.search);
-    } catch (e) {
-      return /page\.php/i.test(location.href) && /sid=racing/i.test(location.href);
-    }
-  }
-
-  /**
-   * Best-guess selectors for Torn's racing-page title ("Torn City
-   * Raceway" etc.) — I can't browse a live Torn session to confirm
-   * the exact markup, so this tries a few likely candidates and
-   * falls back to a text-content search. If the icon lands in the
-   * wrong spot, right-click → Inspect on the header text and send
-   * over the element/class so this can be hard-coded precisely.
-   */
-  function findRacingHeader() {
-    const candidates = ['.content-title h4', '.content-title h1', 'h1.title-black', '#skip-to-content-link + div h4'];
-    for (const sel of candidates) {
-      const el = document.querySelector(sel);
-      if (el && el.textContent.trim().length) return el;
-    }
-    const heads = document.querySelectorAll('h1, h2, h3, h4');
-    for (const h of heads) {
-      if (/raceway|racing/i.test(h.textContent)) return h;
-    }
-    return null;
-  }
-
-  function injectButton() {
-    if (!isRacingPage()) return;
-    if (document.getElementById('trl-btn')) return;
-    const header = findRacingHeader();
-    if (!header) return; // header not rendered yet — the observer below will retry
-
-    const btn = document.createElement('span');
-    btn.id = 'trl-btn';
-    btn.title = 'Faction Racing League';
-    btn.textContent = '🏁';
-    header.appendChild(btn);
-    btn.addEventListener('click', () => {
-      if (document.getElementById('trl-backdrop')) { stopSignupPolling(); document.getElementById('trl-backdrop').remove(); }
-      else openModal();
-    });
-  }
 
   function openModal() {
-    const cfg = getWorkerConfig();
+    const existing = document.getElementById('tnbrl-backdrop');
+    if (existing) { existing.remove(); return; }
+
     const backdrop = document.createElement('div');
-    backdrop.id = 'trl-backdrop';
+    backdrop.id = 'tnbrl-backdrop';
     backdrop.innerHTML = `
-      <div id="trl-modal">
-        <div id="trl-head">
-          <span style="font-weight:700;">🏆 Faction Racing League</span>${tip('Tracks a multi-race series: skill-bracket teams, captured race results, and points standings for your faction.')}
-          <select id="trl-series-select" class="trl-select" style="margin-left:8px;"></select>
-          <div style="margin-left:auto; display:flex; gap:6px;">
-            <button class="trl-btn" id="trl-connect-btn">🔌 ${cfg.url ? 'Connected' : 'Connect'}</button>
-            <button class="trl-btn" id="trl-key-btn">🔑 Setup</button>
-            <button id="trl-close">✕</button>
+      <div id="tnbrl-modal">
+        <div id="tnbrl-head">
+          <span style="font-weight:700; font-size:14px;">🏁 Nuclear Blast Racing League</span>
+          <div style="margin-left:auto; display:flex; gap:5px; align-items:center;">
+            <button id="tnbrl-theme-btn" title="Toggle light/dark">${getTheme()==='dark'?'☀️':'🌙'}</button>
+            <button id="tnbrl-close">✕</button>
           </div>
         </div>
-        <div id="trl-tabs">
-          <div class="trl-tab" data-tab="standings">Standings</div>
-          <div class="trl-tab" data-tab="teams">Teams</div>
-          <div class="trl-tab" data-tab="signup">Sign Up</div>
-          <div class="trl-tab" data-tab="races">Races</div>
-          <div class="trl-tab" data-tab="steward">Steward</div>
+        <div id="tnbrl-tabs">
+          <div class="tnbrl-tab" data-tab="standings">Standings</div>
+          <div class="tnbrl-tab" data-tab="teams">Teams</div>
+          <div class="tnbrl-tab" data-tab="races">Races</div>
+          <div class="tnbrl-tab" data-tab="steward">Steward</div>
         </div>
-        <div id="trl-body"></div>
-      </div>
-    `;
+        <div id="tnbrl-body"></div>
+      </div>`;
     document.body.appendChild(backdrop);
-    backdrop.addEventListener('click', e => { if (e.target === backdrop) { stopSignupPolling(); backdrop.remove(); } });
-    document.getElementById('trl-close').addEventListener('click', () => { stopSignupPolling(); backdrop.remove(); });
-    document.getElementById('trl-key-btn').addEventListener('click', () => { activeTab = 'steward'; renderTab(); });
-    document.getElementById('trl-connect-btn').addEventListener('click', connectToBackend);
 
-    document.getElementById('trl-series-select').addEventListener('change', async (e) => {
-      currentSeriesId = e.target.value;
-      await loadSeriesFromBackend(currentSeriesId);
-      renderTab();
+    const modal = document.getElementById('tnbrl-modal');
+    if (getTheme() === 'dark') modal.classList.add('dark');
+
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
+    document.getElementById('tnbrl-close').addEventListener('click', () => backdrop.remove());
+    document.getElementById('tnbrl-theme-btn').addEventListener('click', () => {
+      const next = getTheme() === 'dark' ? 'light' : 'dark';
+      setTheme(next);
+      modal.classList.toggle('dark', next === 'dark');
+      document.getElementById('tnbrl-theme-btn').textContent = next === 'dark' ? '☀️' : '🌙';
     });
-
-    document.querySelectorAll('.trl-tab').forEach(tab => {
-      tab.addEventListener('click', () => { activeTab = tab.dataset.tab; renderTab(); });
-    });
-
-    populateSeriesSelect().then(() => renderTab());
-  }
-
-  async function populateSeriesSelect() {
-    const sel = document.getElementById('trl-series-select');
-    if (!sel) return;
-
-    const cfg = getWorkerConfig();
-    if (cfg.url) {
-      const reg = await apiRegistryList();
-      if (reg && reg.length) {
-        const local = getSeries();
-        let changed = false;
-        reg.forEach(r => {
-          if (!local[r.id]) {
-            local[r.id] = {
-              id: r.id, name: r.name, createdAt: Date.now(), active: r.active !== false,
-              signupMode: 'open', tracks: [], pointsTable: DEFAULT_POINTS.slice(),
-              brackets: { rookieMax: 11, skilledMax: 24 }, password: '',
-            };
-            changed = true;
-          }
-        });
-        if (changed) saveSeries(local);
-      }
-    }
-
-    const series = getSeries();
-    const ids = Object.keys(series);
-    sel.innerHTML = ids.length
-      ? ids.map(id => `<option value="${id}">${escapeHtml(series[id].name)}</option>`).join('')
-      : '<option value="">No series yet — open Steward tab</option>';
-    if (!currentSeriesId || !series[currentSeriesId]) currentSeriesId = ids[0] || null;
-    if (currentSeriesId) sel.value = currentSeriesId;
-
-    if (currentSeriesId) await loadSeriesFromBackend(currentSeriesId);
+    document.querySelectorAll('.tnbrl-tab').forEach(t => t.addEventListener('click', () => {
+      activeTab = t.dataset.tab; renderTab();
+    }));
+    renderTab();
   }
 
   function renderTab() {
-    if (activeTab !== 'signup') stopSignupPolling();
-    document.querySelectorAll('.trl-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === activeTab));
-    const body = document.getElementById('trl-body');
+    document.querySelectorAll('.tnbrl-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === activeTab));
+    const body = document.getElementById('tnbrl-body');
     if (!body) return;
-    if (activeTab === 'standings') return renderStandingsTab(body);
-    if (activeTab === 'teams') return renderTeamsTab(body);
-    if (activeTab === 'signup') return renderSignUpTab(body);
-    if (activeTab === 'races') return renderRacesTab(body);
-    if (activeTab === 'steward') return renderStewardTab(body);
+    ({ standings: renderStandings, teams: renderTeams, races: renderRaces, steward: renderSteward }[activeTab] || renderStandings)(body);
   }
 
-  /* ---------- Standings tab ---------- */
-  function renderStandingsTab(body) {
-    if (!currentSeriesId) { body.innerHTML = '<p>No series selected yet. Ask your steward to create one, or 🔌 Connect to the league server.</p>'; return; }
-    const series = getSeries()[currentSeriesId];
-    const { indivList, teamList, raceCount } = computeStandings(currentSeriesId);
-
-    let html = `<div class="trl-card">
-      <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px;">
-        <div><b>${escapeHtml(series.name)}</b> — ${series.tracks.length} tracks × ${series.tracks[0]?.laps ?? 50} laps · ${raceCount} race(s) logged in this browser</div>
-        <div>Join password: <code>${escapeHtml(series.password || '—')}</code>${tip("This must match the password you set when creating the actual private race in Torn — the script can't create races for you, it only tracks results.")}</div>
-      </div>
-    </div>`;
-
-    html += `<div class="trl-card"><b>Team Standings</b>${renderTeamTable(teamList)}
-      <button class="trl-btn" id="trl-export-team-csv" style="margin-top:8px;">⬇ Export Team CSV</button></div>`;
-
-    ['Pro', 'Skilled', 'Rookie'].forEach(bracket => {
-      const list = indivList.filter(p => p.bracket === bracket);
-      html += `<div class="trl-card"><b style="color:${BRACKET_COLOR[bracket]}">${bracket} Standings</b>${renderIndivTable(list)}</div>`;
-    });
-    const unranked = indivList.filter(p => p.bracket === 'Unranked');
-    if (unranked.length) html += `<div class="trl-card"><b style="color:#9ca3af;">Unranked (not in cached roster — refresh roster in Steward tab)</b>${renderIndivTable(unranked)}</div>`;
-
-    body.innerHTML = html;
-    document.getElementById('trl-export-team-csv')?.addEventListener('click', () => exportTeamCsv(currentSeriesId));
-  }
-
-  function renderTeamTable(teamList) {
-    if (!teamList.length) return '<p style="color:#9ca3af;">No teams yet.</p>';
-    return `<table class="trl-table"><thead><tr><th>#</th><th>Team</th><th>Members</th><th>Points</th></tr></thead><tbody>
-      ${teamList.map((t, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(t.name)}</td><td>${t.members.map(m => `<span class="trl-badge" style="background:${BRACKET_COLOR[m.bracket]}">${escapeHtml(m.name)}</span>`).join(' ')}</td><td><b>${t.points}</b></td></tr>`).join('')}
-    </tbody></table>`;
-  }
-
-  function renderIndivTable(list) {
-    if (!list.length) return '<p style="color:#9ca3af;">No results yet.</p>';
-    return `<table class="trl-table"><thead><tr><th>#</th><th>Driver</th><th>Races</th><th>Points</th></tr></thead><tbody>
-      ${list.map((p, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(p.name)}</td><td>${p.races}</td><td><b>${p.points}</b></td></tr>`).join('')}
-    </tbody></table>`;
-  }
-
-  function exportTeamCsv(seriesId) {
-    const { teamList } = computeStandings(seriesId);
-    let csv = 'Rank,Team,Members,Points\n';
-    teamList.forEach((t, i) => {
-      csv += `${i + 1},"${t.name}","${t.members.map(m => m.name + ' (' + m.bracket + ')').join('; ')}",${t.points}\n`;
-    });
-    downloadCsv(csv, 'league_team_standings.csv');
-  }
-
-  function downloadCsv(csv, filename) {
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  /* ---------- Teams tab (read-only summary, both modes) ---------- */
-  function renderTeamsTab(body) {
-    if (!currentSeriesId) { body.innerHTML = '<p>No series selected.</p>'; return; }
-    const teams = (getTeams()[currentSeriesId] || []);
-    if (!teams.length) { body.innerHTML = '<p style="color:#9ca3af;">No teams yet — build them from the Steward tab.</p>'; return; }
-
-    let html = teams.map(t => {
-      if (t.slotShape) {
-        const rows = ['Pro', 'Skilled', 'Rookie'].map(b => {
-          const cap = t.slotShape[b] || 0;
-          if (!cap) return '';
-          const filled = t.members.filter(m => m.bracket === b);
-          return `<tr><td><span class="trl-badge" style="background:${BRACKET_COLOR[b]}">${b}</span></td><td>${filled.length}/${cap}</td><td>${filled.map(m => escapeHtml(m.name)).join(', ') || '<span style="color:#6b7280;">— open —</span>'}</td></tr>`;
-        }).join('');
-        return `<div class="trl-card"><b>${escapeHtml(t.name)}</b> <span style="color:#9ca3af; font-size:11px;">(open sign-up)</span>
-          <table class="trl-table"><thead><tr><th>Bracket</th><th>Filled</th><th>Members</th></tr></thead><tbody>${rows}</tbody></table>
-        </div>`;
-      }
-      return `<div class="trl-card"><b>${escapeHtml(t.name)}</b>
-        <table class="trl-table"><thead><tr><th>Driver</th><th>Bracket</th><th>Skill</th></tr></thead><tbody>
-          ${t.members.map(m => `<tr><td>${escapeHtml(m.name)}</td><td><span class="trl-badge" style="background:${BRACKET_COLOR[m.bracket]}">${m.bracket}</span></td><td>${m.skill.toFixed(2)}</td></tr>`).join('')}
-        </tbody></table>
-      </div>`;
-    }).join('');
-
-    html += `<div class="trl-card">
-      <b>Swap two members</b>${tip('Steward override — moves anyone between teams regardless of slot quotas. Use for manual fixes, e.g. a no-show. Requires the admin token (Steward tab) if a league server is connected.')}<br><br>
-      <select id="trl-swap-a" class="trl-select"></select> ⇄ <select id="trl-swap-b" class="trl-select"></select>
-      <button class="trl-btn primary" id="trl-swap-go" style="margin-left:8px;">Swap</button>
-    </div>`;
-
-    body.innerHTML = html;
-
-    const allMembers = [];
-    teams.forEach(t => t.members.forEach(m => allMembers.push({ teamId: t.id, name: m.name })));
-    const opts = allMembers.map(m => `<option value="${m.teamId}::${escapeHtml(m.name)}">${escapeHtml(m.name)} (${teams.find(t => t.id === m.teamId).name})</option>`).join('');
-    const a = document.getElementById('trl-swap-a'), b = document.getElementById('trl-swap-b');
-    if (a) a.innerHTML = opts;
-    if (b) b.innerHTML = opts;
-
-    document.getElementById('trl-swap-go')?.addEventListener('click', async () => {
-      const [teamIdA, nameA] = document.getElementById('trl-swap-a').value.split('::');
-      const [teamIdB, nameB] = document.getElementById('trl-swap-b').value.split('::');
-      if (teamIdA === teamIdB && nameA === nameB) return;
-      const allTeams = getTeams();
-      const list = allTeams[currentSeriesId];
-      const teamA = list.find(t => t.id === teamIdA);
-      const teamB = list.find(t => t.id === teamIdB);
-      const idxA = teamA.members.findIndex(m => m.name === nameA);
-      const idxB = teamB.members.findIndex(m => m.name === nameB);
-      if (idxA === -1 || idxB === -1) return;
-      const memA = teamA.members[idxA], memB = teamB.members[idxB];
-      teamA.members[idxA] = memB; teamB.members[idxB] = memA;
-      saveTeams(allTeams);
-      const cfg = getWorkerConfig();
-      if (cfg.url && cfg.adminToken) await apiSetTeams(currentSeriesId, allTeams[currentSeriesId]);
-      renderTeamsTab(body);
-    });
-  }
-
-  /* ---------- Sign Up tab ---------- */
-  function renderSignUpTab(body) {
-    if (!currentSeriesId) { body.innerHTML = '<p>No series selected.</p>'; return; }
-    const series = getSeries()[currentSeriesId];
-    const teams = (getTeams()[currentSeriesId] || []);
-    const openTeams = teams.filter(t => t.slotShape);
-    const myName = GM_getValue(K_MY_NAME, '');
-
-    let html = `<div class="trl-card">
-      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-        <div>👤 You are: <b>${myName ? escapeHtml(myName) : '— not set —'}</b> <a href="#" id="trl-change-me" style="color:#60a5fa;">change</a>${tip("Pick your own name once so the script knows which bracket you're in and can validate your slot claims. Stored only in this browser.")}</div>
-        <button class="trl-btn" id="trl-signup-refresh">🔄 Refresh${tip("Pulls the latest claims from the league server if you're connected, otherwise just re-reads this browser's local data.")}</button>
-      </div>
-    </div>`;
-
-    if (!openTeams.length) {
-      html += `<p style="color:#9ca3af;">This series doesn't have open sign-up teams yet — your steward either hasn't created them, or is using steward-assigned teams for this event.</p>`;
-      body.innerHTML = html;
-      document.getElementById('trl-change-me')?.addEventListener('click', e => { e.preventDefault(); pickIdentity(() => renderSignUpTab(body)); });
-      return;
-    }
-
-    const cfg = getWorkerConfig();
-    if (!cfg.url) {
-      html += `<div class="trl-card" style="border-color:#92400e; background:#3f2d12;">⚠️ Not connected to a league server — slot claims only save to <i>this</i> browser. Click 🔌 Connect at the top and paste the URL your steward shared, or ask them for it.</div>`;
-    }
-
-    const rosterMember = getRosterCache().members.find(m => m.name.toLowerCase() === myName.toLowerCase());
-    const myBracket = rosterMember ? bracketOf(rosterMember.skill, series.brackets) : null;
-    const myTeam = openTeams.find(t => t.members.some(m => m.name.toLowerCase() === myName.toLowerCase()));
-
-    html += openTeams.map(t => {
-      const rows = ['Pro', 'Skilled', 'Rookie'].map(bracket => {
-        const cap = t.slotShape[bracket] || 0;
-        if (!cap) return '';
-        const filled = t.members.filter(m => m.bracket === bracket);
-        const slots = [];
-        for (let i = 0; i < cap; i++) {
-          if (filled[i]) {
-            const isMe = filled[i].name.toLowerCase() === myName.toLowerCase();
-            slots.push(`<div style="padding:5px 8px; background:${isMe ? '#14532d' : '#111827'}; border:1px solid ${BRACKET_COLOR[bracket]}; border-radius:6px; margin-bottom:4px; display:flex; justify-content:space-between; align-items:center;">
-              <span>${escapeHtml(filled[i].name)}${isMe ? ' (you)' : ''}</span>
-              ${isMe ? `<button class="trl-btn danger" data-release="${t.id}" style="padding:2px 8px; font-size:10px;">Leave</button>` : ''}
-            </div>`);
-          } else {
-            const canClaim = !myTeam && myBracket === bracket && myName;
-            slots.push(`<div style="padding:5px 8px; background:#1f2937; border:1px dashed #4b5563; border-radius:6px; margin-bottom:4px; display:flex; justify-content:space-between; align-items:center; color:#6b7280;">
-              <span>Open ${bracket} slot</span>
-              ${canClaim ? `<button class="trl-btn primary" data-claim="${t.id}::${bracket}" style="padding:2px 8px; font-size:10px;">Claim</button>` : ''}
-            </div>`);
-          }
-        }
-        return `<div style="margin-bottom:6px;"><span class="trl-badge" style="background:${BRACKET_COLOR[bracket]}">${bracket}</span></div>${slots.join('')}`;
-      }).join('');
-      return `<div class="trl-card"><b>${escapeHtml(t.name)}</b><div style="margin-top:6px;">${rows}</div></div>`;
-    }).join('');
-
-    body.innerHTML = html;
-
-    document.getElementById('trl-change-me')?.addEventListener('click', e => { e.preventDefault(); pickIdentity(() => renderSignUpTab(body)); });
-    document.getElementById('trl-signup-refresh')?.addEventListener('click', async () => { await loadSeriesFromBackend(currentSeriesId); renderSignUpTab(body); });
-
-    body.querySelectorAll('[data-claim]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const [teamId, bracket] = btn.dataset.claim.split('::');
-        const workerCfg = getWorkerConfig();
-        if (workerCfg.url) {
-          const r = await apiClaim(currentSeriesId, GM_getValue(K_MY_NAME, ''), teamId, bracket);
-          if (!r.ok) { alert(r.message); return; }
-          if (r.data && r.data.teams) { const all = getTeams(); all[currentSeriesId] = r.data.teams; saveTeams(all); }
-        } else {
-          const r = claimSlotLocal(currentSeriesId, teamId, bracket);
-          if (!r.ok) { alert(r.message); return; }
-        }
-        renderSignUpTab(body);
-      });
-    });
-    body.querySelectorAll('[data-release]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const workerCfg = getWorkerConfig();
-        if (workerCfg.url) {
-          const r = await apiRelease(currentSeriesId, GM_getValue(K_MY_NAME, ''), btn.dataset.release);
-          if (r.ok && r.data && r.data.teams) { const all = getTeams(); all[currentSeriesId] = r.data.teams; saveTeams(all); }
-        } else {
-          releaseSlotLocal(currentSeriesId, btn.dataset.release);
-        }
-        renderSignUpTab(body);
-      });
-    });
-
-    startSignupPolling(body);
-  }
-
-  /* ---------- Races tab ---------- */
-  function renderRacesTab(body) {
-    if (!currentSeriesId) { body.innerHTML = '<p>No series selected.</p>'; return; }
-    const races = (getResults()[currentSeriesId] || []).slice().sort((a, b) => b.capturedAt - a.capturedAt);
-    if (!races.length) {
-      body.innerHTML = '<p style="color:#9ca3af;">No races logged yet in this browser. Once a race on one of this series\' tracks finishes, a capture banner appears in the corner — or use the manual button in the Steward tab if you\'re already on a finished race page.</p>';
-      return;
-    }
-    body.innerHTML = races.map(r => `
-      <div class="trl-card">
-        <div style="display:flex; justify-content:space-between;">
-          <b>${escapeHtml(r.track)}</b>
-          <span style="color:#9ca3af;">${new Date(r.capturedAt).toLocaleString()}</span>
-        </div>
-        <table class="trl-table"><thead><tr><th>Pos</th><th>Driver</th><th>Bracket</th><th>Time</th><th>Pts</th></tr></thead><tbody>
-          ${r.standings.map(s => `<tr><td>${s.position}</td><td>${escapeHtml(s.name)}</td><td><span class="trl-badge" style="background:${BRACKET_COLOR[s.bracket] || '#4b5563'}">${s.bracket}</span></td><td>${formatMs(s.totalMs)}</td><td>${s.points}</td></tr>`).join('')}
-        </tbody></table>
-        <button class="trl-btn danger" data-race="${r.id}" style="margin-top:6px;">Remove this race</button>
-      </div>`).join('');
-
-    body.querySelectorAll('button[data-race]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        if (!confirm('Remove this race from the series?')) return;
-        const results = getResults();
-        results[currentSeriesId] = results[currentSeriesId].filter(r => r.id !== btn.dataset.race);
-        saveResults(results);
-        renderRacesTab(body);
-      });
-    });
-  }
-
-  function formatMs(ms) {
-    const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000), cs = Math.floor((ms % 1000) / 10);
-    return `${m}m ${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}s`;
-  }
-
-  /* ---------- Steward tab ---------- */
-  function renderStewardTab(body) {
-    if (!stewardUnlocked) {
-      const hasHash = !!GM_getValue(K_STEWARD_HASH, '');
-      body.innerHTML = `<div class="trl-card">
-        <p>${hasHash ? 'Enter the steward passphrase to manage series, teams and roster.' : 'No steward passphrase set yet. Pick one now — anyone who knows it can manage events.'}</p>
-        <input type="password" id="trl-pass" class="trl-input" placeholder="Steward passphrase" style="width:220px;">
-        <button class="trl-btn primary" id="trl-pass-go">${hasHash ? 'Unlock' : 'Set passphrase'}</button>
-        <p style="color:#9ca3af; font-size:11px; margin-top:8px;">This is just a quick local lock — the real security boundary is the league server's admin token, set below and checked server-side.</p>
-      </div>`;
-      document.getElementById('trl-pass-go').addEventListener('click', async () => {
-        const pass = document.getElementById('trl-pass').value;
-        if (!pass) return;
-        const r = await trySetOrCheckSteward(pass);
-        if (r.ok) renderStewardTab(body); else alert('Wrong passphrase.');
-      });
-      return;
-    }
-
-    const roster = getRosterCache();
+  /* ============================================================
+     STANDINGS TAB
+     ============================================================ */
+  function renderStandings(body) {
     const series = getSeries();
-    const workerCfg = getWorkerConfig();
+    if (!series) { body.innerHTML = `<p class="tnbrl-muted">No series set up yet. Ask your steward to create one.</p>`; return; }
 
-    let html = `<div class="trl-card"><b>League server connection</b>${tip("This is what makes the Sign Up tab live across everyone's browsers, and what makes the steward gate a real server-enforced secret. The URL is safe to share with the whole faction — the admin token is not, keep that steward-only.")}<br><br>
-      Worker URL: <input id="trl-worker-url" class="trl-input" value="${escapeHtml(workerCfg.url || '')}" style="width:280px;" placeholder="https://your-worker.workers.dev">
-      Admin token: <input id="trl-worker-token" class="trl-input" type="password" value="${escapeHtml(workerCfg.adminToken || '')}" style="width:200px;">
-      <button class="trl-btn primary" id="trl-worker-save">Save</button>
+    const { driverList, teamList } = standings();
+    const raceCount = getResults().length;
+
+    let html = `<div class="tnbrl-card">
+      <b>${esc(series.name)}</b> &mdash; ${series.tracks.length} track${series.tracks.length!==1?'s':''} &times; ${series.tracks[0]?.laps??50} laps &middot; ${raceCount} race${raceCount!==1?'s':''} logged
+      &nbsp;<span style="background:#e0e7ef; border-radius:8px; padding:2px 8px; font-size:11px;">Join password: <b>${esc(series.password||'—')}</b></span>
     </div>`;
 
-    html += `<div class="trl-card">
-      <b>Faction roster</b>${tip('Pulls every faction member\'s Racing Skill stat via the Torn API so the script can sort people into Rookie/Skilled/Pro. Re-run this occasionally — skill changes as people race.')} — ${roster.members.length} members cached (${roster.time ? new Date(roster.time).toLocaleString() : 'never'})
-      <br><br>
-      <input id="trl-api-key" class="trl-input" placeholder="Torn API key (limited access)" style="width:220px;" value="${escapeHtml(GM_getValue(K_API_KEY, ''))}">
-      <input id="trl-faction-id" class="trl-input" placeholder="Faction ID" style="width:100px;" value="${escapeHtml(GM_getValue(K_FACTION_ID, ''))}">
-      <button class="trl-btn primary" id="trl-refresh-roster">🔄 Refresh roster + skill</button>
-      <div id="trl-roster-progress" style="font-size:11px; color:#9ca3af; margin-top:6px;"></div>
+    // Team table
+    html += `<div class="tnbrl-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <b>Team Standings</b>
+      <button class="tnbrl-btn" id="tnbrl-csv-teams">⬇ CSV</button>
     </div>`;
+    if (!teamList.length) {
+      html += `<p class="tnbrl-muted">No teams yet.</p>`;
+    } else {
+      html += `<table class="tnbrl-table"><thead><tr><th>#</th><th>Team</th><th>Members</th><th>Points</th></tr></thead><tbody>
+        ${teamList.map((t,i) => `<tr><td>${i+1}</td><td><b>${esc(t.name)}</b></td><td style="line-height:1.8">${t.members.map(m=>`<span class="tnbrl-badge" style="background:${BRACKET_COLOR[m.bracket]||'#666'}">${esc(m.name)}</span>`).join(' ')}</td><td><b>${t.points}</b></td></tr>`).join('')}
+      </tbody></table>`;
+    }
+    html += `</div>`;
 
-    html += `<div class="trl-card"><b>Create a series</b>${tip('A "series" is one league: a list of tracks, the skill cutoffs for brackets, and how teams get built.')}<br><br>
-      <input id="trl-new-name" class="trl-input" placeholder="Series name" style="width:200px;"><br><br>
-      <textarea id="trl-new-tracks" class="trl-input" style="width:100%; height:70px;" placeholder="One track per line, format: Track Name, 50"></textarea>${tip("One line per track. Add a comma and a number to set custom laps, e.g. 'Uptown, 30'. Leave the number off for the default of 50.")}
-      <div style="font-size:11px; color:#9ca3af; margin:4px 0;">Laps default to 50 per track if omitted.</div>
-      Rookie max skill: <input id="trl-new-rookiemax" class="trl-input" type="number" value="11" style="width:60px;">${tip('Anyone with a Racing Skill below this number is bracketed as Rookie.')}
-      Skilled max skill: <input id="trl-new-skilledmax" class="trl-input" type="number" value="24" style="width:60px;">${tip('Anyone between the Rookie cutoff and this number is Skilled; anyone above it is Pro.')}<br><br>
-      Team mode:
-      <label style="margin-left:6px;"><input type="radio" name="trl-mode" value="locked" checked> Steward-assigned</label>
-      <label style="margin-left:10px;"><input type="radio" name="trl-mode" value="open"> Open sign-up</label>${tip('Steward-assigned: you run a snake draft and assign everyone yourself. Open sign-up: you just define empty seats per bracket, and members claim their own from the Sign Up tab.')}
-      <br><br>
-      Join password (the real Torn private-race password): <input id="trl-new-pass" class="trl-input" style="width:160px;">${tip('This is just a label shown to members — you still have to set this same password when you create the actual private race inside Torn.')}<br><br>
-      <button class="trl-btn primary" id="trl-create-series">Create series</button>
-    </div>`;
-
-    if (currentSeriesId && series[currentSeriesId]) {
-      const s = series[currentSeriesId];
-      if (s.signupMode === 'open') {
-        html += `<div class="trl-card"><b>Open sign-up team shapes — ${escapeHtml(s.name)}</b>${tip('Defines how many seats of each bracket every team has. Members then claim their own seat from the Sign Up tab.')}<br><br>
-          Number of teams: <input id="trl-open-teamcount" class="trl-input" type="number" value="16" style="width:60px;">
-          Pro seats/team: <input id="trl-open-pro" class="trl-input" type="number" value="2" style="width:50px;">
-          Skilled seats/team: <input id="trl-open-skilled" class="trl-input" type="number" value="2" style="width:50px;">
-          Rookie seats/team: <input id="trl-open-rookie" class="trl-input" type="number" value="2" style="width:50px;"><br><br>
-          <button class="trl-btn primary" id="trl-create-open-teams">🪑 Create empty teams for sign-up</button>
-          <div style="font-size:11px; color:#9ca3af; margin-top:6px;">Replaces any existing teams for this series.</div>
-        </div>`;
-      } else {
-        html += `<div class="trl-card"><b>Team builder — ${escapeHtml(s.name)}</b>${tip('Sorts everyone into Pro/Skilled/Rookie, then deals them out across teams alternating direction each pass so no team stacks the top of a bracket.')}<br><br>
-          Number of teams: <input id="trl-team-count" class="trl-input" type="number" value="2" style="width:60px;">
-          Team size: <input id="trl-team-size" class="trl-input" type="number" value="6" style="width:60px;">
-          <button class="trl-btn primary" id="trl-run-draft">🧩 Run Snake Draft</button>
-        </div>`;
-      }
-
-      html += `<div class="trl-card"><b>Publish to the league server</b>${tip('Pushes this series\' settings, the cached roster, and current teams up to the Worker, and registers it so other players can find it via 🔌 Connect. Useful after editing things locally, or for a series created before the server was connected.')}<br><br>
-        <button class="trl-btn primary" id="trl-publish-series">📡 Publish this series</button>
-        <div id="trl-publish-msg" style="font-size:11px; margin-top:6px;"></div>
+    // Per-bracket individual tables
+    ['Pro','Skilled','Rookie'].forEach(bracket => {
+      const list = driverList.filter(d => d.bracket === bracket);
+      html += `<div class="tnbrl-card"><b style="color:${BRACKET_COLOR[bracket]}">${bracket} Standings</b>
+        <table class="tnbrl-table" style="margin-top:8px;"><thead><tr><th>#</th><th>Driver</th><th>Races</th><th>Points</th></tr></thead><tbody>
+          ${list.length ? list.map((d,i)=>`<tr><td>${i+1}</td><td>${esc(d.name)}</td><td>${d.races}</td><td><b>${d.points}</b></td></tr>`).join('') : `<tr><td colspan="4" class="tnbrl-muted">No results yet.</td></tr>`}
+        </tbody></table>
       </div>`;
+    });
 
-      html += `<div class="trl-card"><b>Manual race capture</b>${tip("If automatic capture didn't trigger (or you missed the banner), this grabs whatever race data the current page last reported, as long as you're on a finished race.")}<br><br>
-        <button class="trl-btn primary" id="trl-manual-capture">📥 Capture current race page</button>
-        <div id="trl-manual-capture-msg" style="font-size:11px; margin-top:6px;"></div>
-      </div>`;
-
-      html += `<div class="trl-card"><b style="color:#ef4444;">Danger zone</b><br><br>
-        <button class="trl-btn danger" id="trl-clear-series">Delete this series (and its teams/results)</button>
+    const unranked = driverList.filter(d => d.bracket === 'Unranked');
+    if (unranked.length) {
+      html += `<div class="tnbrl-card"><b class="tnbrl-muted">Unranked</b> <span class="tnbrl-muted" style="font-size:11px;">(not in the roster snapshot — refresh roster in Steward tab)</span>
+        <table class="tnbrl-table" style="margin-top:8px;"><thead><tr><th>#</th><th>Driver</th><th>Races</th><th>Points</th></tr></thead><tbody>
+          ${unranked.map((d,i)=>`<tr><td>${i+1}</td><td>${esc(d.name)}</td><td>${d.races}</td><td><b>${d.points}</b></td></tr>`).join('')}
+        </tbody></table>
       </div>`;
     }
 
     body.innerHTML = html;
 
-    document.getElementById('trl-worker-save').addEventListener('click', () => {
-      saveWorkerConfig({
-        url: document.getElementById('trl-worker-url').value.trim().replace(/\/+$/, ''),
-        adminToken: document.getElementById('trl-worker-token').value.trim(),
-      });
-      alert('Saved.');
-      renderStewardTab(body);
-    });
-
-    document.getElementById('trl-refresh-roster').addEventListener('click', async () => {
-      const apiKey = document.getElementById('trl-api-key').value.trim();
-      const factionId = document.getElementById('trl-faction-id').value.trim();
-      if (!apiKey || !factionId) { alert('Need both an API key and faction ID.'); return; }
-      GM_setValue(K_API_KEY, apiKey); GM_setValue(K_FACTION_ID, factionId);
-      const prog = document.getElementById('trl-roster-progress');
-      const res = await refreshRoster(apiKey, factionId, (done, total) => { prog.textContent = `Fetching skill data… ${done}/${total}`; });
-      if (res.error) { prog.textContent = 'Failed: ' + res.message; return; }
-      prog.textContent = `Done — ${res.members.length} members cached.`;
-
-      const cfg = getWorkerConfig();
-      if (cfg.url && cfg.adminToken && currentSeriesId) {
-        const s = getSeries()[currentSeriesId];
-        if (s) {
-          const r = await apiSetRoster(currentSeriesId, res.members, s.brackets);
-          prog.textContent = r.ok
-            ? `Done — ${res.members.length} members cached and synced to the server.`
-            : `Cached locally, but server push failed: ${r.message}`;
-        }
-      }
-      renderStewardTab(body);
-    });
-
-    document.getElementById('trl-create-series').addEventListener('click', async () => {
-      const name = document.getElementById('trl-new-name').value.trim();
-      if (!name) { alert('Series needs a name.'); return; }
-      const lines = document.getElementById('trl-new-tracks').value.split('\n').map(l => l.trim()).filter(Boolean);
-      const tracks = lines.map(l => {
-        const [tName, laps] = l.split(',').map(s => s.trim());
-        return { name: tName, laps: parseInt(laps, 10) || 50 };
-      });
-      if (!tracks.length) { alert('Add at least one track.'); return; }
-      const signupMode = document.querySelector('input[name="trl-mode"]:checked').value;
-
-      const id = uid('series');
-      const all = getSeries();
-      all[id] = {
-        id, name, createdAt: Date.now(), active: true, signupMode,
-        tracks,
-        pointsTable: DEFAULT_POINTS.slice(),
-        brackets: {
-          rookieMax: parseInt(document.getElementById('trl-new-rookiemax').value, 10) || 11,
-          skilledMax: parseInt(document.getElementById('trl-new-skilledmax').value, 10) || 24,
-        },
-        password: document.getElementById('trl-new-pass').value.trim(),
-      };
-      saveSeries(all);
-      currentSeriesId = id;
-
-      const cfg = getWorkerConfig();
-      if (cfg.url && cfg.adminToken) {
-        await apiSetSeries(id, all[id]);
-        await apiRegistryReg(id, name, true);
-        const r = getRosterCache();
-        if (r.members.length) await apiSetRoster(id, r.members, all[id].brackets);
-      }
-
-      await populateSeriesSelect();
-      renderStewardTab(body);
-    });
-
-    document.getElementById('trl-create-open-teams')?.addEventListener('click', async () => {
-      const teamCount = parseInt(document.getElementById('trl-open-teamcount').value, 10) || 2;
-      const slotShape = {
-        Pro: parseInt(document.getElementById('trl-open-pro').value, 10) || 0,
-        Skilled: parseInt(document.getElementById('trl-open-skilled').value, 10) || 0,
-        Rookie: parseInt(document.getElementById('trl-open-rookie').value, 10) || 0,
-      };
-      if (!confirm('This replaces any existing teams for this series with empty sign-up slots. Continue?')) return;
-      const all = getTeams();
-      all[currentSeriesId] = createOpenTeams(teamCount, slotShape);
-      saveTeams(all);
-      const cfg = getWorkerConfig();
-      if (cfg.url && cfg.adminToken) await apiSetTeams(currentSeriesId, all[currentSeriesId]);
-      alert('Empty teams created — members can now sign up from the Sign Up tab.');
-    });
-
-    document.getElementById('trl-run-draft')?.addEventListener('click', async () => {
-      const rosterMembers = getRosterCache().members;
-      if (!rosterMembers.length) { alert('Refresh the roster first.'); return; }
-      const s = getSeries()[currentSeriesId];
-      const teamCount = parseInt(document.getElementById('trl-team-count').value, 10) || 2;
-      const teamSize = parseInt(document.getElementById('trl-team-size').value, 10) || 5;
-      if (!confirm(`This will overwrite any existing teams for "${s.name}". Continue?`)) return;
-      const newTeams = buildTeams(rosterMembers, teamCount, teamSize, s.brackets);
-      const all = getTeams();
-      all[currentSeriesId] = newTeams;
-      saveTeams(all);
-      const cfg = getWorkerConfig();
-      if (cfg.url && cfg.adminToken) await apiSetTeams(currentSeriesId, all[currentSeriesId]);
-      alert('Teams built — check the Teams tab.');
-    });
-
-    document.getElementById('trl-publish-series')?.addEventListener('click', async () => {
-      const cfg = getWorkerConfig();
-      const msg = document.getElementById('trl-publish-msg');
-      if (!cfg.url || !cfg.adminToken) { msg.textContent = 'Set the Worker URL and admin token above first.'; return; }
-      const s = getSeries()[currentSeriesId];
-      const r = getRosterCache();
-      const t = getTeams()[currentSeriesId] || [];
-      await apiSetSeries(currentSeriesId, s);
-      await apiRegistryReg(currentSeriesId, s.name, true);
-      if (r.members.length) await apiSetRoster(currentSeriesId, r.members, s.brackets);
-      await apiSetTeams(currentSeriesId, t);
-      msg.textContent = 'Published series, roster, and teams to the server.';
-    });
-
-    document.getElementById('trl-manual-capture')?.addEventListener('click', () => {
-      const snap = window.__trlLastSnapshot;
-      const msg = document.getElementById('trl-manual-capture-msg');
-      if (!snap) { msg.textContent = 'No race data seen on this page yet.'; return; }
-      const matches = findMatchingSeries(snap.track);
-      const target = matches.find(s => s.id === currentSeriesId) || matches[0];
-      if (!target) { msg.textContent = `Track "${snap.track}" isn't in any active series.`; return; }
-      const r = captureRace(target.id, snap.track, snap.racers);
-      msg.textContent = r.ok ? `Logged ${r.count} drivers to "${target.name}".` : r.message;
-    });
-
-    document.getElementById('trl-clear-series')?.addEventListener('click', async () => {
-      if (!confirm('Delete this entire series, its teams and all logged race results?')) return;
-      const cfg = getWorkerConfig();
-      if (cfg.url && cfg.adminToken) await apiRegistryRemove(currentSeriesId);
-      const all = getSeries(); delete all[currentSeriesId]; saveSeries(all);
-      const t = getTeams(); delete t[currentSeriesId]; saveTeams(t);
-      const r = getResults(); delete r[currentSeriesId]; saveResults(r);
-      currentSeriesId = null;
-      await populateSeriesSelect();
-      renderTab();
+    document.getElementById('tnbrl-csv-teams')?.addEventListener('click', () => {
+      const { teamList: tl } = standings();
+      let csv = 'Rank,Team,Members,Points\n';
+      tl.forEach((t,i) => { csv += `${i+1},"${t.name}","${t.members.map(m=>m.name+' ('+m.bracket+')').join('; ')}",${t.points}\n`; });
+      downloadCsv(csv, 'tnbrl_team_standings.csv');
     });
   }
 
   /* ============================================================
-     LIVE CAPTURE BANNER
+     TEAMS TAB
+     ============================================================ */
+  function renderTeams(body) {
+    const teams = getTeams();
+    if (!teams.length) { body.innerHTML = `<p class="tnbrl-muted">No teams built yet — open the Steward tab and run the snake draft.</p>`; return; }
+
+    body.innerHTML = teams.map(t => `
+      <div class="tnbrl-card">
+        <b>${esc(t.name)}</b>
+        <table class="tnbrl-table" style="margin-top:8px;">
+          <thead><tr><th>Driver</th><th>Bracket</th><th>Skill</th></tr></thead>
+          <tbody>
+            ${t.members.map(m=>`<tr>
+              <td>${esc(m.name)}</td>
+              <td><span class="tnbrl-badge" style="background:${BRACKET_COLOR[m.bracket]}">${m.bracket}</span></td>
+              <td>${(+m.skill).toFixed(1)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`).join('');
+  }
+
+  /* ============================================================
+     RACES TAB
+     ============================================================ */
+  function renderRaces(body) {
+    const results = getResults().slice().sort((a,b) => b.capturedAt - a.capturedAt);
+    if (!results.length) {
+      body.innerHTML = `<p class="tnbrl-muted">No races captured yet. Finish a race in Torn and use the capture banner that pops up, or use the manual capture button in the Steward tab.</p>`;
+      return;
+    }
+    body.innerHTML = results.map(r => `
+      <div class="tnbrl-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
+          <b>${esc(r.track)}</b>
+          <span class="tnbrl-muted" style="font-size:11px;">${new Date(r.capturedAt).toLocaleString()}</span>
+          <button class="tnbrl-btn danger" data-remove="${r.id}" style="padding:3px 9px; font-size:11px;">Remove</button>
+        </div>
+        <table class="tnbrl-table"><thead><tr><th>Pos</th><th>Driver</th><th>Bracket</th><th>Time</th><th>Pts</th></tr></thead><tbody>
+          ${r.standings.map(s=>`<tr>
+            <td>${s.position}</td><td>${esc(s.name)}</td>
+            <td><span class="tnbrl-badge" style="background:${BRACKET_COLOR[s.bracket]||'#667085'}">${s.bracket}</span></td>
+            <td>${fmtMs(s.totalMs)}</td><td><b>${s.points}</b></td>
+          </tr>`).join('')}
+        </tbody></table>
+      </div>`).join('');
+
+    body.querySelectorAll('[data-remove]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!confirm('Remove this race result?')) return;
+        saveResults(getResults().filter(r => r.id !== btn.dataset.remove));
+        renderRaces(body);
+      });
+    });
+  }
+
+  /* ============================================================
+     STEWARD TAB
+     ============================================================ */
+  function renderSteward(body) {
+    if (!stewardUnlocked) {
+      const hasPin = !!GM_getValue(K.STEWARD, '');
+      body.innerHTML = `<div class="tnbrl-card">
+        <p>${hasPin ? 'Enter your steward passphrase to manage the league.' : 'No steward passphrase set yet. Type one below to get started — anyone who knows it can manage events.'}</p>
+        <div class="tnbrl-row">
+          <input type="password" id="tnbrl-pass" class="tnbrl-input" placeholder="Passphrase" style="width:200px;">
+          <button class="tnbrl-btn primary" id="tnbrl-pass-go">${hasPin ? 'Unlock' : 'Set passphrase'}</button>
+        </div>
+        <p class="tnbrl-muted" style="font-size:11px; margin-top:6px;">This is a UI convenience lock only — it's a script running in your browser, not a real login system. Don't rely on it as actual security.</p>
+      </div>`;
+      document.getElementById('tnbrl-pass-go').addEventListener('click', async () => {
+        const pass = document.getElementById('tnbrl-pass').value.trim();
+        if (!pass) return;
+        if (await checkSteward(pass)) renderSteward(body);
+        else alert('Wrong passphrase.');
+      });
+      return;
+    }
+
+    const series = getSeries();
+    const roster = getRoster();
+    const teams = getTeams();
+
+    // ---- Roster section ----
+    let html = `<div class="tnbrl-card">
+      <div class="tnbrl-label">Faction Roster ${tip('Pulls every member\'s Racing Skill from the Torn API. You only need to do this once per season, or after skill levels change significantly.')}</div>
+      <div class="tnbrl-muted" style="font-size:11px; margin-bottom:8px;">
+        ${roster.members.length} members cached ${roster.time ? '&mdash; last updated ' + new Date(roster.time).toLocaleString() : '(never)'}
+      </div>
+      <div class="tnbrl-row">
+        <input id="tnbrl-apikey" class="tnbrl-input" placeholder="Torn API key" style="width:200px;" value="${esc(GM_getValue('tnbrl_apikey',''))}">
+        <input id="tnbrl-factionid" class="tnbrl-input" placeholder="Faction ID" style="width:100px;" value="${esc(GM_getValue('tnbrl_factionid',''))}">
+        <button class="tnbrl-btn primary" id="tnbrl-fetch-roster">↻ Refresh roster</button>
+      </div>
+      <div id="tnbrl-roster-progress" class="tnbrl-muted" style="font-size:11px; margin-top:6px;"></div>
+    </div>`;
+
+    // ---- Series section ----
+    html += `<div class="tnbrl-card">
+      <div class="tnbrl-label">Series setup ${tip('A series is one season or event: a list of tracks with lap counts, a join password, and points settings. You can only have one active series at a time.')}</div>
+      ${series ? `<div class="tnbrl-warn">Active series: <b>${esc(series.name)}</b>. Creating a new one will replace it and clear all race results.</div>` : ''}
+      <div class="tnbrl-row">
+        <div style="flex:1; min-width:160px;">
+          <div class="tnbrl-label">Series name</div>
+          <input id="tnbrl-sname" class="tnbrl-input" value="${esc(series?.name||'')}">
+        </div>
+        <div style="flex:1; min-width:160px;">
+          <div class="tnbrl-label">Torn race password</div>
+          <input id="tnbrl-spass" class="tnbrl-input" placeholder="Same password as in Torn" value="${esc(series?.password||'')}">
+        </div>
+      </div>
+      <div class="tnbrl-label" style="margin-top:6px;">Tracks ${tip('One track per line. Add a comma and lap count after the name, e.g. "Sand Pit, 50". Lap count defaults to 50 if you leave it out.')}</div>
+      <textarea id="tnbrl-stracks" class="tnbrl-input" style="height:80px; resize:vertical;">${series ? series.tracks.map(t=>t.name+(t.laps!==50?', '+t.laps:'')).join('\n') : ''}</textarea>
+      <div class="tnbrl-row" style="margin-top:8px;">
+        <div>
+          <div class="tnbrl-label">Rookie max skill ${tip('Members with skill below this are Rookie. Default 11 = perfect even split on our roster.')}</div>
+          <input id="tnbrl-rookiemax" class="tnbrl-input" type="number" value="${series?.brackets?.rookieMax??11}" style="width:70px;">
+        </div>
+        <div>
+          <div class="tnbrl-label">Skilled max skill ${tip('Members between Rookie max and this are Skilled. Above this = Pro. Default 24.')}</div>
+          <input id="tnbrl-skilledmax" class="tnbrl-input" type="number" value="${series?.brackets?.skilledMax??24}" style="width:70px;">
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <button class="tnbrl-btn primary" id="tnbrl-save-series">${series ? '✎ Update series' : '+ Create series'}</button>
+      </div>
+    </div>`;
+
+    // ---- Team builder ----
+    html += `<div class="tnbrl-card">
+      <div class="tnbrl-label">Team builder — snake draft ${tip('Sorts members into Pro/Skilled/Rookie, then deals them across teams alternating direction each pass so no team stacks the top of a bracket. Pro tip: our roster fits cleanly into 16 teams × 6 members (2+2+2).')}</div>
+      <div class="tnbrl-row" style="margin-top:6px;">
+        <div>
+          <div class="tnbrl-label">Teams</div>
+          <input id="tnbrl-teamcount" class="tnbrl-input" type="number" value="${teams.length||16}" style="width:65px;" min="1" max="32">
+        </div>
+        <div>
+          <div class="tnbrl-label">Team size</div>
+          <input id="tnbrl-teamsize" class="tnbrl-input" type="number" value="6" style="width:65px;" min="2" max="12">
+        </div>
+        <div style="align-self:flex-end;">
+          <button class="tnbrl-btn primary" id="tnbrl-run-draft">🧩 Run snake draft</button>
+        </div>
+      </div>
+      <div id="tnbrl-draft-msg" class="tnbrl-muted" style="font-size:11px; margin-top:6px;"></div>
+    </div>`;
+
+    // ---- Manual capture ----
+    html += `<div class="tnbrl-card">
+      <div class="tnbrl-label">Manual race capture ${tip('If the automatic banner at race end didn\'t fire (or you dismissed it), click this while you\'re on the finished race page to grab the result.')}</div>
+      <div style="margin-top:6px;">
+        <button class="tnbrl-btn primary" id="tnbrl-manual-capture">📥 Capture current race</button>
+        <span id="tnbrl-capture-msg" class="tnbrl-muted" style="font-size:11px; margin-left:8px;"></span>
+      </div>
+    </div>`;
+
+    // ---- Swap members ----
+    if (teams.length) {
+      const allMembers = [];
+      teams.forEach(t => t.members.forEach(m => allMembers.push({ teamId: t.id, name: m.name, teamName: t.name })));
+      const opts = allMembers.map(m => `<option value="${m.teamId}::${esc(m.name)}">${esc(m.name)} (${esc(m.teamName)})</option>`).join('');
+      html += `<div class="tnbrl-card">
+        <div class="tnbrl-label">Swap two members ${tip('Steward override — moves anyone between teams regardless of bracket rules. Useful for no-shows or late joiners.')}</div>
+        <div class="tnbrl-row" style="margin-top:6px;">
+          <select id="tnbrl-swap-a" class="tnbrl-select" style="width:auto;">${opts}</select>
+          <span>⇄</span>
+          <select id="tnbrl-swap-b" class="tnbrl-select" style="width:auto;">${opts}</select>
+          <button class="tnbrl-btn primary" id="tnbrl-swap-go">Swap</button>
+        </div>
+      </div>`;
+    }
+
+    // ---- Danger zone ----
+    html += `<div class="tnbrl-card">
+      <div class="tnbrl-label tnbrl-danger">Danger zone</div>
+      <div class="tnbrl-row" style="margin-top:6px;">
+        <button class="tnbrl-btn danger" id="tnbrl-clear-results">Clear all race results</button>
+        <button class="tnbrl-btn danger" id="tnbrl-clear-all">Reset everything</button>
+      </div>
+    </div>`;
+
+    body.innerHTML = html;
+
+    // ---- Event handlers ----
+    document.getElementById('tnbrl-fetch-roster').addEventListener('click', async () => {
+      const apiKey = document.getElementById('tnbrl-apikey').value.trim();
+      const factionId = document.getElementById('tnbrl-factionid').value.trim();
+      if (!apiKey || !factionId) { alert('Need both an API key and faction ID.'); return; }
+      GM_setValue('tnbrl_apikey', apiKey); GM_setValue('tnbrl_factionid', factionId);
+      const prog = document.getElementById('tnbrl-roster-progress');
+      prog.textContent = 'Starting…';
+      const result = await fetchRoster(apiKey, factionId, (done, total) => {
+        prog.textContent = `Fetching… ${done}/${total}`;
+      });
+      if (result.error) { prog.textContent = 'Failed: ' + result.error; return; }
+      saveRoster({ time: Date.now(), members: result.members });
+      prog.textContent = `Done — ${result.members.length} members cached.`;
+    });
+
+    document.getElementById('tnbrl-save-series').addEventListener('click', () => {
+      const name = document.getElementById('tnbrl-sname').value.trim();
+      if (!name) { alert('Series needs a name.'); return; }
+      const lines = document.getElementById('tnbrl-stracks').value.split('\n').map(l => l.trim()).filter(Boolean);
+      if (!lines.length) { alert('Add at least one track.'); return; }
+      const tracks = lines.map(l => {
+        const [tname, laps] = l.split(',').map(s => s.trim());
+        return { name: tname, laps: parseInt(laps, 10) || 50 };
+      });
+      const rookieMax = parseInt(document.getElementById('tnbrl-rookiemax').value, 10) || 11;
+      const skilledMax = parseInt(document.getElementById('tnbrl-skilledmax').value, 10) || 24;
+      const password = document.getElementById('tnbrl-spass').value.trim();
+
+      if (getSeries() && !confirm('This will replace the current series. Race results will be cleared. Continue?')) return;
+      saveSeries({ name, tracks, password, brackets: { rookieMax, skilledMax }, pointsTable: [25,18,15,12,10,8,6,4,2,1] });
+      saveResults([]);
+      renderSteward(body);
+    });
+
+    document.getElementById('tnbrl-run-draft').addEventListener('click', () => {
+      const roster = getRoster().members;
+      if (!roster.length) { alert('Fetch the roster first.'); return; }
+      const series = getSeries();
+      if (!series) { alert('Create a series first.'); return; }
+      const teamCount = parseInt(document.getElementById('tnbrl-teamcount').value, 10) || 16;
+      const teamSize = parseInt(document.getElementById('tnbrl-teamsize').value, 10) || 6;
+      if (!confirm(`Build ${teamCount} teams of ${teamSize} from ${roster.length} members? This replaces any existing teams.`)) return;
+      const newTeams = buildTeams(roster, teamCount, teamSize, series.brackets);
+      saveTeams(newTeams);
+      const total = newTeams.reduce((s, t) => s + t.members.length, 0);
+      const left = roster.length - total;
+      document.getElementById('tnbrl-draft-msg').textContent = `Done — ${total} members placed across ${teamCount} teams. ${left > 0 ? left + ' left as alternates.' : ''}`;
+      renderSteward(body);
+    });
+
+    document.getElementById('tnbrl-manual-capture').addEventListener('click', () => {
+      const snap = window.__tnbrl_snapshot;
+      const msg = document.getElementById('tnbrl-capture-msg');
+      if (!snap) { msg.textContent = 'No race data on this page yet.'; return; }
+      const r = logRace(snap.track, snap.racers);
+      msg.textContent = r.ok ? `Logged ${r.count} drivers ✓` : r.msg;
+    });
+
+    document.getElementById('tnbrl-swap-go')?.addEventListener('click', () => {
+      const [teamIdA, nameA] = document.getElementById('tnbrl-swap-a').value.split('::');
+      const [teamIdB, nameB] = document.getElementById('tnbrl-swap-b').value.split('::');
+      if (teamIdA === teamIdB && nameA === nameB) return;
+      const allTeams = getTeams();
+      const tA = allTeams.find(t => t.id === teamIdA);
+      const tB = allTeams.find(t => t.id === teamIdB);
+      const iA = tA.members.findIndex(m => m.name === nameA);
+      const iB = tB.members.findIndex(m => m.name === nameB);
+      if (iA === -1 || iB === -1) return;
+      [tA.members[iA], tB.members[iB]] = [tB.members[iB], tA.members[iA]];
+      saveTeams(allTeams);
+      renderSteward(body);
+    });
+
+    document.getElementById('tnbrl-clear-results').addEventListener('click', () => {
+      if (!confirm('Clear all race results? Teams stay intact.')) return;
+      saveResults([]); renderSteward(body);
+    });
+    document.getElementById('tnbrl-clear-all').addEventListener('click', () => {
+      if (!confirm('Reset EVERYTHING — series, teams, results? This cannot be undone.')) return;
+      saveSeries(null); saveTeams([]); saveResults([]); renderSteward(body);
+    });
+  }
+
+  /* ============================================================
+     CAPTURE BANNER
      ============================================================ */
   function showCaptureBanner(track, racers) {
-    let el = document.getElementById('trl-capture-banner');
-    const matches = findMatchingSeries(track);
-    if (!matches.length) { if (el) el.remove(); return; }
-
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'trl-capture-banner';
-      document.body.appendChild(el);
+    let el = document.getElementById('tnbrl-capture-banner');
+    const series = getSeries();
+    if (!series || !series.tracks.some(t => t.name.toLowerCase() === track.toLowerCase())) {
+      if (el) el.remove();
+      return;
     }
+    if (!el) { el = document.createElement('div'); el.id = 'tnbrl-capture-banner'; document.body.appendChild(el); }
     el.innerHTML = `
-      <div><b>${escapeHtml(track)}</b></div>
-      <div style="margin:4px 0;">${racers.length} drivers seen — matches: ${matches.map(s => escapeHtml(s.name)).join(', ')}</div>
-      <select id="trl-banner-series" class="trl-select" style="width:100%; margin-bottom:6px;">
-        ${matches.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}
-      </select>
-      <button class="trl-btn primary" id="trl-banner-go" style="width:100%;">📥 Log this race</button>
-      <div id="trl-banner-msg" style="font-size:11px; margin-top:4px;"></div>
-    `;
-    document.getElementById('trl-banner-go').onclick = () => {
-      const seriesId = document.getElementById('trl-banner-series').value;
-      const r = captureRace(seriesId, track, racers);
-      document.getElementById('trl-banner-msg').textContent = r.ok ? `Logged ${r.count} drivers ✓` : r.message;
+      <b>${esc(track)}</b><br>
+      <span style="color:#667085; font-size:11px;">${racers.length} drivers &mdash; matches series</span><br><br>
+      <button class="tnbrl-btn primary" id="tnbrl-banner-go" style="width:100%;">📥 Log this race</button>
+      <div id="tnbrl-banner-msg" style="font-size:11px; margin-top:5px; color:#667085;"></div>`;
+    document.getElementById('tnbrl-banner-go').onclick = () => {
+      const r = logRace(track, racers);
+      document.getElementById('tnbrl-banner-msg').textContent = r.ok ? `Logged ${r.count} drivers ✓` : r.msg;
     };
   }
 
   /* ============================================================
      AJAX HOOK
      ============================================================ */
-  function hookRacingAjax() {
+  function hookAjax() {
     if (!$) return;
-    $(document).ajaxComplete((event, xhr, settings) => {
+    $(document).ajaxComplete((e, xhr, settings) => {
       if (xhr.readyState > 3 && xhr.status === 200 && settings.url && settings.url.includes('sid=racing')) {
         try {
           const data = JSON.parse(xhr.responseText);
-          if (!data || !data.timeData || data.timeData.status < 3) return;
+          if (!data?.timeData || data.timeData.status < 3) return;
           const titleEl = document.querySelector('div.title-black.t-overflow');
-          const titleText = data.raceData?.title || (titleEl ? titleEl.textContent.trim() : '');
-          const track = normalizeTrackName(titleText);
-          const racers = decodeAllRacers(data);
+          const titleText = data.raceData?.title || titleEl?.textContent?.trim() || '';
+          const track = normalizeTrack(titleText);
+          const racers = decodeRacers(data);
           if (!track || racers.length < 2) return;
-          window.__trlLastSnapshot = { track, racers };
+          window.__tnbrl_snapshot = { track, racers };
           showCaptureBanner(track, racers);
-        } catch (e) { /* ignore malformed payloads */ }
+        } catch (e) {}
       }
     });
   }
 
   /* ============================================================
-     INIT
+     BUTTON INJECTION
+     Only injects on sid=racing and all its subpages (tab= params).
+     Finds the page title element and appends the button inline.
+     If the exact selector is wrong, right-click the "Torn City
+     Raceway" heading in your browser → Inspect, and send the
+     element class/ID so I can hard-code it.
      ============================================================ */
-  function init() {
-    if (isRacingPage()) injectButton();
-    hookRacingAjax();
+  function findHeader() {
+    for (const sel of ['.content-title h4','.content-title h1','.title-black','h1','.linksGroup h4']) {
+      const el = document.querySelector(sel);
+      if (el && el.textContent.trim()) return el;
+    }
+    return null;
   }
 
-  const observer = new MutationObserver(() => {
+  function injectButton() {
     if (!isRacingPage()) return;
-    if (document.getElementById('trl-btn')) { observer.disconnect(); return; }
-    injectButton();
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+    if (document.getElementById('tnbrl-btn')) return;
+    const header = findHeader();
+    if (!header) return;
 
-  init();
+    const btn = document.createElement('span');
+    btn.id = 'tnbrl-btn';
+    btn.title = 'Open the Nuclear Blast Racing League panel';
+    btn.innerHTML = `<span class="tnbrl-flag">🏁</span> League`;
+    header.appendChild(btn);
+    btn.addEventListener('click', openModal);
+  }
+
+  /* ============================================================
+     INIT
+     ============================================================ */
+  if (isRacingPage()) {
+    injectButton();
+    hookAjax();
+    const obs = new MutationObserver(() => {
+      if (document.getElementById('tnbrl-btn')) { obs.disconnect(); return; }
+      injectButton();
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
 })();
