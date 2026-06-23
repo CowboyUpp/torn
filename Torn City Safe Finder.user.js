@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.1.0
+// @version      1.1.1
 // @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -20,7 +20,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.1.0';
+    const VERSION = '1.1.1';
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -395,84 +395,89 @@
         if (document.getElementById('tcfs-styles')) return;
 
         const css = `
-            #tcfs-fab {
-                position: fixed;
-                z-index: 2147483000;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                padding: 10px 16px;
-                
-                /* Gritty Steel Texturing & Industrial Bevel System */
-                background: linear-gradient(135deg, #444444 0%, #2b2b2b 50%, #1f1f1f 100%);
-                border: 2px solid #555555;
-                border-top-color: #777777;
-                border-left-color: #666666;
-                border-bottom-color: #333333;
-                border-right-color: #444444;
-                border-radius: 6px;
-                
-                /* Heavy Dimensional Drop Shadows */
-                box-shadow: 
-                    inset 0 1px 0px rgba(255,255,255,0.15),
-                    inset 0 -1px 3px rgba(0,0,0,0.6),
-                    0 4px 12px rgba(0, 0, 0, 0.65),
-                    0 0 1px rgba(0,0,0,0.9);
-                
-                cursor: pointer;
-                user-select: none;
-                touch-action: none;
-                font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            #tcfs-fab{
+                position:fixed;
+                z-index:2147483000;
+
+                display:flex;
+                align-items:center;
+                gap:8px;
+
+                height:42px;
+                padding:0 14px;
+
+                border-radius:10px;
+
+                border:1px solid #555;
+
+                background:
+                    linear-gradient(#5a5a5a 0%, #434343 8%, #2f2f2f 50%, #232323 100%);
+
+                box-shadow:
+                    inset 0 1px rgba(255,255,255,.18),
+                    inset 0 -1px rgba(0,0,0,.45),
+                    0 2px 5px rgba(0,0,0,.45);
+
+                cursor:pointer;
+                user-select:none;
+                touch-action:none;
+
+                font-family:Arial,sans-serif;
+
+                transition:background .15s ease,
+                           transform .1s ease,
+                           box-shadow .15s ease;
             }
-            #tcfs-fab .cfc-icon {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                opacity: 0.8;
-                transition: transform 0.2s ease, opacity 0.2s ease;
+
+            #tcfs-fab:hover{
+                background:
+                    linear-gradient(#666 0%, #4b4b4b 8%, #383838 50%, #2d2d2d 100%);
             }
-            #tcfs-fab .cfc-label {
-                color: #d1c7bd;
-                font-size: 13px;
-                font-weight: 700;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.9);
+
+            #tcfs-fab:active{
+                transform:translateY(1px);
             }
-            #tcfs-fab .tcfs-badge {
-                background-color: #1a1a1a;
-                color: #85B200; /* Torn Safe Green Accent */
-                font-size: 11px;
-                font-weight: bold;
-                padding: 2px 6px;
-                border-radius: 3px;
-                border: 1px solid #333333;
-                box-shadow: inset 0 1px 3px rgba(0,0,0,0.8);
-                display: none;
+
+            #tcfs-fab .cfc-icon{
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                opacity:.9;
             }
-            #tcfs-fab:hover {
-                background: linear-gradient(135deg, #555555 0%, #363636 50%, #262626 100%);
-                border-color: #777777;
-                border-top-color: #999999;
-                border-left-color: #888888;
-                box-shadow: 
-                    inset 0 1px 0px rgba(255,255,255,0.25),
-                    inset 0 -1px 3px rgba(0,0,0,0.5),
-                    0 6px 14px rgba(0, 0, 0, 0.75),
-                    0 0 4px rgba(255, 184, 71, 0.15);
+
+            #tcfs-fab .cfc-label{
+                color:#f2f2f2;
+                font-size:14px;
+                font-weight:700;
+                letter-spacing:.2px;
+                text-transform:uppercase;
+                text-shadow:0 1px 1px #000;
             }
-            #tcfs-fab:hover .cfc-label {
-                color: #fff3e3;
-            }
-            #tcfs-fab:hover .cfc-icon {
-                opacity: 1;
-                transform: scale(1.05);
-            }
-            #tcfs-fab:active {
-                background: linear-gradient(135deg, #222222 0%, #1f1f1f 100%);
-                box-shadow: 
-                    inset 0 2px 4px rgba(0,0,0,0.8),
-                    0 2px 5px rgba(0, 0, 0, 0.5);
+
+            #tcfs-fab .tcfs-badge{
+                width:22px;
+                height:22px;
+
+                display:none;
+                align-items:center;
+                justify-content:center;
+
+                background:#1d1d1d;
+
+                border:1px solid #3d3d3d;
+
+                border-radius:4px;
+
+                color:#9dcc2d;
+
+                font-size:12px;
+                font-weight:700;
+
+                padding:0;
+
+                box-shadow:
+                    inset 0 1px rgba(255,255,255,.08),
+                    inset 0 -1px rgba(0,0,0,.35);
             }
             #tcfs-panel {
                 position: fixed;
@@ -574,7 +579,38 @@
                 outline: none;
             }
             .tcfs-tools input { flex: 1; padding: 0 9px; }
-            .tcfs-tools select { width: 116px; padding: 0 6px; }
+            .tcfs-tools select{
+                width:116px;
+
+                padding:0 10px;
+
+                background:#2b2b2b;
+
+                color:#ffffff;
+
+                border:1px solid #5b5b5b;
+
+                font-weight:600;
+
+                appearance:auto;
+            }
+
+            .tcfs-tools select option{
+                background:#2d2d2d;
+                color:#ffffff;
+                font-weight:600;
+            }
+
+            .tcfs-settings select{
+                background:#2b2b2b;
+                color:#ffffff;
+                border:1px solid #5b5b5b;
+            }
+
+            .tcfs-settings select option{
+                background:#2d2d2d;
+                color:#ffffff;
+            }
             .tcfs-summary {
                 display: flex;
                 align-items: center;
