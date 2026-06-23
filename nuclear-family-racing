@@ -13,27 +13,45 @@
 ;(function (window, document) {
   'use strict';
 
-  // --- [CORE 5.7 LOGIC] ---
-  // (All your original configuration, CSS, and UI logic remains here)
+  // --- CONFIGURATION ---
   var CONFIG_STORAGE_KEY = 'nbf_v3_api_key';
-  // ... [Keep all your original vars, CSS, and functions here] ...
-  
-  // NOTE: Ensure your existing functions (mountFloatingInterface, renderModalInterface, etc.) are intact.
+  var CONFIG_THEME_KEY   = 'nbf_v3_theme';
+  var CONFIG_LEAGUE_KEY  = 'nbf_v57_league_cfg'; 
+  var ENGINE_VERSION     = '5.7.1';
 
-  // --- [NB Racing] Scraper Integration (v5.7.1) ---
+  // --- FACTION & TRACK DATA ---
+  var TARGET_FACTIONS = [
+    { id: 8085, name: 'Nuclear Blast' }, { id: 8954, name: 'Nuclear Armageddon' },
+    { id: 16282, name: 'Nuclear Winter' }, { id: 12094, name: 'Nuclear Fusion' },
+    { id: 21028, name: 'Nuclear Clinic' }, { id: 13851, name: 'Nuclear Therapy' },
+    { id: 17133, name: 'Torn Medical' }, { id: 366, name: 'Evolution' },
+    { id: 15222, name: 'Ionization' }, { id: 9754, name: 'Emergency Room' }
+  ];
+
+  // --- CORE ENGINE FUNCTIONS (Original Logic) ---
+  // [Placeholder: Your original 5.7 functions like mountFloatingInterface, renderModalInterface, etc. go here]
+  // Ensure your original functions are exactly as they were in your working v5.7 file.
+
+  // --- [NB Racing] Dashboard UI ---
+  function renderLeagueDashboard() {
+      if (document.getElementById('nb-league-dashboard')) return;
+      const dashboard = document.createElement('div');
+      dashboard.id = 'nb-league-dashboard';
+      dashboard.style.cssText = "position: fixed; bottom: 20px; right: 20px; z-index: 99999; background: #2a2a2a; color: #fff; padding: 10px; border-radius: 5px; border: 1px solid #444;";
+      dashboard.innerHTML = "<strong>League Dashboard</strong><br>Status: Active (v5.7.1)";
+      document.body.appendChild(dashboard);
+  }
+
+  // --- [NB Racing] Scraper Logic ---
   function checkAndScrapeRace() {
     const leaderBoard = document.getElementById('leaderBoard');
     if (!leaderBoard) {
-      console.log("[NB Racing] Leaderboard not found, retrying...");
       setTimeout(checkAndScrapeRace, 1000);
       return;
     }
-
     const raceID = new URLSearchParams(window.location.search).get('raceID');
     const drivers = leaderBoard.querySelectorAll('li[id^="lbr-"]');
     
-    console.log(`[NB Racing] Found ${drivers.length} drivers for Race ID: ${raceID}`);
-
     const results = [];
     drivers.forEach((driverLi) => {
         const placeText = driverLi.querySelector('.race-place')?.textContent.replace(/\D/g, '') || "0";
@@ -51,18 +69,20 @@
         },
         results: results
     };
-
-    console.log("[NB Racing] Payload ready:", payload);
+    console.log("[NB Racing] Payload extracted:", payload);
   }
 
-  // --- Trigger Initialization ---
+  // --- Initialization ---
   window.addEventListener('load', function() {
-      // 1. Run your original UI build
+      // 1. Initialize original UI
       if (typeof mountFloatingInterface === 'function') {
           mountFloatingInterface();
       }
+      
+      // 2. Initialize Dashboard
+      renderLeagueDashboard();
 
-      // 2. Run the Scraper if on log page
+      // 3. Scrape if on log
       if (window.location.href.includes('tab=log')) {
           checkAndScrapeRace();
       }
