@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nuclear Family — MultiFaction Edition (Hyper-Drive)
 // @namespace    torn.com.nuclearfamily.strict
-// @version      5.5
-// @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, snake drafting, and league configurators.
+// @version      5.6
+// @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, snake drafting, and track select drop-downs.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
 // @match        https://www.torn.com/loader.php?sid=racing*
@@ -18,8 +18,8 @@
   var CONFIG_THEME_KEY   = 'nbf_v3_theme';
   var CONFIG_CACHE_KEY   = 'nbf_v3_data_cache';
   var CONFIG_TIME_KEY    = 'nbf_v3_cache_time';
-  var CONFIG_LEAGUE_KEY  = 'nbf_v53_league_cfg';
-  var CACHE_DURATION     = 86400000; // Expanded to 24 Hours to optimize API calls
+  var CONFIG_LEAGUE_KEY  = 'nbf_v56_league_cfg'; // Incremented key version for tracks state shift
+  var CACHE_DURATION     = 86400000;
 
   // --- ALLIANCE TARGET MATRIX ---
   var TARGET_FACTIONS = [
@@ -33,6 +33,13 @@
     { id: 366,   name: 'Evolution' },
     { id: 15222, name: 'Ionization' },
     { id: 9754,  name: 'Emergency Room' }
+  ];
+
+  // --- TRACK LIST MATRIX ---
+  var AVAILABLE_TRACKS = [
+    "Uptown", "Withdrawal", "Underdog", "Parkland", "Docks", "Commerce", 
+    "Two Islands", "Industrial", "Vector", "Mudpit", "Hammerhead", 
+    "Sewage", "Meltdown", "Speedway", "Stone Park", "Convict"
   ];
 
   // --- CONSOLIDATED KNOWLEDGE BASE ITEMS ---
@@ -59,20 +66,20 @@
   var FLAG_IS_FETCHING    = false;
   var STATE_COMPARE_A     = '';
   var STATE_COMPARE_B     = '';
-  var STATE_ACTIVE_TAB    = 'leaderboard'; // Options: leaderboard, setup, help
+  var STATE_ACTIVE_TAB    = 'leaderboard';
 
   // --- LEAGUE ENGINE CONFIG ---
   var LEAGUE_STATE = JSON.parse(localStorage.getItem(CONFIG_LEAGUE_KEY)) || {
-    compType: 'solo', // solo vs teams
-    scopeType: 'all', // all vs single
+    compType: 'solo',
+    scopeType: 'all',
     scopeFactionId: 'all',
     teamCount: 4,
-    tracksCount: 5,
+    selectedTracks: ["Uptown", "Withdrawal", "Underdog", "Parkland", "Docks"], // Default selected tracks array
     lapsCount: 10,
-    scoringType: 'standard', // standard, handicap, best_lap
+    scoringType: 'standard',
     generatedTeams: []
   };
-  var ENGINE_VERSION = '5.5';
+  var ENGINE_VERSION = '5.6';
 
   // Inject UI Stylesheet
   var cssStyleNode = document.createElement('style');
@@ -98,7 +105,11 @@
       '.nbf-tooltip-host { position: relative !important; display: inline-block !important; cursor: help !important; margin-left: 4px !important; background: var(--nbf-bdg) !important; color: var(--nbf-mut) !important; font-size: 10px !important; width: 14px !important; height: 14px !important; line-height: 14px !important; text-align: center !important; border-radius: 50% !important; font-weight: bold !important; }' +
       '.nbf-tooltip-host .nbf-tooltip-text { visibility: hidden !important; width: 220px !important; background-color: ' + tooltipBg + ' !important; color: ' + tooltipTxt + ' !important; text-align: left !important; border-radius: 6px !important; padding: 8px !important; position: absolute !important; z-index: 9999999 !important; bottom: 125% !important; left: 50% !important; margin-left: -110px !important; opacity: 0 !important; transition: opacity 0.2s !important; font-size: 11px !important; font-family: sans-serif !important; font-weight: normal !important; line-height: 1.4 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important; pointer-events: none !important; white-space: normal !important; }' +
       '.nbf-tooltip-host:hover .nbf-tooltip-text { visibility: visible !important; opacity: 1 !important; }' +
-      '.nbf-faq-item { border: 1px solid var(--nbf-bld) !important; border-radius: 6px !important; margin-bottom: 8px !important; background: var(--nbf-main) !important; overflow: hidden !important; }';
+      '.nbf-faq-item { border: 1px solid var(--nbf-bld) !important; border-radius: 6px !important; margin-bottom: 8px !important; background: var(--nbf-main) !important; overflow: hidden !important; }' +
+      '.nbf-dropdown-menu { display: none; position: absolute; left: 0; right: 0; top: 100%; background: var(--nbf-field-bg); border: 1px solid var(--nbf-btn-border); border-radius: 6px; max-height: 180px; overflow-y: auto; z-index: 100000; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 6px; }' +
+      '.nbf-dropdown-menu.show { display: block; }' +
+      '.nbf-track-option { display: flex; align-items: center; gap: 8px; padding: 4px 6px; cursor: pointer; border-radius: 4px; font-size: 11px; }' +
+      '.nbf-track-option:hover { background: rgba(99, 102, 241, 0.15); }';
   }
 
   function mountFloatingInterface() {
@@ -133,7 +144,6 @@
     modalContainer.id = 'nbf-modal-container';
     applyModalThemeMatrix(modalContainer);
 
-    // --- MAIN DESIGN HEADER PANEL ---
     var viewHtml = '<div id="nbf-layout-header" style="padding:14px; border-bottom:1px solid var(--nbf-bld); display:flex; flex-direction:column; gap:10px; background:var(--nbf-alt);">';
     viewHtml += '  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; width:100%;">';
     viewHtml += '    <span style="font-size:15px; font-weight:600; color:var(--nbf-txt);">Nuclear Family Engine</span>';
@@ -147,7 +157,6 @@
     viewHtml += '    <button id="nbf-btn-close" style="margin-left:auto; padding:6px 12px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-base); color:var(--nbf-txt); font-weight:600;">✕ Close</button>';
     viewHtml += '  </div>';
 
-    // --- SUB CONTROLS (CONTEXT DEPENDENT PACK) ---
     viewHtml += '  <div id="nbf-context-controls" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; width:100%;">';
     viewHtml += '    <select id="nbf-field-faction" style="padding:6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; min-width:130px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="all">All Factions</option>';
     TARGET_FACTIONS.forEach(function(fac) { viewHtml += '<option value="' + fac.id + '">' + fac.name + '</option>'; });
@@ -166,14 +175,12 @@
     viewHtml += '<div id="nbf-layout-summary" style="display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid var(--nbf-bld); flex-wrap:wrap; background:var(--nbf-alt2);"></div>';
     viewHtml += '<div id="nbf-layout-progress" style="text-align:center; font-size:11px; color:#1e40af; font-weight:bold; padding:6px 0; background:#eff6ff; border-bottom:1px solid #bfdbfe; display:none;"></div>';
     
-    // Core Layout View Container
     viewHtml += '<div id="nbf-frame-scrollbox" style="background:var(--nbf-main);"><div id="nbf-layout-body"></div></div>';
 
     modalContainer.innerHTML = viewHtml;
     backdropMask.appendChild(modalContainer);
     document.body.appendChild(backdropMask);
 
-    // Attach View Routing Listeners
     document.getElementById('nbf-btn-close').addEventListener('click', function() { backdropMask.parentNode.removeChild(backdropMask); });
     backdropMask.addEventListener('click', function(e) { if (e.target === backdropMask) backdropMask.parentNode.removeChild(backdropMask); });
 
@@ -473,7 +480,6 @@
     runTableRenderer();
   }
 
-  // --- HELP / ACCORDION COMPONENT ENGINE ---
   function renderHelpPanelContent() {
     var targetContainer = document.getElementById('nbf-layout-body');
     if (!targetContainer) return;
@@ -499,11 +505,8 @@
         e.preventDefault();
         var currentIdx = this.getAttribute('data-fidx');
         var targetContentBlock = document.getElementById('nbf-faq-content-' + currentIdx);
-        
-        // Determine state BEFORE collapsing others
         var isCurrentlyHidden = (targetContentBlock.style.getPropertyValue('display') === 'none' || targetContentBlock.style.getPropertyValue('display').indexOf('none') !== -1);
 
-        // MUTUAL EXCLUSION: Collapse all entries cleanly
         var allContents = targetContainer.querySelectorAll('.nbf-faq-content');
         var allArrows = targetContainer.querySelectorAll('.nbf-arrow-indicator');
         for (var c = 0; c < allContents.length; c++) {
@@ -511,7 +514,6 @@
           if (allArrows[c]) allArrows[c].textContent = '▼';
         }
 
-        // Toggle selected row based on previous state
         if (isCurrentlyHidden) {
           targetContentBlock.style.setProperty('display', 'block', 'important');
           var targetArrow = this.querySelector('.nbf-arrow-indicator');
@@ -521,20 +523,21 @@
     }
   }
 
-  // --- REBUILT LEAGUE SETUP VIEW CONFIGURATOR ---
+  // --- LEAGUE SETUP VIEW CONFIGURATOR (TRACK DROPDOWN INCLUDED) ---
   function renderSetupPanelContent() {
     var targetContainer = document.getElementById('nbf-layout-body');
     if (!targetContainer) return;
 
+    var selectedCount = (LEAGUE_STATE.selectedTracks || []).length;
+    var dropdownLabel = selectedCount === 0 ? "Select Tracks..." : selectedCount + " Tracks Selected";
+
     var panelHtml = '<div style="padding:24px; max-width:840px; margin:0 auto; background:var(--nbf-main); font-family:sans-serif;">';
     
-    // Header block
     panelHtml += '  <div style="margin-bottom:20px; border-bottom:1px solid var(--nbf-bld); padding-bottom:12px;">';
     panelHtml += '    <h2 style="margin:0; font-size:16px; font-weight:600; color:var(--nbf-txt);">Tournament & League Setup Profile</h2>';
     panelHtml += '    <p style="margin:4px 0 0 0; font-size:12px; color:var(--nbf-mut);">Configure tracks, structural format rules, and balance algorithms for your active alliance tournament session.</p>';
     panelHtml += '  </div>';
 
-    // Primary Two-Column Row Layout Wrapper
     panelHtml += '  <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:24px;">';
 
     // COLUMN 1: System Rules & Matching Structure
@@ -555,11 +558,9 @@
     panelHtml += '    <div style="background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; display:flex; flex-direction:column; gap:14px;">';
     panelHtml += '      <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">Track & Tournament Scope</h3>';
     
-    // League Scope Selector (All Factions vs Single Faction choice)
     panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">League Scope Context</label>';
     panelHtml += '        <select id="nbf-cfg-scope" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="all"' + (LEAGUE_STATE.scopeType === 'all' ? ' selected' : '') + '>All Nuclear Family Factions</option><option value="single"' + (LEAGUE_STATE.scopeType === 'single' ? ' selected' : '') + '>Single Faction of Choice</option></select></div>';
 
-    // Choice Selector Dropdown (Dynamically displayed based on League Scope Context choice)
     var choiceWrapperDisplay = (LEAGUE_STATE.scopeType === 'single') ? 'display:flex;' : 'display:none;';
     panelHtml += '      <div id="nbf-cfg-scope-faction-wrap" style="' + choiceWrapperDisplay + ' flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Target Faction Profile</label>';
     panelHtml += '        <select id="nbf-cfg-scope-faction" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;">';
@@ -569,8 +570,21 @@
     panelHtml += '        </select></div>';
 
     panelHtml += '      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">';
-    panelHtml += '        <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Total Tracks</label>';
-    panelHtml += '          <input id="nbf-cfg-tracks" type="number" min="1" max="25" value="' + (LEAGUE_STATE.tracksCount || 5) + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
+    
+    // Custom Checkbox Dropdown Trigger
+    panelHtml += '        <div style="display:flex; flex-direction:column; gap:4px; position:relative;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Track Playlist</label>';
+    panelHtml += '          <button id="nbf-dropdown-trigger" style="padding:8px; text-align:left; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; cursor:pointer; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">' + dropdownLabel + ' ▼</button>';
+    panelHtml += '          <div id="nbf-dropdown-list" class="nbf-dropdown-menu">';
+    AVAILABLE_TRACKS.forEach(function(track) {
+      var isChecked = (LEAGUE_STATE.selectedTracks || []).indexOf(track) !== -1 ? ' checked' : '';
+      panelHtml += '          <label class="nbf-track-option">';
+      panelHtml += '            <input type="checkbox" class="nbf-track-checkbox" value="' + track + '"' + isChecked + ' style="margin:0; cursor:pointer;" />';
+      panelHtml += '            <span style="color:var(--nbf-txt);">' + track + '</span>';
+      panelHtml += '          </label>';
+    });
+    panelHtml += '          </div>';
+    panelHtml += '        </div>';
+
     panelHtml += '        <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Target Laps</label>';
     panelHtml += '          <input id="nbf-cfg-laps" type="number" min="1" max="100" value="' + (LEAGUE_STATE.lapsCount || 10) + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
     panelHtml += '      </div>';
@@ -580,18 +594,15 @@
     panelHtml += '      </div>';
     panelHtml += '    </div>';
 
-    panelHtml += '  </div>'; // End two-column grid
+    panelHtml += '  </div>';
 
-    // Generated Results Area Section
     panelHtml += '  <div id="nbf-cfg-results-zone"></div>';
     panelHtml += '</div>';
 
     targetContainer.innerHTML = panelHtml;
 
-    // Attach generation hook handlers
     document.getElementById('nbf-cfg-generate').addEventListener('click', processSnakeDraftCalculations);
     
-    // Scope adjustment interactive display monitor
     document.getElementById('nbf-cfg-scope').addEventListener('change', function() {
       var innerChoiceWrapper = document.getElementById('nbf-cfg-scope-faction-wrap');
       if (innerChoiceWrapper) {
@@ -600,14 +611,42 @@
       syncStateTracker();
     });
 
-    // Dynamic synchronous state save triggers
+    // Toggle dropdown display rules
+    var dropTrigger = document.getElementById('nbf-dropdown-trigger');
+    var dropMenu = document.getElementById('nbf-dropdown-list');
+    dropTrigger.addEventListener('click', function(e) {
+      e.stopPropagation();
+      dropMenu.classList.toggle('show');
+    });
+
+    // Close options window when clicking anywhere outside the elements sandbox
+    document.addEventListener('click', function(e) {
+      if (dropMenu && !dropTrigger.contains(e.target) && !dropMenu.contains(e.target)) {
+        dropMenu.classList.remove('show');
+      }
+    });
+
+    // Watch internal checkboxes modifications dynamically
+    var checkboxes = targetContainer.querySelectorAll('.nbf-track-checkbox');
+    for (var c = 0; c < checkboxes.length; c++) {
+      checkboxes[c].addEventListener('change', function() {
+        var activeSelections = [];
+        var targets = targetContainer.querySelectorAll('.nbf-track-checkbox:checked');
+        for (var k = 0; k < targets.length; k++) {
+          activeSelections.push(targets[k].value);
+        }
+        LEAGUE_STATE.selectedTracks = activeSelections;
+        dropTrigger.textContent = activeSelections.length === 0 ? "Select Tracks..." : activeSelections.length + " Tracks Selected ▼";
+        syncStateTracker();
+      });
+    }
+
     var syncStateTracker = function() {
       LEAGUE_STATE.compType = document.getElementById('nbf-cfg-type').value;
       LEAGUE_STATE.teamCount = parseInt(document.getElementById('nbf-cfg-teams').value) || 4;
       LEAGUE_STATE.scoringType = document.getElementById('nbf-cfg-scoring').value;
       LEAGUE_STATE.scopeType = document.getElementById('nbf-cfg-scope').value;
       LEAGUE_STATE.scopeFactionId = document.getElementById('nbf-cfg-scope-faction').value;
-      LEAGUE_STATE.tracksCount = parseInt(document.getElementById('nbf-cfg-tracks').value) || 5;
       LEAGUE_STATE.lapsCount = parseInt(document.getElementById('nbf-cfg-laps').value) || 10;
       localStorage.setItem(CONFIG_LEAGUE_KEY, JSON.stringify(LEAGUE_STATE));
     };
@@ -616,7 +655,6 @@
     document.getElementById('nbf-cfg-teams').addEventListener('input', syncStateTracker);
     document.getElementById('nbf-cfg-scoring').addEventListener('change', syncStateTracker);
     document.getElementById('nbf-cfg-scope-faction').addEventListener('change', syncStateTracker);
-    document.getElementById('nbf-cfg-tracks').addEventListener('input', syncStateTracker);
     document.getElementById('nbf-cfg-laps').addEventListener('input', syncStateTracker);
 
     if (LEAGUE_STATE.generatedTeams && LEAGUE_STATE.generatedTeams.length > 0) {
@@ -631,7 +669,6 @@
       return;
     }
 
-    // Apply League Scope rule to matching engine pipeline filters
     if (LEAGUE_STATE.scopeType === 'single') {
       rawDataset = rawDataset.filter(function(driver) {
         return String(driver.factionId) === String(LEAGUE_STATE.scopeFactionId);
