@@ -21,6 +21,7 @@
     
     // --- [NB Racing] Dashboard UI ---
     function renderLeagueDashboard() {
+        // Safety check to prevent duplicates
         if (document.getElementById('nb-league-dashboard')) return;
 
         const dashboard = document.createElement('div');
@@ -29,10 +30,9 @@
             position: fixed; top: 100px; right: 20px; width: 350px; height: auto;
             background: #2a2a2a; color: #fff; border: 2px solid #555;
             z-index: 9999; padding: 15px; border-radius: 8px; font-size: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5); pointer-events: auto;
         `;
 
-        // Mock data structure
         const mockData = [
             { team: "Alpha Squad", points: 145, handicap: "+0.4s", lastPos: "1st" },
             { team: "Bravo Unit", points: 132, handicap: "-0.2s", lastPos: "3rd" },
@@ -49,7 +49,7 @@
         `).join('');
 
         dashboard.innerHTML = `
-            <h4 style="margin: 0 0 10px 0; color: #ffcc00;">League Standings</h4>
+            <h4 style="margin: 0 0 10px 0; color: #ffcc00; border-bottom: 1px solid #444; padding-bottom: 5px;">League Standings</h4>
             <table style="width: 100%; border-collapse: collapse;">
                 <thead>
                     <tr style="border-bottom: 1px solid #555;">
@@ -61,11 +61,12 @@
                 </thead>
                 <tbody>${rows}</tbody>
             </table>
-            <button id="close-nb-dash" style="margin-top: 10px; width: 100%;">Refresh Data</button>
+            <button id="close-nb-dash" style="margin-top: 10px; width: 100%; cursor: pointer;">Refresh Data</button>
         `;
 
+        // Using body ensures we don't accidentally wipe out inner content wrappers used by original script
         document.body.appendChild(dashboard);
-        document.getElementById('close-nb-dash').onclick = () => alert("Backend connection required for refresh.");
+        document.getElementById('close-nb-dash').onclick = () => console.log("Refresh requested...");
     }
 
     // --- [NB Racing] Scraper Logic ---
@@ -88,11 +89,14 @@
         console.log("[NB Racing] Payload extracted:", { race_id: raceID, results });
     }
 
-    // --- Dynamic Triggers ---
-    if (window.location.href.includes('tab=log')) {
-        checkAndScrapeRace();
-    } else if (window.location.href.includes('sid=racing')) {
-        renderLeagueDashboard();
-    }
+    // --- Trigger Logic with Delay ---
+    // Delaying ensures your main buttons have time to render first
+    setTimeout(() => {
+        if (window.location.href.includes('tab=log')) {
+            checkAndScrapeRace();
+        } else if (window.location.href.includes('sid=racing')) {
+            renderLeagueDashboard();
+        }
+    }, 2000);
 
 })();
