@@ -96,9 +96,7 @@
       '.nbf-tooltip-host { position: relative !important; display: inline-block !important; cursor: help !important; margin-left: 4px !important; background: var(--nbf-bdg) !important; color: var(--nbf-mut) !important; font-size: 10px !important; width: 14px !important; height: 14px !important; line-height: 14px !important; text-align: center !important; border-radius: 50% !important; font-weight: bold !important; }' +
       '.nbf-tooltip-host .nbf-tooltip-text { visibility: hidden !important; width: 220px !important; background-color: ' + tooltipBg + ' !important; color: ' + tooltipTxt + ' !important; text-align: left !important; border-radius: 6px !important; padding: 8px !important; position: absolute !important; z-index: 9999999 !important; bottom: 125% !important; left: 50% !important; margin-left: -110px !important; opacity: 0 !important; transition: opacity 0.2s !important; font-size: 11px !important; font-family: sans-serif !important; font-weight: normal !important; line-height: 1.4 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important; pointer-events: none !important; white-space: normal !important; }' +
       '.nbf-tooltip-host:hover .nbf-tooltip-text { visibility: visible !important; opacity: 1 !important; }' +
-      '.nbf-faq-item { border: 1px solid var(--nbf-bld) !important; border-radius: 6px !important; margin-bottom: 8px !important; background: var(--nbf-main) !important; overflow: hidden !important; }' +
-      '.nbf-faq-header { padding: 10px 12px !important; background: var(--nbf-alt) !important; font-weight: 600 !important; cursor: pointer !important; display: flex !important; justify-content: space-between !important; align-items: center !important; }' +
-      '.nbf-faq-content { padding: 12px !important; border-top: 1px solid var(--nbf-bld) !important; display: none !important; line-height: 1.5 !important; color: var(--nbf-txt) !important; background: var(--nbf-main) !important; }';
+      '.nbf-faq-item { border: 1px solid var(--nbf-bld) !important; border-radius: 6px !important; margin-bottom: 8px !important; background: var(--nbf-main) !important; overflow: hidden !important; }';
   }
 
   function mountFloatingInterface() {
@@ -485,8 +483,8 @@
 
     FAQ_DATABASE.forEach(function(item, idx) {
       panelHtml += '    <div class="nbf-faq-item">';
-      panelHtml += '      <div class="nbf-faq-header" data-fidx="' + idx + '"><span style="color:var(--nbf-txt); font-size:12px;">' + item.q + '</span><span style="color:var(--nbf-mut); font-size:11px;">▼</span></div>';
-      panelHtml += '      <div id="nbf-faq-content-' + idx + '" class="nbf-faq-content" style="font-size:12px;">' + item.a + '</div>';
+      panelHtml += '      <div class="nbf-faq-header" data-fidx="' + idx + '" style="padding: 10px 12px; background: var(--nbf-alt); font-weight: 600; cursor: pointer; display: flex; justify-content: space-between; align-items: center;"><span style="color:var(--nbf-txt); font-size:12px;">' + item.q + '</span><span class="nbf-arrow-indicator" style="color:var(--nbf-mut); font-size:11px;">▼</span></div>';
+      panelHtml += '      <div id="nbf-faq-content-' + idx + '" class="nbf-faq-content" style="font-size:12px; padding: 12px; border-top: 1px solid var(--nbf-bld); display: none !important; line-height: 1.5; color: var(--nbf-txt); background: var(--nbf-main);"> ' + item.a + '</div>';
       panelHtml += '    </div>';
     });
 
@@ -495,23 +493,27 @@
 
     var headers = targetContainer.querySelectorAll('.nbf-faq-header');
     for (var h = 0; h < headers.length; h++) {
-      headers[h].addEventListener('click', function() {
+      headers[h].addEventListener('click', function(e) {
+        e.preventDefault();
         var currentIdx = this.getAttribute('data-fidx');
         var targetContentBlock = document.getElementById('nbf-faq-content-' + currentIdx);
-        var isCurrentlyHidden = targetContentBlock.style.display !== 'block';
+        
+        // Determine state BEFORE collapsing others
+        var isCurrentlyHidden = (targetContentBlock.style.getPropertyValue('display') === 'none' || targetContentBlock.style.getPropertyValue('display').indexOf('none') !== -1);
 
-        // MUTUAL EXCLUSION ACCORDION LOGIC: Collapse all rows first
+        // MUTUAL EXCLUSION: Collapse all entries cleanly
         var allContents = targetContainer.querySelectorAll('.nbf-faq-content');
-        var allHeaders  = targetContainer.querySelectorAll('.nbf-faq-header');
+        var allArrows = targetContainer.querySelectorAll('.nbf-arrow-indicator');
         for (var c = 0; c < allContents.length; c++) {
-          allContents[c].style.display = 'none';
-          allHeaders[c].querySelector('span:last-child').textContent = '▼';
+          allContents[c].style.setProperty('display', 'none', 'important');
+          if (allArrows[c]) allArrows[c].textContent = '▼';
         }
 
-        // If the clicked row was hidden, open it now
+        // Toggle selected row based on previous state
         if (isCurrentlyHidden) {
-          targetContentBlock.style.display = 'block';
-          this.querySelector('span:last-child').textContent = '▲';
+          targetContentBlock.style.setProperty('display', 'block', 'important');
+          var targetArrow = this.querySelector('.nbf-arrow-indicator');
+          if (targetArrow) targetArrow.textContent = '▲';
         }
       });
     }
