@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Nuclear Blast Family — Racing Skills - MultiFaction Edition (Hyper-Drive)
+// @name         Nuclear Family Racing Skills - MultiFaction Edition (Hyper-Drive)
 // @namespace    torn.com.nuclearfamily.strict
 // @version      5.2
 // @description  Deeply isolated multi-faction alliance dashboard. Upgraded with Dynamic Handicaps, Head-to-Head Compare, and Advanced League Analytics. Strict flat legacy syntax.
