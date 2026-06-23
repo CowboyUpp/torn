@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nuclear Family — MultiFaction Edition (Hyper-Drive)
 // @namespace    torn.com.nuclearfamily.strict
-// @version      5.7
+// @version      5.7.1
 // @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, Class Handicaps, and track select drop-downs.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
@@ -14,52 +14,85 @@
 (function() {
     'use strict';
 
-    // --- YOUR EXISTING CORE CODE START ---
-    // [Paste all of your original version 5.7 logic here]
+    // --- [Paste your original v5.7 logic here] ---
     
     
     
     
-    // --- YOUR EXISTING CORE CODE END ---
+    // --- [NB Racing] Dashboard UI ---
+    function renderLeagueDashboard() {
+        if (document.getElementById('nb-league-dashboard')) return;
+
+        const dashboard = document.createElement('div');
+        dashboard.id = 'nb-league-dashboard';
+        dashboard.style.cssText = `
+            position: fixed; top: 100px; right: 20px; width: 350px; height: auto;
+            background: #2a2a2a; color: #fff; border: 2px solid #555;
+            z-index: 9999; padding: 15px; border-radius: 8px; font-size: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        `;
+
+        // Mock data structure
+        const mockData = [
+            { team: "Alpha Squad", points: 145, handicap: "+0.4s", lastPos: "1st" },
+            { team: "Bravo Unit", points: 132, handicap: "-0.2s", lastPos: "3rd" },
+            { team: "Charlie Delta", points: 110, handicap: "0.0s", lastPos: "2nd" }
+        ];
+
+        let rows = mockData.map(d => `
+            <tr>
+                <td style="padding: 5px;">${d.team}</td>
+                <td style="padding: 5px; text-align: center;">${d.points}</td>
+                <td style="padding: 5px; text-align: center;">${d.handicap}</td>
+                <td style="padding: 5px; text-align: center;">${d.lastPos}</td>
+            </tr>
+        `).join('');
+
+        dashboard.innerHTML = `
+            <h4 style="margin: 0 0 10px 0; color: #ffcc00;">League Standings</h4>
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="border-bottom: 1px solid #555;">
+                        <th style="text-align: left;">Team</th>
+                        <th>Pts</th>
+                        <th>Hndcp</th>
+                        <th>Last</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+            <button id="close-nb-dash" style="margin-top: 10px; width: 100%;">Refresh Data</button>
+        `;
+
+        document.body.appendChild(dashboard);
+        document.getElementById('close-nb-dash').onclick = () => alert("Backend connection required for refresh.");
+    }
 
     // --- [NB Racing] Scraper Logic ---
     function checkAndScrapeRace() {
         const leaderBoard = document.getElementById('leaderBoard');
         if (!leaderBoard) {
-            console.log("[NB Racing] Leaderboard not found, retrying...");
             setTimeout(checkAndScrapeRace, 1000);
             return;
         }
-
         const raceID = new URLSearchParams(window.location.search).get('raceID');
         const drivers = leaderBoard.querySelectorAll('li[id^="lbr-"]');
-        
-        console.log(`[NB Racing] Found ${drivers.length} drivers for Race ID: ${raceID}`);
-
         const results = [];
         drivers.forEach((driverLi) => {
-            const placeText = driverLi.querySelector('.race-place')?.textContent.replace(/\D/g, '') || "0";
-            const position = parseInt(placeText, 10);
-            const name = driverLi.querySelector('.race-name')?.textContent.trim() || "Unknown";
-            const time = driverLi.querySelector('.time')?.textContent.trim() || "DNF";
-            results.push({ position, name, time });
+            results.push({
+                position: parseInt(driverLi.querySelector('.race-place')?.textContent.replace(/\D/g, '') || "0", 10),
+                name: driverLi.querySelector('.race-name')?.textContent.trim() || "Unknown",
+                time: driverLi.querySelector('.time')?.textContent.trim() || "DNF"
+            });
         });
-
-        const payload = {
-            race_id: raceID,
-            race_meta: {
-                track: document.querySelector('.title-black.top-round')?.textContent.split('-')[0].trim() || "Unknown",
-                timestamp: Date.now()
-            },
-            results: results
-        };
-
-        console.log("Payload ready for submission:", payload);
+        console.log("[NB Racing] Payload extracted:", { race_id: raceID, results });
     }
 
-    // Trigger logic
+    // --- Dynamic Triggers ---
     if (window.location.href.includes('tab=log')) {
         checkAndScrapeRace();
+    } else if (window.location.href.includes('sid=racing')) {
+        renderLeagueDashboard();
     }
 
 })();
