@@ -361,7 +361,6 @@
     return topId;
   }
 
-  // --- LEADERBOARD GRID RENDER ENGINE ---
   // --- LEADERBOARD GRID RENDER ENGINE (STREAMLINED & CLEAN) ---
   function runTableRenderer() {
     var dataset = parseRuntimePipeline();
@@ -404,7 +403,6 @@
     for (var r = 0; r < rows.length; r++) {
       rows[r].addEventListener('click', function() { toggleDuelSelection(this.getAttribute('data-pid')); });
     }
-  }
   
       // KISS rule: Medal icon is appended strictly BEHIND the name string, only for full unsearched views.
       var medalMarker = '';
