@@ -362,11 +362,9 @@
   }
 
   // --- LEADERBOARD GRID RENDER ENGINE ---
+  // --- LEADERBOARD GRID RENDER ENGINE (STREAMLINED & CLEAN) ---
   function runTableRenderer() {
     var dataset = parseRuntimePipeline();
-    var searchEl = document.getElementById('nbf-field-search');
-    var isSearching = searchEl && searchEl.value.trim().length > 0;
-    var trueLeaderId = findAbsoluteLeaderId();
 
     var separationLineStyle = STATE_DARK_MODE ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
     var dynamicAnchorColor  = STATE_DARK_MODE ? '#60a5fa' : '#1d6fa4';
@@ -380,6 +378,34 @@
       var calculatedRatio = (player.racing_ratio !== undefined ? player.racing_ratio : 0).toFixed(1) + '%';
       var handicapDisplay = player.handicap !== undefined ? '+' + player.handicap.toFixed(1) : '0.0';
 
+      var rowClass = '';
+      if (String(player.id) === STATE_COMPARE_A || String(player.id) === STATE_COMPARE_B) { rowClass = ' class="nbf-row-selected"'; }
+
+      var rowString = '<tr' + rowClass + ' style="' + separationLineStyle + ' cursor:pointer;" data-pid="' + player.id + '">';
+      rowString += '<td style="padding:8px 14px; color:var(--nbf-mut);">' + (slot + 1) + '</td>';
+      rowString += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + player.id + '" target="_blank" style="color:' + dynamicAnchorColor + '; text-decoration:none; font-weight:600;" onclick="event.stopPropagation();">' + player.name + '</a></td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;" title="' + player.factionName + '">' + (player.factionName || '—') + '</td>';
+      rowString += '<td style="padding:8px 4px;"><span style="background:' + badgeObject.bg + '; color:' + badgeObject.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + badgeObject.title + '</span></td>';
+      rowString += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nbf-bdg); min-width:40px;"><div style="width:' + progressWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + descriptionMutedText + '; min-width:28px; text-align:right;">' + absoluteSkill.toFixed(2) + '</span></div></td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_wins !== undefined ? player.racing_wins : '—') + '</td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.races_entered !== undefined ? player.races_entered : '—') + '</td>';
+      rowString += '<td style="padding:8px 4px; font-weight:600; color:' + highlightBoldText + ';">' + calculatedRatio + '</td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_points !== undefined ? player.racing_points : '—') + '</td>';
+      rowString += '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48;">' + handicapDisplay + '</td>';
+      rowString += '</tr>';
+      return rowString;
+    }).join('');
+
+    var targetBodyDOM = document.getElementById('nbf-layout-body');
+    if (!targetBodyDOM) return;
+    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
+
+    var rows = targetBodyDOM.querySelectorAll('tbody tr');
+    for (var r = 0; r < rows.length; r++) {
+      rows[r].addEventListener('click', function() { toggleDuelSelection(this.getAttribute('data-pid')); });
+    }
+  }
+  
       // KISS rule: Medal icon is appended strictly BEHIND the name string, only for full unsearched views.
       var medalMarker = '';
       if (!isSearching && String(player.id) === String(trueLeaderId)) {
