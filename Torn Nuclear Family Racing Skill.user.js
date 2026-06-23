@@ -933,3 +933,49 @@
      setInterval(mountFloatingInterface, 1500);
   }
 })(window, document);
+// --- EMERGENCY OVERRIDE FOR TABLE RENDER ---
+window.runTableRenderer = function() {
+    var dataset = typeof parseRuntimePipeline === 'function' ? parseRuntimePipeline() : [];
+    var stateDarkMode = typeof STATE_DARK_MODE !== 'undefined' ? STATE_DARK_MODE : true;
+    var runMaxSkill = typeof RUNTIME_MAX_SKILL !== 'undefined' ? RUNTIME_MAX_SKILL : 10;
+    var compA = typeof STATE_COMPARE_A !== 'undefined' ? STATE_COMPARE_A : '';
+    var compB = typeof STATE_COMPARE_B !== 'undefined' ? STATE_COMPARE_B : '';
+
+    var sepLine = stateDarkMode ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
+    var lnkCol  = stateDarkMode ? '#60a5fa' : '#1d6fa4';
+    var mutCol  = stateDarkMode ? '#9ca3af' : '#475569';
+    var bldCol  = stateDarkMode ? '#f3f4f6' : '#0f172a';
+
+    var markupRows = dataset.map(function(p, i) {
+        var skill = p.racing_skill !== undefined ? p.racing_skill : 0;
+        var pWidth = runMaxSkill > 0 ? Math.round((skill / runMaxSkill) * 100) : 0;
+        var b = (typeof resolveRankBadge === 'function') ? resolveRankBadge(skill) : {bg:'#374151', text:'#fff', title:'—'};
+        var ratio = (p.racing_ratio !== undefined ? p.racing_ratio : 0).toFixed(1) + '%';
+        var hc = p.handicap !== undefined ? '+' + p.handicap.toFixed(1) : '0.0';
+        var rCls = (String(p.id) === compA || String(p.id) === compB) ? ' class="nbf-row-selected"' : '';
+
+        return '<tr' + rCls + ' style="' + sepLine + ' cursor:pointer;" data-pid="' + p.id + '">' +
+            '<td style="padding:8px 14px; color:var(--nbf-mut);">' + (i + 1) + '</td>' +
+            '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + p.id + '" target="_blank" style="color:' + lnkCol + '; text-decoration:none; font-weight:600;" onclick="event.stopPropagation();">' + (p.name || 'Unknown') + '</a></td>' +
+            '<td style="padding:8px 4px; color:' + mutCol + '; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;" title="' + (p.factionName || '') + '">' + (p.factionName || '—') + '</td>' +
+            '<td style="padding:8px 4px;"><span style="background:' + b.bg + '; color:' + b.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + b.title + '</span></td>' +
+            '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nbf-bdg); min-width:40px;"><div style="width:' + pWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + mutCol + '; min-width:28px; text-align:right;">' + skill.toFixed(2) + '</span></div></td>' +
+            '<td style="padding:8px 4px; color:' + mutCol + ';">' + (p.racing_wins !== undefined ? p.racing_wins : '—') + '</td>' +
+            '<td style="padding:8px 4px; color:' + mutCol + ';">' + (p.races_entered !== undefined ? p.races_entered : '—') + '</td>' +
+            '<td style="padding:8px 4px; font-weight:600; color:' + bldCol + ';">' + ratio + '</td>' +
+            '<td style="padding:8px 4px; color:' + mutCol + ';">' + (p.racing_points !== undefined ? p.racing_points : '—') + '</td>' +
+            '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48;">' + hc + '</td>' +
+            '</tr>';
+    }).join('');
+
+    var target = document.getElementById('nbf-layout-body');
+    if (!target) return;
+    target.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
+
+    var trs = target.querySelectorAll('tbody tr');
+    for (var j = 0; j < trs.length; j++) {
+        trs[j].addEventListener('click', function() {
+            if (typeof toggleDuelSelection === 'function') toggleDuelSelection(this.getAttribute('data-pid'));
+        });
+    }
+};
