@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nuclear Family — MultiFaction Edition (Hyper-Drive)
 // @namespace    torn.com.nuclearfamily.strict
-// @version      5.3
+// @version      5.4
 // @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, snake drafting, and league configurators.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
@@ -41,6 +41,8 @@
     { q: "why does the dashboard only show up on the racing pages?", a: "To keep your game running fast! There is no need for this script to slow down your browser or reload itself while you are checking your gym stats, traveling, or trading. It stays completely quiet and out of the way until you visit the racing section, popping up exactly when and where you actually need it." },
     { q: "why does it say @grant none in the header?", a: "This is an advanced security measure. By declaring '@grant none', the script explicitly strips itself of elevated browser script privileges. This means it physically cannot bypass native browser sandbox policies or exfiltrate your game profile data to unintended locations." },
     { q: "what key access level should i use?", a: "We strongly recommend using a Limited Access or Public Only API key. The dashboard only requires basic public data fields to read faction rosters and individual driver personalstats; it never requires Full Access." },
+    { q: "what is a snake draft?", a: "A snake draft is a team distribution method that ensures fair team balancing. Instead of assigning drivers in a repetitive 1-2-3-4 sequence, the order 'snakes' back and forth: Team 1 to Team 4, and then Team 4 back to Team 1. This prevents the first team from getting all the top tier drivers, distributing overall racing skill evenly across all squads." },
+    { q: "explain handicap", a: "The handicap system acts as a skill equalizer for custom tournaments. It takes the highest driver skill level in the entire pool as a benchmark and subtracts your personal racing skill from it. This leaves you with a positive handicap offset value—representing a theoretical points boost or time head-start needed to level the playing field for lower-tiered drivers." },
     { q: "how does the dynamic handicap score work?", a: "The formula subtracts a driver's current racing skill from the maximum skill found within the alliance pool. This produces a positive offset handicap value, indicating the theoretical time head-start or points boost required to equalize the playing field." },
     { q: "how does the snake draft system distribute players?", a: "The system sorts your selected driver pool from highest skill to lowest skill. It then steps back-and-forth through your team slots (e.g., Team 1 to Team 4, then Team 4 back to Team 1). This ensures that the overall skill averages across all teams remain as evenly matched as mathematically possible." }
   ];
@@ -66,7 +68,7 @@
     generatedTeams: []
   };
 
-  var ENGINE_VERSION = '5.3';
+  var ENGINE_VERSION = '5.4';
 
   // Inject UI Stylesheet
   var cssStyleNode = document.createElement('style');
@@ -93,8 +95,8 @@
       '.nbf-tooltip-host .nbf-tooltip-text { visibility: hidden !important; width: 220px !important; background-color: ' + tooltipBg + ' !important; color: ' + tooltipTxt + ' !important; text-align: left !important; border-radius: 6px !important; padding: 8px !important; position: absolute !important; z-index: 9999999 !important; bottom: 125% !important; left: 50% !important; margin-left: -110px !important; opacity: 0 !important; transition: opacity 0.2s !important; font-size: 11px !important; font-family: sans-serif !important; font-weight: normal !important; line-height: 1.4 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important; pointer-events: none !important; white-space: normal !important; }' +
       '.nbf-tooltip-host:hover .nbf-tooltip-text { visibility: visible !important; opacity: 1 !important; }' +
       '.nbf-faq-item { border: 1px solid var(--nbf-bld) !important; border-radius: 6px !important; margin-bottom: 8px !important; background: var(--nbf-main) !important; overflow: hidden !important; }' +
-      '.nbf-faq-header { padding: 10px 12px !important; background: var(--nbf-alt) !important; font-weight: 600 !important; cursor: pointer !important; display: flex !important; justify-content: space-between !important; align-items: center !important; }' +
-      '.nbf-faq-content { padding: 12px !important; border-top: 1px solid var(--nbf-bld) !important; display: none !important; line-height: 1.5 !important; color: var(--nbf-txt) !important; background: var(--nbf-main) !important; }';
+      '.nbf-faq-header { padding: 10px 12px !important; background: var(--nbf-alt) !important; font-weight: 600 !important; cursor: pointer !important; display: flex !important; justify-content: space-between !important; align-items: center !important; user-select: none !important; }' +
+      '.nbf-faq-content { padding: 12px !important; border-top: 1px solid var(--nbf-bld) !important; display: none; line-height: 1.5 !important; color: var(--nbf-txt) !important; background: var(--nbf-main) !important; }';
   }
 
   function mountFloatingInterface() {
@@ -110,7 +112,7 @@
     floatingActionBtn.addEventListener('click', function(e) {
       e.preventDefault(); e.stopPropagation();
       var existingBackdrop = document.getElementById('nbf-backdrop-mask');
-      if (existingBackdrop) { backdropMask.parentNode.removeChild(existingBackdrop); } else { renderModalInterface(); }
+      if (existingBackdrop) { existingBackdrop.parentNode.removeChild(existingBackdrop); } else { renderModalInterface(); }
     });
   }
 
@@ -670,7 +672,9 @@
         var parent = this.parentNode;
         var content = parent.querySelector('.nbf-faq-content');
         var indicator = this.querySelector('span:last-child');
-        var isOpen = content.style.display === 'block';
+        
+        // Fix: Explicitly check computed styles if element inline layout isn't set yet
+        var isOpen = content.style.display === 'block' || window.getComputedStyle(content).display === 'block';
         
         content.style.display = isOpen ? 'none' : 'block';
         indicator.textContent = isOpen ? '▼' : '▲';
