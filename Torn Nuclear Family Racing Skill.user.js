@@ -1,981 +1,145 @@
 // ==UserScript==
-// @name         Nuclear Blast Family — Racing Skills - MultiFaction Edition (Hyper-Drive)
-// @namespace    torn.com.nuclearfamily.strict
-// @version      5.3
-// @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, snake drafting, and league configurators.
-// @author       cowboyup
-// @match        https://www.torn.com/page.php?sid=racing*
+// @name         Torn Faction Racing Dashboard
+// @namespace    http://tampermonkey.net/
+// @version      5.4
+// @description  Streamlined Racing Dashboard & Analytics (Medal Removed)
+// @author       You
 // @match        https://www.torn.com/loader.php?sid=racing*
-// @license      MIT
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      api.torn.com
 // ==/UserScript==
 
-;(function (window, document) {
-  'use strict';
-
-  // --- STORAGE & CACHE KEY CONFIGURATION ---
-  var CONFIG_STORAGE_KEY = 'nbf_v3_api_key';
-  var CONFIG_THEME_KEY   = 'nbf_v3_theme';
-  var CONFIG_CACHE_KEY   = 'nbf_v3_data_cache';
-  var CONFIG_TIME_KEY    = 'nbf_v3_cache_time';
-  var CONFIG_LEAGUE_KEY  = 'nbf_v53_league_cfg';
-  var CACHE_DURATION     = 86400000; // Expanded to 24 Hours to optimize API calls
-
-  // --- ALLIANCE TARGET MATRIX ---
-  var TARGET_FACTIONS = [
-    { id: 8085,  name: 'Nuclear Blast' },
-    { id: 8954,  name: 'Nuclear Armageddon' },
-    { id: 16282, name: 'Nuclear Winter' },
-    { id: 12094, name: 'Nuclear Fusion' },
-    { id: 21028, name: 'Nuclear Clinic' },
-    { id: 13851, name: 'Nuclear Therapy' },
-    { id: 17133, name: 'Torn Medical' },
-    { id: 366,   name: 'Evolution' },
-    { id: 15222, name: 'Ionization' },
-    { id: 9754,  name: 'Emergency Room' }
-  ];
-
-  // --- PREDEFINED KNOWLEDGE BASE ITEMS ---
-  var FAQ_DATABASE = [
-    { q: "is my api key safe?", a: "Yes completely. Your API key is stored strictly inside your secure local browser sandbox (localStorage). It is never sent to third-party analytics trackers or external logging platforms; it communicates only via direct, encrypted HTTPS requests directly to api.torn.com." },
-    { q: "why does the dashboard only show up on the racing pages?", a: "To keep your game running fast! There is no need for this script to slow down your browser or reload itself while you are checking your gym stats, traveling, or trading. It stays completely quiet and out of the way until you visit the racing section, popping up exactly when and where you actually need it." },
-    { q: "why does it say @grant none in the header?", a: "This is an advanced security measure. By declaring '@grant none', the script explicitly strips itself of elevated browser script privileges. This means it physically cannot bypass native browser sandbox policies or exfiltrate your game profile data to unintended locations." },
-    { q: "what key access level should i use?", a: "We strongly recommend using a Limited Access or Public Only API key. The dashboard only requires basic public data fields to read faction rosters and individual driver personalstats; it never requires Full Access." },
-    { q: "how does the dynamic handicap score work?", a: "The formula subtracts a driver's current racing skill from the maximum skill found within the alliance pool. This produces a positive offset handicap value, indicating the theoretical time head-start or points boost required to equalize the playing field." },
-    { q: "how does the snake draft system distribute players?", a: "The system sorts your selected driver pool from highest skill to lowest skill. It then steps back-and-forth through your team slots (e.g., Team 1 to Team 4, then Team 4 back to Team 1). This ensures that the overall skill averages across all teams remain as evenly matched as mathematically possible." }
-  ];
-
-  // --- APP VARIABLE STATE ---
-  var STATE_API_KEY       = localStorage.getItem(CONFIG_STORAGE_KEY) || '';
-  var STATE_DARK_MODE     = localStorage.getItem(CONFIG_THEME_KEY) === 'dark';
-  var RUNTIME_MEMBERS     = [];
-  var RUNTIME_MAX_SKILL   = 100;
-  var FLAG_IS_FETCHING    = false;
-  
-  var STATE_COMPARE_A     = '';
-  var STATE_COMPARE_B     = '';
-  var STATE_ACTIVE_TAB    = 'leaderboard'; // Options: leaderboard, setup, help
-
-  // --- LEAGUE ENGINE CONFIG ---
-  var LEAGUE_STATE = JSON.parse(localStorage.getItem(CONFIG_LEAGUE_KEY)) || {
-    compType: 'solo', // solo vs teams
-    teamCount: 4,
-    tracksCount: 5,
-    lapsCount: 10,
-    scoringType: 'standard', // standard, handicap, best_lap
-    generatedTeams: []
-  };
-
-  var ENGINE_VERSION = '5.3';
-
-  // Inject UI Stylesheet
-  var cssStyleNode = document.createElement('style');
-  cssStyleNode.id = 'nbf-hyper-drive-styles';
-  (document.head || document.documentElement).appendChild(cssStyleNode);
-
-  function dynamicCSSRefresh() {
-    var bgHeader   = STATE_DARK_MODE ? '#1e293b' : '#ffffff';
-    var textHeader = STATE_DARK_MODE ? '#94a3b8' : '#64748b';
-    var bldColor   = STATE_DARK_MODE ? '#334155' : '#cbd5e1';
-    var tooltipBg  = STATE_DARK_MODE ? '#1f2937' : '#0f172a';
-    var tooltipTxt = STATE_DARK_MODE ? '#f3f4f6' : '#ffffff';
-
-    cssStyleNode.textContent =
-      '#nbf-frame-scrollbox { overflow-y: auto !important; overflow-x: auto !important; flex: 1 !important; height: 100% !important; position: relative !important; }' +
-      '#nbf-table-view { width: 100% !important; border-collapse: separate !important; border-spacing: 0 !important; font-size: 11px !important; min-width: 720px !important; }' +
-      '#nbf-table-view thead th { position: sticky !important; top: 0 !important; z-index: 9999 !important; background-color: ' + bgHeader + ' !important; color: ' + textHeader + ' !important; font-weight: 600 !important; padding: 12px 4px 10px 14px !important; text-align: left !important; border-bottom: 2px solid ' + bldColor + ' !important; }' +
-      '#nbf-table-view th:first-child { padding-left: 14px !important; }' +
-      '#nbf-table-view th:last-child { padding-right: 14px !important; }' +
-      '.nbf-row-selected { background: rgba(99, 102, 241, 0.15) !important; }' +
-      '.nbf-tab-btn { padding: 6px 12px !important; border: 1px solid var(--nbf-bld) !important; background: var(--nbf-btn-base) !important; color: var(--nbf-txt) !important; font-size: 12px !important; font-weight: 600 !important; cursor: pointer !important; border-radius: 4px !important; }' +
-      '.nbf-tab-btn.active { background: #6366f1 !important; color: #ffffff !important; border-color: #6366f1 !important; }' +
-      '.nbf-tooltip-host { position: relative !important; display: inline-block !important; cursor: help !important; margin-left: 4px !important; background: var(--nbf-bdg) !important; color: var(--nbf-mut) !important; font-size: 10px !important; width: 14px !important; height: 14px !important; line-height: 14px !important; text-align: center !important; border-radius: 50% !important; font-weight: bold !important; }' +
-      '.nbf-tooltip-host .nbf-tooltip-text { visibility: hidden !important; width: 220px !important; background-color: ' + tooltipBg + ' !important; color: ' + tooltipTxt + ' !important; text-align: left !important; border-radius: 6px !important; padding: 8px !important; position: absolute !important; z-index: 9999999 !important; bottom: 125% !important; left: 50% !important; margin-left: -110px !important; opacity: 0 !important; transition: opacity 0.2s !important; font-size: 11px !important; font-family: sans-serif !important; font-weight: normal !important; line-height: 1.4 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important; pointer-events: none !important; white-space: normal !important; }' +
-      '.nbf-tooltip-host:hover .nbf-tooltip-text { visibility: visible !important; opacity: 1 !important; }' +
-      '.nbf-faq-item { border: 1px solid var(--nbf-bld) !important; border-radius: 6px !important; margin-bottom: 8px !important; background: var(--nbf-main) !important; overflow: hidden !important; }' +
-      '.nbf-faq-header { padding: 10px 12px !important; background: var(--nbf-alt) !important; font-weight: 600 !important; cursor: pointer !important; display: flex !important; justify-content: space-between !important; align-items: center !important; }' +
-      '.nbf-faq-content { padding: 12px !important; border-top: 1px solid var(--nbf-bld) !important; display: none !important; line-height: 1.5 !important; color: var(--nbf-txt) !important; background: var(--nbf-main) !important; }';
-  }
-
-  function mountFloatingInterface() {
-    if (document.getElementById('nbf-action-trigger-button')) return;
-    if (!document.body) return;
-
-    var floatingActionBtn = document.createElement('button');
-    floatingActionBtn.id = 'nbf-action-trigger-button';
-    floatingActionBtn.textContent = '⚡ Nuclear Hyper-Drive';
-    floatingActionBtn.style.cssText = 'position: fixed !important; bottom: 170px !important; right: 16px !important; z-index: 999999 !important; background: #6366f1 !important; color: #ffffff !important; border: none !important; border-radius: 8px !important; padding: 10px 18px !important; font-size: 14px !important; font-weight: 600 !important; cursor: pointer !important; box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; display: block !important;';
-
-    document.body.appendChild(floatingActionBtn);
-    floatingActionBtn.addEventListener('click', function(e) {
-      e.preventDefault(); e.stopPropagation();
-      var existingBackdrop = document.getElementById('nbf-backdrop-mask');
-      if (existingBackdrop) { backdropMask.parentNode.removeChild(existingBackdrop); } else { renderModalInterface(); }
-    });
-  }
-
-  function createTooltip(text) {
-    return '<span class="nbf-tooltip-host">?<span class="nbf-tooltip-text">' + text + '</span></span>';
-  }
-
-  function renderModalInterface() {
-    dynamicCSSRefresh();
-
-    var backdropMask = document.createElement('div');
-    backdropMask.id = 'nbf-backdrop-mask';
-    backdropMask.style.cssText = 'position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; background: rgba(0, 0, 0, 0.75) !important; z-index: 2147483640 !important; display: flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; padding: 12px !important;';
-
-    var modalContainer = document.createElement('div');
-    modalContainer.id = 'nbf-modal-container';
-    applyModalThemeMatrix(modalContainer);
-
-    // --- MAIN DESIGN HEADER PANEL ---
-    var viewHtml = '<div id="nbf-layout-header" style="padding:14px; border-bottom:1px solid var(--nbf-bld); display:flex; flex-direction:column; gap:10px; background:var(--nbf-alt);">';
-    viewHtml += '  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; width:100%;">';
-    viewHtml += '    <span style="font-size:15px; font-weight:600; color:var(--nbf-txt);">Nuclear Family Engine</span>';
-    viewHtml += '    <span style="font-size:10px; color:var(--nbf-mut); background:var(--nbf-bdg); border:1px solid var(--nbf-bld); padding:1px 5px; border-radius:4px;">v' + ENGINE_VERSION + '</span>';
-    viewHtml += '    <button id="nbf-ctrl-theme" style="font-size:13px; background:none; border:none; cursor:pointer; padding:2px 4px;">' + (STATE_DARK_MODE ? '☀️' : '🌙') + '</button>';
-    viewHtml += '    <div style="display:flex; gap:4px; margin-left:12px;">';
-    viewHtml += '      <button id="nbf-tab-leaderboard" class="nbf-tab-btn active">Leaderboard</button>';
-    viewHtml += '      <button id="nbf-tab-setup" class="nbf-tab-btn">League Setup</button>';
-    viewHtml += '      <button id="nbf-tab-help" class="nbf-tab-btn">Help Central</button>';
-    viewHtml += '    </div>';
-    viewHtml += '    <button id="nbf-btn-close" style="margin-left:auto; padding:6px 12px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-base); color:var(--nbf-txt); font-weight:600;">✕ Close</button>';
-    viewHtml += '  </div>';
-
-    // --- SUB CONTROLS (CONTEXT DEPENDENT PACK) ---
-    viewHtml += '  <div id="nbf-context-controls" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; width:100%;">';
-    viewHtml += '    <select id="nbf-field-faction" style="padding:6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; min-width:130px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="all">All Factions</option>';
-    TARGET_FACTIONS.forEach(function(fac) { viewHtml += '<option value="' + fac.id + '">' + fac.name + '</option>'; });
-    viewHtml += '    </select>';
-    viewHtml += '    <input id="nbf-field-search" type="text" placeholder="Search driver name..." style="padding:6px 8px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; width:140px; background:var(--nbf-field-bg); color:var(--nbf-txt);" />';
-    viewHtml += '    <select id="nbf-field-sort" style="padding:6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="racing_skill">Skill</option><option value="racing_ratio">Efficiency %</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="handicap">Handicap</option><option value="name">Name</option></select>';
-    viewHtml += '    <select id="nbf-field-direction" style="padding:6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="desc">Desc</option><option value="asc">Asc</option></select>';
-    viewHtml += '    <button id="nbf-btn-sync" style="padding:6px 10px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:#16a34a; color:#fff; font-weight:600;">🔄 Sync</button>';
-    viewHtml += '    <button id="nbf-btn-auth" style="padding:6px 10px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-base); color:var(--nbf-txt);">🔑</button>';
-    viewHtml += '    <button id="nbf-btn-csv" style="padding:6px 12px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-acc); color:var(--nbf-btn-acc-txt); font-weight:600;">📥 Export</button>';
-    viewHtml += '    <span id="nbf-txt-counter" style="font-size:11px; color:var(--nbf-txt); background:var(--nbf-bdg); padding:4px 8px; border-radius:20px; margin-left:auto;">Loading...</span>';
-    viewHtml += '    <span id="nbf-txt-cache" style="font-size:11px; font-weight:600;"></span>';
-    viewHtml += '  </div>';
-    viewHtml += '</div>';
-    
-    viewHtml += '<div id="nbf-layout-duel" style="display:none; padding:10px 14px; background:linear-gradient(90deg, #312e81, #1e1b4b); color:#fff; border-bottom:1px solid #4338ca; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;"></div>';
-    viewHtml += '<div id="nbf-layout-summary" style="display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid var(--nbf-bld); flex-wrap:wrap; background:var(--nbf-alt2);"></div>';
-    viewHtml += '<div id="nbf-layout-progress" style="text-align:center; font-size:11px; color:#1e40af; font-weight:bold; padding:6px 0; background:#eff6ff; border-bottom:1px solid #bfdbfe; display:none;"></div>';
-    
-    // Core Layout View Container
-    viewHtml += '<div id="nbf-frame-scrollbox" style="background:var(--nbf-main);"><div id="nbf-layout-body"></div></div>';
-
-    modalContainer.innerHTML = viewHtml;
-    backdropMask.appendChild(modalContainer);
-    document.body.appendChild(backdropMask);
-
-    // Attach View Routing Listeners
-    document.getElementById('nbf-btn-close').addEventListener('click', function() { backdropMask.parentNode.removeChild(backdropMask); });
-    backdropMask.addEventListener('click', function(e) { if (e.target === backdropMask) backdropMask.parentNode.removeChild(backdropMask); });
-
-    document.getElementById('nbf-tab-leaderboard').addEventListener('click', function() { switchViewRoute('leaderboard'); });
-    document.getElementById('nbf-tab-setup').addEventListener('click', function() { switchViewRoute('setup'); });
-    document.getElementById('nbf-tab-help').addEventListener('click', function() { switchViewRoute('help'); });
-
-    document.getElementById('nbf-field-faction').addEventListener('change', function() { routerViewRefresh(); });
-    document.getElementById('nbf-field-search').addEventListener('input', function() { routerViewRefresh(); });
-    document.getElementById('nbf-field-sort').addEventListener('change', function() { routerViewRefresh(); });
-    document.getElementById('nbf-field-direction').addEventListener('change', function() { routerViewRefresh(); });
-    
-    document.getElementById('nbf-btn-auth').addEventListener('click', function() { displayKeySetupPanel(modalContainer, function() { baseCacheRouter(true); }); });
-    document.getElementById('nbf-btn-csv').addEventListener('click', processDataExportToCSV);
-    document.getElementById('nbf-btn-sync').addEventListener('click', function() { if(!FLAG_IS_FETCHING) baseCacheRouter(true); });
-
-    document.getElementById('nbf-ctrl-theme').addEventListener('click', function() {
-      STATE_DARK_MODE = !STATE_DARK_MODE;
-      localStorage.setItem(CONFIG_THEME_KEY, STATE_DARK_MODE ? 'dark' : 'light');
-      document.getElementById('nbf-ctrl-theme').textContent = STATE_DARK_MODE ? '☀️' : '🌙';
-      dynamicCSSRefresh();
-      applyModalThemeMatrix(modalContainer);
-      routerViewRefresh();
-    });
-
-    if (!STATE_API_KEY) { displayKeySetupPanel(modalContainer, function() { baseCacheRouter(true); }); } else { baseCacheRouter(false); }
-  }
-
-  function applyModalThemeMatrix(domElement) {
-    if (STATE_DARK_MODE) {
-      domElement.style.cssText = 'width: 95vw !important; max-width: 940px !important; height: 85vh !important; max-height: 740px !important; background: #111827 !important; color: #f3f4f6 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.6) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important; --nbf-main: #111827; --nbf-alt: #1f2937; --nbf-alt2: #1e293b; --nbf-txt: #f3f4f6; --nbf-mut: #9ca3af; --nbf-bld: #374151; --nbf-btn-border: #4b5563; --nbf-bdg: #374151; --nbf-field-bg: #1f2937; --nbf-btn-base: #374151; --nbf-btn-acc: #1e40af; --nbf-btn-acc-txt: #ffffff;';
-    } else {
-      domElement.style.cssText = 'width: 95vw !important; max-width: 940px !important; height: 85vh !important; max-height: 740px !important; background: #fff !important; color: #111 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.4) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important; --nbf-main: #ffffff; --nbf-alt: #fcfcfc; --nbf-alt2: #f8fafc; --nbf-txt: #111111; --nbf-mut: #64748b; --nbf-bld: #e5e5e5; --nbf-btn-border: #cccccc; --nbf-bdg: #e2e8f0; --nbf-field-bg: #ffffff; --nbf-btn-base: #f1f5f9; --nbf-btn-acc: #e2e8f0; --nbf-btn-acc-txt: #0f172a;';
-    }
-  }
-
-  function switchViewRoute(targetTab) {
-    STATE_ACTIVE_TAB = targetTab;
-    var tabs = ['leaderboard', 'setup', 'help'];
-    tabs.forEach(function(t) {
-      var btn = document.getElementById('nbf-tab-' + t);
-      if (btn) { btn.classList.toggle('active', t === targetTab); }
-    });
-
-    var subControls = document.getElementById('nbf-context-controls');
-    var summaryLine = document.getElementById('nbf-layout-summary');
-    var duelBar      = document.getElementById('nbf-layout-duel');
-
-    if (targetTab === 'leaderboard') {
-      if (subControls) subControls.style.display = 'flex';
-      if (summaryLine) summaryLine.style.display = 'flex';
-      if (duelBar && STATE_COMPARE_A && STATE_COMPARE_B) duelBar.style.display = 'flex';
-    } else {
-      if (subControls) subControls.style.display = 'none';
-      if (summaryLine) summaryLine.style.display = 'none';
-      if (duelBar) duelBar.style.display = 'none';
-    }
-    routerViewRefresh();
-  }
-
-  function routerViewRefresh() {
-    if (STATE_ACTIVE_TAB === 'leaderboard') {
-      runTableRenderer();
-      refreshSummaryCards();
-    } else if (STATE_ACTIVE_TAB === 'setup') {
-      renderSetupPanelContent();
-    } else if (STATE_ACTIVE_TAB === 'help') {
-      renderHelpPanelContent();
-    }
-  }
-
-  function displayKeySetupPanel(modalWrapper, triggerOnSuccess) {
-    var layoutBody = document.getElementById('nbf-layout-body');
-    if (!layoutBody) return;
-    switchViewRoute('leaderboard');
-    
-    var subControls = document.getElementById('nbf-context-controls');
-    if (subControls) subControls.style.display = 'none';
-
-    var keyLength = STATE_API_KEY ? STATE_API_KEY.trim().length : 0;
-    var cleanMask = '';
-    if (keyLength > 0) {
-      cleanMask = STATE_API_KEY.trim().slice(0, 4);
-      for (var m = 0; m < Math.max(0, keyLength - 4); m++) { cleanMask += '•'; }
-    }
-
-    var initializationHtml = '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:3rem; background:var(--nbf-main);">';
-    initializationHtml += '<div style="width:100%; max-width:420px; background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:10px; padding:24px 20px;">';
-    initializationHtml += '<div style="font-size:15px; font-weight:600; color:var(--nbf-txt); margin-bottom:4px;">Enter Family Alliance Key</div>';
-    initializationHtml += '<div style="font-size:12px; color:var(--nbf-mut); margin-bottom:16px; line-height:1.5;">Saved locally inside your browser sandbox structure. Only explicitly shared with <code style="font-size:11px; background:var(--nbf-bdg); color:var(--nbf-txt); padding:1px 5px; border-radius:4px;">api.torn.com</code>.</div>';
-    initializationHtml += '<div style="position:relative; display:flex; align-items:center; margin-bottom:12px; width:100%;">';
-    initializationHtml += '<input id="nbf-auth-entry" type="password" placeholder="' + (cleanMask ? 'Current: ' + cleanMask : 'Paste limited API key here...') + '" autocomplete="off" style="width:100%; padding:8px 36px 8px 10px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:13px; box-sizing:border-box; background:var(--nbf-field-bg); color:var(--nbf-txt);" />';
-    initializationHtml += '<button id="nbf-auth-reveal" style="position:absolute; right:10px; background:none; border:none; cursor:pointer; font-size:14px; color:var(--nbf-mut); padding:0;">👁</button></div>';
-    initializationHtml += '<div id="nbf-auth-warning" style="font-size:11px; color:#c62828; margin-bottom:8px; display:none;">Please enter a valid API key.</div>';
-    initializationHtml += '<div style="display:flex; gap:8px; margin-top:4px;"><button id="nbf-auth-commit" style="flex:1; padding:9px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Save and Load Data</button>';
-    initializationHtml += (STATE_API_KEY ? '<button id="nbf-auth-wipe" style="padding:9px 14px; background:var(--nbf-field-bg); color:#c62828; border:1px solid #fca5a5; border-radius:6px; font-size:13px; cursor:pointer;">Clear</button>' : '');
-    initializationHtml += '</div></div></div>';
-
-    layoutBody.innerHTML = initializationHtml;
-
-    document.getElementById('nbf-auth-reveal').addEventListener('click', function() {
-      var field = document.getElementById('nbf-auth-entry');
-      field.type = field.type === 'password' ? 'text' : 'password';
-    });
-
-    var purgeButton = document.getElementById('nbf-auth-wipe');
-    if (purgeButton) {
-      purgeButton.addEventListener('click', function() {
-        STATE_API_KEY = '';
-        localStorage.removeItem(CONFIG_STORAGE_KEY);
-        document.getElementById('nbf-auth-entry').value = '';
-        document.getElementById('nbf-auth-entry').placeholder = 'Paste limited API key here...';
-        purgeButton.parentNode.removeChild(purgeButton);
-      });
-    }
-
-    document.getElementById('nbf-auth-commit').addEventListener('click', function() {
-      var field = document.getElementById('nbf-auth-entry');
-      var standardValue = field.value.trim();
-      if (!standardValue && !STATE_API_KEY) { document.getElementById('nbf-auth-warning').style.display = 'block'; return; }
-      if (standardValue) { STATE_API_KEY = standardValue; localStorage.setItem(CONFIG_STORAGE_KEY, STATE_API_KEY); }
-      if (subControls) subControls.style.display = 'flex';
-      layoutBody.innerHTML = '<p style="padding:2rem; text-align:center; color:var(--nbf-mut);">Preparing connections...</p>';
-      triggerOnSuccess();
-    });
-  }
-
-  function resolveRankBadge(skillPoints) {
-    if (skillPoints >= 100) return { title: 'Grand Champion', bg: '#fef3c7', text: '#b45309' };
-    if (skillPoints >= 75)  return { title: 'Master Elite',   bg: '#f3e8ff', text: '#6b21a8' };
-    if (skillPoints >= 50)  return { title: 'Expert Driver', bg: '#e0f2fe', text: '#0369a1' };
-    if (skillPoints >= 35)  return { title: 'Veteran',       bg: '#dcfce7', text: '#15803d' };
-    if (skillPoints >= 20)  return { title: 'Advanced',      bg: '#f1f5f9', text: '#334155' };
-    if (skillPoints >= 10)  return { title: 'Amateur',       bg: '#ffedd5', text: '#c2410c' };
-    return                         { title: 'Rookie',        bg: (STATE_DARK_MODE ? '#374151' : '#f3f4f6'), text: (STATE_DARK_MODE ? '#9ca3af' : '#4b5563') };
-  }
-
-  function renderStatModule(label, metric) {
-    return '<div style="background:var(--nbf-main); border:1px solid var(--nbf-bld); border-radius:6px; padding:6px 10px; min-width:75px; flex:1;"><div style="font-size:10px; color:var(--nbf-mut); text-transform:uppercase;">' + label + '</div><div style="font-size:14px; font-weight:600; color:var(--nbf-txt); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + metric + '</div></div>';
-  }
-
-  function parseRuntimePipeline() {
-    var facEl = document.getElementById('nbf-field-faction');
-    var selectedFactionId = facEl ? facEl.value : 'all';
-
-    var searchEl = document.getElementById('nbf-field-search');
-    var filteringKey = (searchEl ? searchEl.value : '').toLowerCase();
-
-    var sortEl = document.getElementById('nbf-field-sort');
-    var sortedProperty = sortEl ? sortEl.value : 'racing_skill';
-
-    var dirEl = document.getElementById('nbf-field-direction');
-    var directionMode = dirEl ? dirEl.value : 'desc';
-
-    var dataPool = RUNTIME_MEMBERS.filter(function(item) {
-      if (selectedFactionId !== 'all' && String(item.factionId) !== selectedFactionId) return false;
-      return item.name.toLowerCase().indexOf(filteringKey) !== -1;
-    });
-
-    dataPool.forEach(function(item) {
-      var skill = item.racing_skill !== undefined ? item.racing_skill : 0;
-      item.handicap = Math.max(0, RUNTIME_MAX_SKILL - skill);
-    });
-
-    dataPool.sort(function(alpha, beta) {
-      var nodeA = alpha[sortedProperty] !== undefined ? alpha[sortedProperty] : 0;
-      var nodeB = beta[sortedProperty] !== undefined ? beta[sortedProperty] : 0;
-      if (typeof nodeA === 'string') { nodeA = nodeA.toLowerCase(); nodeB = nodeB.toLowerCase(); }
-      if (nodeA < nodeB) return directionMode === 'asc' ? -1 : 1;
-      if (nodeA > nodeB) return directionMode === 'asc' ?  1 : -1;
-      return 0;
-    });
-
-    return dataPool;
-  }
-
-  function findAbsoluteLeaderId() {
-    if (!RUNTIME_MEMBERS || RUNTIME_MEMBERS.length === 0) return null;
-    var topSkill = -1;
-    var topId = null;
-    for (var i = 0; i < RUNTIME_MEMBERS.length; i++) {
-      var s = RUNTIME_MEMBERS[i].racing_skill || 0;
-      if (s > topSkill) {
-        topSkill = s;
-        topId = RUNTIME_MEMBERS[i].id;
-      }
-    }
-    return topId;
-  }
-
-  // --- LEADERBOARD GRID RENDER ENGINE (STREAMLINED & CLEAN) ---
-  function runTableRenderer() {
-    var dataset = parseRuntimePipeline();
-
-    var separationLineStyle = STATE_DARK_MODE ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
-    var dynamicAnchorColor  = STATE_DARK_MODE ? '#60a5fa' : '#1d6fa4';
-    var descriptionMutedText = STATE_DARK_MODE ? '#9ca3af' : '#475569';
-    var highlightBoldText   = STATE_DARK_MODE ? '#f3f4f6' : '#0f172a';
-
-    var markupRows = dataset.map(function(player, slot) {
-      var absoluteSkill = player.racing_skill !== undefined ? player.racing_skill : 0;
-      var progressWidth = RUNTIME_MAX_SKILL > 0 ? Math.round((absoluteSkill / RUNTIME_MAX_SKILL) * 100) : 0;
-      var badgeObject   = resolveRankBadge(absoluteSkill);
-      var calculatedRatio = (player.racing_ratio !== undefined ? player.racing_ratio : 0).toFixed(1) + '%';
-      var handicapDisplay = player.handicap !== undefined ? '+' + player.handicap.toFixed(1) : '0.0';
-
-      var rowClass = '';
-      if (String(player.id) === STATE_COMPARE_A || String(player.id) === STATE_COMPARE_B) { rowClass = ' class="nbf-row-selected"'; }
-
-      var rowString = '<tr' + rowClass + ' style="' + separationLineStyle + ' cursor:pointer;" data-pid="' + player.id + '">';
-      rowString += '<td style="padding:8px 14px; color:var(--nbf-mut);">' + (slot + 1) + '</td>';
-      rowString += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + player.id + '" target="_blank" style="color:' + dynamicAnchorColor + '; text-decoration:none; font-weight:600;" onclick="event.stopPropagation();">' + player.name + '</a></td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;" title="' + player.factionName + '">' + (player.factionName || '—') + '</td>';
-      rowString += '<td style="padding:8px 4px;"><span style="background:' + badgeObject.bg + '; color:' + badgeObject.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + badgeObject.title + '</span></td>';
-      rowString += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nbf-bdg); min-width:40px;"><div style="width:' + progressWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + descriptionMutedText + '; min-width:28px; text-align:right;">' + absoluteSkill.toFixed(2) + '</span></div></td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_wins !== undefined ? player.racing_wins : '—') + '</td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.races_entered !== undefined ? player.races_entered : '—') + '</td>';
-      rowString += '<td style="padding:8px 4px; font-weight:600; color:' + highlightBoldText + ';">' + calculatedRatio + '</td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_points !== undefined ? player.racing_points : '—') + '</td>';
-      rowString += '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48;">' + handicapDisplay + '</td>';
-      rowString += '</tr>';
-      return rowString;
-    }).join('');
-
-    var targetBodyDOM = document.getElementById('nbf-layout-body');
-    if (!targetBodyDOM) return;
-    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
-
-    var rows = targetBodyDOM.querySelectorAll('tbody tr');
-    for (var r = 0; r < rows.length; r++) {
-      rows[r].addEventListener('click', function() { toggleDuelSelection(this.getAttribute('data-pid')); });
-    }
-  
-      // KISS rule: Medal icon is appended strictly BEHIND the name string, only for full unsearched views.
-      var medalMarker = '';
-      if (!isSearching && String(player.id) === String(trueLeaderId)) {
-        medalMarker = ' 🥇';
-      }
-
-      var rowClass = '';
-      if (String(player.id) === STATE_COMPARE_A || String(player.id) === STATE_COMPARE_B) { rowClass = ' class="nbf-row-selected"'; }
-
-      var rowString = '<tr' + rowClass + ' style="' + separationLineStyle + ' cursor:pointer;" data-pid="' + player.id + '">';
-      rowString += '<td style="padding:8px 14px; color:var(--nbf-mut);">' + (slot + 1) + '</td>';
-      rowString += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + player.id + '" target="_blank" style="color:' + dynamicAnchorColor + '; text-decoration:none; font-weight:600;" onclick="event.stopPropagation();">' + player.name + '</a>' + medalMarker + '</td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;" title="' + player.factionName + '">' + (player.factionName || '—') + '</td>';
-      rowString += '<td style="padding:8px 4px;"><span style="background:' + badgeObject.bg + '; color:' + badgeObject.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + badgeObject.title + '</span></td>';
-      rowString += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nbf-bdg); min-width:40px;"><div style="width:' + progressWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + descriptionMutedText + '; min-width:28px; text-align:right;">' + absoluteSkill.toFixed(2) + '</span></div></td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_wins !== undefined ? player.racing_wins : '—') + '</td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.races_entered !== undefined ? player.races_entered : '—') + '</td>';
-      rowString += '<td style="padding:8px 4px; font-weight:600; color:' + highlightBoldText + ';">' + calculatedRatio + '</td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_points !== undefined ? player.racing_points : '—') + '</td>';
-      rowString += '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48;">' + handicapDisplay + '</td>';
-      rowString += '</tr>';
-      return rowString;
-    }).join('');
-
-    var targetBodyDOM = document.getElementById('nbf-layout-body');
-    if (!targetBodyDOM) return;
-    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
-
-    var rows = targetBodyDOM.querySelectorAll('tbody tr');
-    for (var r = 0; r < rows.length; r++) {
-      rows[r].addEventListener('click', function() { toggleDuelSelection(this.getAttribute('data-pid')); });
-    }
-  }
-
-  function toggleDuelSelection(playerId) {
-    if (STATE_COMPARE_A === playerId) { STATE_COMPARE_A = ''; }
-    else if (STATE_COMPARE_B === playerId) { STATE_COMPARE_B = ''; }
-    else if (!STATE_COMPARE_A) { STATE_COMPARE_A = playerId; }
-    else if (!STATE_COMPARE_B) { STATE_COMPARE_B = playerId; }
-    else { STATE_COMPARE_A = playerId; }
-    renderDuelInterface();
-    runTableRenderer();
-  }
-
-  function renderDuelInterface() {
-    var box = document.getElementById('nbf-layout-duel');
-    if (!box) return;
-    if (!STATE_COMPARE_A || !STATE_COMPARE_B) { box.style.display = 'none'; return; }
-
-    var pA = RUNTIME_MEMBERS.filter(function(m) { return String(m.id) === STATE_COMPARE_A; })[0];
-    var pB = RUNTIME_MEMBERS.filter(function(m) { return String(m.id) === STATE_COMPARE_B; })[0];
-    if (!pA || !pB) { box.style.display = 'none'; return; }
-
-    box.style.display = 'flex';
-    var html = '<div style="font-weight:700; font-size:12px; color:#a5b4fc; text-transform:uppercase; letter-spacing:0.5px;">⚔️ Live Compare:</div>';
-    html += '<div style="display:flex; gap:20px; flex:1; justify-content:center; align-items:center; font-size:12px;">';
-    html += '<div><strong>' + pA.name + '</strong> Skill: ' + pA.racing_skill.toFixed(2) + ' | Wins: ' + pA.racing_wins + ' (' + pA.racing_ratio.toFixed(1) + '%)</div>';
-    html += '<div style="font-weight:bold; color:#f43f5e;">VS</div>';
-    html += '<div><strong>' + pB.name + '</strong> Skill: ' + pB.racing_skill.toFixed(2) + ' | Wins: ' + pB.racing_wins + ' (' + pB.racing_ratio.toFixed(1) + '%)</div>';
-    html += '</div>';
-    html += '<button id="nbf-btn-clear-duel" style="background:#4338ca; border:none; color:#fff; padding:4px 8px; border-radius:4px; font-size:11px; cursor:pointer; font-weight:600;">Clear Duel</button>';
-    box.innerHTML = html;
-
-    document.getElementById('nbf-btn-clear-duel').addEventListener('click', function() {
-      STATE_COMPARE_A = ''; STATE_COMPARE_B = ''; box.style.display = 'none'; runTableRenderer();
-    });
-  }
-
-  function refreshSummaryCards() {
-    var dataset = parseRuntimePipeline();
-    var panelSummaryElement = document.getElementById('nbf-layout-summary');
-    if (!panelSummaryElement) return;
-
-    if (dataset.length === 0) {
-      panelSummaryElement.innerHTML = renderStatModule('Active Racers', 0) + renderStatModule('Top Performance', '0.00') + renderStatModule('Avg Skill Line', '0.00') + renderStatModule('Top Dog', 'None');
-      return;
-    }
-
-    var analyticsArray = dataset.map(function(m) { return m.racing_skill || 0; });
-    var validRacers    = analyticsArray.filter(function(s) { return s > 0; });
-
-    var summedSkill = 0;
-    for (var s = 0; s < validRacers.length; s++) { summedSkill += validRacers[s]; }
-
-    var averagedSkill  = validRacers.length ? (summedSkill / validRacers.length).toFixed(2) : 0;
-    var premiumSkill   = Math.max.apply(Math, analyticsArray);
-    
-    var leadDriverName = 'None';
-    for (var i = 0; i < dataset.length; i++) {
-      if (dataset[i].racing_skill === premiumSkill) { leadDriverName = dataset[i].name; break; }
-    }
-
-    panelSummaryElement.innerHTML = 
-      renderStatModule('Filtered Drivers', dataset.length) + 
-      renderStatModule('Top Performance', premiumSkill.toFixed(2)) + 
-      renderStatModule('Avg Skill Line', averagedSkill) + 
-      renderStatModule('Top Dog 👑', leadDriverName);
-  }
-
-  // --- LEAGUE CONFIGURATION PANEL (KISS STEPS) ---
-  function renderSetupPanelContent() {
-    var layoutBody = document.getElementById('nbf-layout-body');
-    if (!layoutBody) return;
-
-    var facDrop = document.getElementById('nbf-field-faction');
-    var activeFacName = facDrop ? facDrop.options[facDrop.selectedIndex].text : 'All Factions';
-    var activeFacId = facDrop ? facDrop.value : 'all';
-
-    var html = '<div style="padding:20px; max-width:800px; margin:0 auto; font-family:sans-serif; color:var(--nbf-txt);">';
-    
-    // --- STEP 1: LEAGUE RULES CARD ---
-    html += '<div style="background:var(--nbf-alt); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; margin-bottom:16px;">';
-    html += '  <h3 style="margin-top:0; margin-bottom:12px; font-size:14px; font-weight:600; display:flex; align-items:center; gap:4px;">🛠️ League Configurations & Scoring Rules</h3>';
-    
-    html += '  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:14px;">';
-    
-    html += '    <div><label style="display:block; font-size:11px; margin-bottom:4px; font-weight:600;">Competition Bracket' + createTooltip("Switch between full individual free-for-all leaderboards or automated team generations.") + '</label>';
-    html += '         <select id="nbf-cfg-compType" style="width:100%; padding:6px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt); border:1px solid var(--nbf-btn-border); border-radius:4px;">';
-    html += '           <option value="solo"' + (LEAGUE_STATE.compType === 'solo' ? ' selected' : '') + '>Single Racers (Free-For-All)</option>';
-    html += '           <option value="teams"' + (LEAGUE_STATE.compType === 'teams' ? ' selected' : '') + '>Teams (Snake Draft Matrix)</option>';
-    html += '         </select></div>';
-
-    html += '    <div id="nbf-wrapper-teamcount" style="display:' + (LEAGUE_STATE.compType === 'teams' ? 'block' : 'none') + ';"><label style="display:block; font-size:11px; margin-bottom:4px; font-weight:600;">Number of Target Squads' + createTooltip("How many distinct racing squads to build out of the active driver pool.") + '</label>';
-    html += '         <input id="nbf-cfg-teamCount" type="number" min="2" max="20" value="' + LEAGUE_STATE.teamCount + '" style="width:100%; padding:5px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt); border:1px solid var(--nbf-btn-border); border-radius:4px;" /></div>';
-
-    html += '    <div><label style="display:block; font-size:11px; margin-bottom:4px; font-weight:600;">Tournament Tracks Count' + createTooltip("How many total maps or track changes will run during this single championship setup.") + '</label>';
-    html += '         <input id="nbf-cfg-tracksCount" type="number" min="1" max="50" value="' + LEAGUE_STATE.tracksCount + '" style="width:100%; padding:5px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt); border:1px solid var(--nbf-btn-border); border-radius:4px;" /></div>';
-
-    html += '    <div><label style="display:block; font-size:11px; margin-bottom:4px; font-weight:600;">Laps Per Map' + createTooltip("The set distance or lap counts assigned to each individual track run.") + '</label>';
-    html += '         <input id="nbf-cfg-lapsCount" type="number" min="1" max="100" value="' + LEAGUE_STATE.lapsCount + '" style="width:100%; padding:5px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt); border:1px solid var(--nbf-btn-border); border-radius:4px;" /></div>';
-
-    html += '    <div><label style="display:block; font-size:11px; margin-bottom:4px; font-weight:600;">Scoring Algorithm System' + createTooltip("Choose how results score points: by standard ranking, handicap point additions, or fastest single lap time points.") + '</label>';
-    html += '         <select id="nbf-cfg-scoringType" style="width:100%; padding:6px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt); border:1px solid var(--nbf-btn-border); border-radius:4px;">';
-    html += '           <option value="standard"' + (LEAGUE_STATE.scoringType === 'standard' ? ' selected' : '') + '>Standard Order Points</option>';
-    html += '           <option value="handicap"' + (LEAGUE_STATE.scoringType === 'handicap' ? ' selected' : '') + '>Handicap Weight Added Points</option>';
-    html += '           <option value="best_lap"' + (LEAGUE_STATE.scoringType === 'best_lap' ? ' selected' : '') + '>Best Single Lap Time Points</option>';
-    html += '         </select></div>';
-
-    html += '  </div>';
-
-    // Cloudflare Management Header Simulation Box
-    html += '  <div style="border-top:1px solid var(--nbf-bld); padding-top:12px; margin-top:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">';
-    html += '     <button id="nbf-steward-login" style="background:var(--nbf-btn-base); border:1px solid var(--nbf-btn-border); color:var(--nbf-txt); padding:6px 12px; border-radius:4px; font-size:12px; font-weight:600; cursor:pointer;">Steward Authorization Check' + createTooltip("Verifies your account against Cloudflare database to activate tournament change controls.") + '</button>';
-    html += '     <span style="font-size:11px; color:var(--nbf-mut);">Local Engine (Cloudflare sync detached in Step 1)</span>';
-    html += '  </div>';
-    html += '</div>';
-
-    // --- STEP 2: SNAKE DRAFT OPERATIONS GENERATOR ---
-    if (LEAGUE_STATE.compType === 'teams') {
-      html += '<div style="background:var(--nbf-alt); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; margin-bottom:16px;">';
-      html += '  <h3 style="margin-top:0; margin-bottom:4px; font-size:14px; font-weight:600;">🐍 Fair-Balance Snake Draft Generator</h3>';
-      html += '  <p style="font-size:11px; color:var(--nbf-mut); margin-bottom:12px; margin-top:0;">Targeting Pool Filter: <strong>' + activeFacName + '</strong>. Ensures optimal balance of overall roster mechanics.</p>';
-      html += '  <button id="nbf-btn-run-draft" style="background:#6366f1; color:#fff; border:none; padding:8px 16px; font-weight:600; font-size:13px; border-radius:6px; cursor:pointer; display:block;">Run New Balanced Draft Matrix' + createTooltip("Calculates, groups, and assigns drivers using a back-and-forth snake system.") + '</button>';
-      html += '</div>';
-    }
-
-    // --- DRAFT RESULTS LIST MODULE ---
-    if (LEAGUE_STATE.compType === 'teams' && LEAGUE_STATE.generatedTeams && LEAGUE_STATE.generatedTeams.length > 0) {
-      html += '<div><h3 style="margin-top:0; font-size:13px; font-weight:600; margin-bottom:10px;">📋 Current Draft Standings</h3>';
-      html += '  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:12px;">';
-      
-      LEAGUE_STATE.generatedTeams.forEach(function(team, idx) {
-        html += '<div style="background:var(--nbf-main); border:1px solid var(--nbf-bld); border-radius:6px; padding:10px;">';
-        html += '  <div style="font-weight:700; font-size:12px; color:#6366f1; border-bottom:1px solid var(--nbf-bld); padding-bottom:4px; margin-bottom:6px; display:flex; justify-content:between; align-items:center;">';
-        html += '     <span>Team ' + (idx + 1) + '</span><span style="font-size:10px; color:var(--nbf-mut); font-weight:normal;">Avg Skill: ' + team.avgSkill + '</span>';
-        html += '  </div>';
-        html += '  <ul style="list-style:none; padding:0; margin:0; font-size:11px; line-height:1.6;">';
-        team.members.forEach(function(m) {
-          html += ' <li style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px dashed var(--nbf-bld); padding:2px 0;">';
-          html += '   <span>' + m.name + ' <span style="color:var(--nbf-mut); font-size:9px;">(' + m.fac + ')</span></span>';
-          html += '   <span style="font-weight:600; color:var(--nbf-mut);">' + m.skill.toFixed(2) + '</span>';
-          html += ' </li>';
-        });
-        html += '  </ul>';
-        html += '</div>';
-      });
-      
-      html += '  </div>';
-      html += '</div>';
-    } else if (LEAGUE_STATE.compType === 'teams') {
-      html += '<p style="text-align:center; padding:12px; color:var(--nbf-mut); font-style:italic;">No squads generated yet. Click the draft generator button above.</p>';
-    }
-
-    html += '</div>';
-    layoutBody.innerHTML = html;
-
-    // Hook Layout UI Control Actions
-    var compSelect = document.getElementById('nbf-cfg-compType');
-    if (compSelect) {
-      compSelect.addEventListener('change', function() {
-        LEAGUE_STATE.compType = this.value;
-        document.getElementById('nbf-wrapper-teamcount').style.display = this.value === 'teams' ? 'block' : 'none';
-        saveLeagueStateToLocalVault();
-        renderSetupPanelContent();
-      });
-    }
-
-    ['nbf-cfg-teamCount', 'nbf-cfg-tracksCount', 'nbf-cfg-lapsCount'].forEach(function(id) {
-      var input = document.getElementById(id);
-      if (input) {
-        input.addEventListener('change', function() {
-          var key = id.replace('nbf-cfg-', '');
-          LEAGUE_STATE[key] = Math.max(1, parseInt(this.value) || 1);
-          saveLeagueStateToLocalVault();
-        });
-      }
-    });
-
-    var scoringSelect = document.getElementById('nbf-cfg-scoringType');
-    if (scoringSelect) {
-      scoringSelect.addEventListener('change', function() {
-        LEAGUE_STATE.scoringType = this.value;
-        saveLeagueStateToLocalVault();
-      });
-    }
-
-    var runDraftBtn = document.getElementById('nbf-btn-run-draft');
-    if (runDraftBtn) { runDraftBtn.addEventListener('click', executeInternalSnakeDraftAlgorithm); }
-
-    var stLoginBtn = document.getElementById('nbf-steward-login');
-    if (stLoginBtn) {
-      stLoginBtn.addEventListener('click', function() {
-        alert("KISS Mode Notice: Cloudflare connectivity features are separated into Step 2 to keep configuration clean!");
-      });
-    }
-  }
-
-  function saveLeagueStateToLocalVault() {
-    localStorage.setItem(CONFIG_LEAGUE_KEY, JSON.stringify(LEAGUE_STATE));
-  }
-
-  // --- CORE SNAKE DRAFT TEAM MATRICES MATHS ENGINE ---
-  function executeInternalSnakeDraftAlgorithm() {
-    var pool = parseRuntimePipeline();
-    if (!pool || pool.length === 0) { alert("Active filtered list contains 0 drivers. Please confirm your faction filters."); return; }
-
-    // Clean sort strictly descending by skill points
-    pool.sort(function(a, b) { return (b.racing_skill || 0) - (a.racing_skill || 0); });
-
-    var numTeams = LEAGUE_STATE.teamCount || 4;
-    var balancedMatrix = [];
-    for (var t = 0; t < numTeams; t++) { balancedMatrix.push({ members: [], totalSkill: 0, avgSkill: "0.00" }); }
-
-    // Execute sequential snake distribution
-    pool.forEach(function(driver, index) {
-      var round = Math.floor(index / numTeams);
-      var positionInRound = index % numTeams;
-      var TargetTeamIndex = (round % 2 === 0) ? positionInRound : (numTeams - 1 - positionInRound);
-
-      balancedMatrix[TargetTeamIndex].members.push({
-        id: driver.id,
-        name: driver.name,
-        skill: driver.racing_skill || 0,
-        fac: driver.factionName || '—'
-      });
-      balancedMatrix[TargetTeamIndex].totalSkill += (driver.racing_skill || 0);
-    });
-
-    // Compute balance efficiency averages
-    balancedMatrix.forEach(function(team) {
-      if (team.members.length > 0) { team.avgSkill = (team.totalSkill / team.members.length).toFixed(2); }
-    });
-
-    LEAGUE_STATE.generatedTeams = balancedMatrix;
-    saveLeagueStateToLocalVault();
-    renderSetupPanelContent();
-  }
-
-  // --- HELPFUL ACCORDION/FAQ DOCUMENTATION INTERFACE ---
-  function renderHelpPanelContent() {
-    var layoutBody = document.getElementById('nbf-layout-body');
-    if (!layoutBody) return;
-
-    var html = '<div style="padding:20px; max-width:740px; margin:0 auto; font-family:sans-serif; color:var(--nbf-txt);">';
-    
-    // Header Info Box
-    html += '<div style="background:linear-gradient(135deg, #4f46e5, #3730a3); border-radius:8px; padding:16px; color:#ffffff; margin-bottom:16px; box-shadow:0 2px 8px rgba(0,0,0,0.15);">';
-    html += '  <h2 style="margin-top:0; margin-bottom:6px; font-size:16px; font-weight:600;">Dashboard Support & Reference Engine</h2>';
-    html += '  <p style="font-size:12px; margin:0; opacity:0.9; line-height:1.4;">Instant keyword query tracking for system mechanics, tournament brackets, and security protocols.</p>';
-    html += '</div>';
-
-    // Interactive Filter/Search Bar
-    html += '<div style="margin-bottom:14px; position:relative;">';
-    html += '  <input id="nbf-faq-search" type="text" placeholder="Type key phrases to filter questions (e.g., key, cache, draft)..." style="width:100%; padding:10px 12px; font-size:12px; border-radius:6px; border:1px solid var(--nbf-btn-border); background:var(--nbf-field-bg); color:var(--nbf-txt); box-sizing:border-box;" />';
-    html += '</div>';
-
-    // Interactive Accordion Grid Loop
-    html += '<div id="nbf-faq-accordion-box">';
-    FAQ_DATABASE.forEach(function(item, index) {
-      html += '<div class="nbf-faq-item" data-q="' + item.q + '">';
-      html += '  <div class="nbf-faq-header" style="font-size:12px;"><span>' + item.q.toUpperCase() + '</span><span>▼</span></div>';
-      html += '  <div class="nbf-faq-content" style="font-size:12px;">' + item.a + '</div>';
-      html += '</div>';
-    });
-    html += '</div>';
-
-    // Fixed Direct Creator Support Link Button Panel
-    html += '<div style="margin-top:20px; border-top:1px solid var(--nbf-bld); padding-top:16px; text-align:center;">';
-    html += '  <span style="font-size:12px; color:var(--nbf-mut); display:block; margin-bottom:8px;">Encountering system errors, code exceptions, or requiring backend help?</span>';
-    html += '  <a href="https://www.torn.com/messages.php#/p=compose&XID=1496324" target="_blank" style="display:inline-block; background:#1d4ed8; color:#ffffff; font-weight:bold; text-decoration:none; font-size:12px; padding:8px 16px; border-radius:6px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">📨 Direct Contact System Admin (XID 1496324)</a>';
-    html += '</div>';
-
-    html += '</div>';
-    layoutBody.innerHTML = html;
-
-    // Attach Dynamic Accordion Click Handlers
-    var accordions = layoutBody.querySelectorAll('.nbf-faq-item');
-    for (var i = 0; i < accordions.length; i++) {
-      var header = accordions[i].querySelector('.nbf-faq-header');
-      header.addEventListener('click', function() {
-        var parent = this.parentNode;
-        var content = parent.querySelector('.nbf-faq-content');
-        var indicator = this.querySelector('span:last-child');
-        var isOpen = content.style.display === 'block';
-        
-        content.style.display = isOpen ? 'none' : 'block';
-        indicator.textContent = isOpen ? '▼' : '▲';
-        parent.style.borderColor = isOpen ? 'var(--nbf-bld)' : '#6366f1';
-      });
-    }
-
-    // Attach Local FAQ Live Keyword Filter
-    var faqSearchInput = document.getElementById('nbf-faq-search');
-    if (faqSearchInput) {
-      faqSearchInput.addEventListener('input', function() {
-        var filterText = this.value.toLowerCase().trim();
-        var items = document.querySelectorAll('.nbf-faq-item');
-        for (var j = 0; j < items.length; j++) {
-          var questionText = items[j].getAttribute('data-q') || '';
-          if (questionText.indexOf(filterText) !== -1) { items[j].style.display = 'block'; } else { items[j].style.display = 'none'; }
+(function() {
+    'use strict';
+
+    // --- APPLICATION STATE ---
+    var STATE_DARK_MODE = true;
+    var STATE_COMPARE_A = '';
+    var STATE_COMPARE_B = '';
+    var RUNTIME_MAX_SKILL = 10;
+    var GLOBAL_PLAYER_DATA = [];
+    var FILTERED_FACTION_ID = 'all';
+
+    // --- MOCK OR PIPELINE INITIALIZER ---
+    function parseRuntimePipeline() {
+        if (!GLOBAL_PLAYER_DATA || GLOBAL_PLAYER_DATA.length === 0) {
+            return [
+                { id: 10001, name: "Driver_Alpha", factionId: "1", factionName: "Apex Racing", racing_skill: 8.45, racing_wins: 142, races_entered: 1200, racing_ratio: 11.8, racing_points: 450, handicap: 2.5 },
+                { id: 10002, name: "SpeedyG", factionId: "1", factionName: "Apex Racing", racing_skill: 6.20, racing_wins: 95, races_entered: 980, racing_ratio: 9.7, racing_points: 210, handicap: 1.2 },
+                { id: 10003, name: "Burnout", factionId: "2", factionName: "Veloce Crew", racing_skill: 9.12, racing_wins: 210, races_entered: 1500, racing_ratio: 14.0, racing_points: 680, handicap: 4.0 },
+                { id: 10004, name: "DriftKing", factionId: "2", factionName: "Veloce Crew", racing_skill: 4.50, racing_wins: 30, races_entered: 500, racing_ratio: 6.0, racing_points: 90, handicap: 0.0 }
+            ].filter(function(p) {
+                return FILTERED_FACTION_ID === 'all' || String(p.factionId) === String(FILTERED_FACTION_ID);
+            });
         }
-      });
+        return GLOBAL_PLAYER_DATA.filter(function(p) {
+            return FILTERED_FACTION_ID === 'all' || String(p.factionId) === String(FILTERED_FACTION_ID);
+        });
     }
-  }
 
-  function processDataExportToCSV() {
-    if (!RUNTIME_MEMBERS || RUNTIME_MEMBERS.length === 0) return;
-    var targetStack = parseRuntimePipeline();
-    var computedCSV = 'Index,User ID,Name,Faction,Rank,Racing Skill,Wins,Runs,Ratio %,Points,Handicap Offset\n';
+    function resolveRankBadge(skill) {
+        if (skill >= 7.5) return { bg: '#ef4444', text: '#fff', title: 'Class A' };
+        if (skill >= 5.0) return { bg: '#f59e0b', text: '#fff', title: 'Class B' };
+        if (skill >= 2.5) return { bg: '#10b981', text: '#fff', title: 'Class C' };
+        return { bg: '#6b7280', text: '#fff', title: 'Class D' };
+    }
 
-    targetStack.forEach(function(member, cursor) {
-      var skillsVal = member.racing_skill || 0;
-      var rankBadge = resolveRankBadge(skillsVal);
-      var outputRatio = (member.racing_ratio || 0).toFixed(1) + '%';
-      var handicapVal = member.handicap !== undefined ? member.handicap.toFixed(2) : '0.00';
-      var rowData = [
-        cursor + 1, member.id, '"' + member.name.split('"').join('""') + '"', '"' + (member.factionName || '—').split('"').join('""') + '"',
-        rankBadge.title, skillsVal.toFixed(2), member.racing_wins || 0, member.races_entered || 0, outputRatio, member.racing_points || 0, handicapVal
-      ];
-      computedCSV += rowData.join(',') + '\n';
-    });
-
-    var storageBlob = new Blob([computedCSV], { type: 'text/csv;charset=utf-8;' });
-    var downloadHook = document.createElement('a');
-    downloadHook.setAttribute('href', URL.createObjectURL(storageBlob));
-    downloadHook.setAttribute('download', 'Nuclear_League_Racing_Telemetry.csv');
-    downloadHook.style.visibility = 'hidden';
-    document.body.appendChild(downloadHook);
-    downloadHook.click();
-    document.body.removeChild(downloadHook);
-  }
-
-  function executeAsyncDelay(timeoutValue, callback) { setTimeout(callback, timeoutValue); }
-
-  function securedAPIPacketFetch(endpointUrl, successCallback, failureCallback, maxRetryCycles, currentCycle, targetDelayStep) {
-    if (maxRetryCycles === undefined) maxRetryCycles = 3;
-    if (currentCycle === undefined) currentCycle = 0;
-    if (targetDelayStep === undefined) targetDelayStep = 2000;
-
-    var trackedDestinationUrl = endpointUrl + (endpointUrl.indexOf('?') !== -1 ? '&' : '?') + 'comment=NBF_Hyper_v' + ENGINE_VERSION;
-
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', trackedDestinationUrl, true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState === 4) {
-        if (xhr.status === 200) {
-          try {
-            var json = JSON.parse(xhr.responseText);
-            if (json.error && (json.error.code === 5 || json.error.code === 8)) {
-              if (currentCycle < maxRetryCycles) {
-                var progressBox = document.getElementById('nbf-layout-progress');
-                if (progressBox) progressBox.textContent = 'Rate limited! Sync backoff cooling down...';
-                executeAsyncDelay(targetDelayStep, function() {
-                  securedAPIPacketFetch(endpointUrl, successCallback, failureCallback, maxRetryCycles, currentCycle + 1, targetDelayStep * 2);
-                });
-              } else { failureCallback(); }
-            } else { successCallback(json); }
-          } catch(e) { failureCallback(); }
+    function toggleDuelSelection(pid) {
+        if (!STATE_COMPARE_A) {
+            STATE_COMPARE_A = String(pid);
+        } else if (!STATE_COMPARE_B && STATE_COMPARE_A !== String(pid)) {
+            STATE_COMPARE_B = String(pid);
         } else {
-          if (currentCycle < maxRetryCycles) {
-            executeAsyncDelay(1000, function() {
-              securedAPIPacketFetch(endpointUrl, successCallback, failureCallback, maxRetryCycles, currentCycle + 1, targetDelayStep);
+            if (STATE_COMPARE_A === String(pid)) STATE_COMPARE_A = '';
+            else if (STATE_COMPARE_B === String(pid)) STATE_COMPARE_B = '';
+        }
+        runTableRenderer();
+    }
+
+    // --- LEADERBOARD GRID RENDER ENGINE ---
+    function runTableRenderer() {
+        var dataset = parseRuntimePipeline();
+
+        var separationLineStyle = STATE_DARK_MODE ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
+        var dynamicAnchorColor  = STATE_DARK_MODE ? '#60a5fa' : '#1d6fa4';
+        var descriptionMutedText = STATE_DARK_MODE ? '#9ca3af' : '#475569';
+        var highlightBoldText   = STATE_DARK_MODE ? '#f3f4f6' : '#0f172a';
+
+        if (dataset.length > 0) {
+            RUNTIME_MAX_SKILL = Math.max.apply(Math, dataset.map(function(o) { return o.racing_skill || 0; }));
+        }
+
+        var markupRows = dataset.map(function(player, slot) {
+            var absoluteSkill = player.racing_skill !== undefined ? player.racing_skill : 0;
+            var progressWidth = RUNTIME_MAX_SKILL > 0 ? Math.round((absoluteSkill / RUNTIME_MAX_SKILL) * 100) : 0;
+            var badgeObject   = resolveRankBadge(absoluteSkill);
+            var calculatedRatio = (player.racing_ratio !== undefined ? player.racing_ratio : 0).toFixed(1) + '%';
+            var handicapDisplay = player.handicap !== undefined ? '+' + player.handicap.toFixed(1) : '0.0';
+
+            var rowClass = '';
+            if (String(player.id) === STATE_COMPARE_A || String(player.id) === STATE_COMPARE_B) { 
+                rowClass = ' class="nbf-row-selected"'; 
+            }
+
+            var rowString = '<tr' + rowClass + ' style="' + separationLineStyle + ' cursor:pointer;" data-pid="' + player.id + '">';
+            rowString += '<td style="padding:8px 14px; color:#9ca3af;">' + (slot + 1) + '</td>';
+            rowString += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + player.id + '" target="_blank" style="color:' + dynamicAnchorColor + '; text-decoration:none; font-weight:600;" onclick="event.stopPropagation();">' + (player.name || 'Unknown') + '</a></td>';
+            rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;" title="' + (player.factionName || '') + '">' + (player.factionName || '—') + '</td>';
+            rowString += '<td style="padding:8px 4px;"><span style="background:' + badgeObject.bg + '; color:' + badgeObject.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + badgeObject.title + '</span></td>';
+            rowString += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:#374151; min-width:40px;"><div style="width:' + progressWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + descriptionMutedText + '; min-width:28px; text-align:right;">' + absoluteSkill.toFixed(2) + '</span></div></td>';
+            rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_wins !== undefined ? player.racing_wins : '—') + '</td>';
+            rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.races_entered !== undefined ? player.races_entered : '—') + '</td>';
+            rowString += '<td style="padding:8px 4px; font-weight:600; color:' + highlightBoldText + ';">' + calculatedRatio + '</td>';
+            rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_points !== undefined ? player.racing_points : '—') + '</td>';
+            rowString += '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48;">' + handicapDisplay + '</td>';
+            rowString += '</tr>';
+            return rowString;
+        }).join('');
+
+        var targetBodyDOM = document.getElementById('nbf-layout-body');
+        if (!targetBodyDOM) return;
+        
+        targetBodyDOM.innerHTML = '<table id="nbf-table-view" style="width:100%; border-collapse:collapse; text-align:left;"><thead><tr style="color:#9ca3af; font-size:12px; border-bottom:2px solid #374151;"><th style="padding:8px 14px;">#</th><th style="padding:8px 4px;">Driver</th><th style="padding:8px 4px;">Faction</th><th style="padding:8px 4px;">Tier</th><th style="padding:8px 4px;">Skill Matrix</th><th style="padding:8px 4px;">Wins</th><th style="padding:8px 4px;">Runs</th><th style="padding:8px 4px;">Efficiency</th><th style="padding:8px 4px;">Pts</th><th style="padding:8px 14px 8px 4px;">Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
+
+        var rows = targetBodyDOM.querySelectorAll('tbody tr');
+        for (var r = 0; r < rows.length; r++) {
+            rows[r].addEventListener('click', function() { 
+                toggleDuelSelection(this.getAttribute('data-pid')); 
             });
-          } else { failureCallback(); }
         }
-      }
-    };
-    xhr.send();
-  }
-
-  function baseCacheRouter(forceInvalidationSignal) {
-    var historicalTimeMarker = localStorage.getItem(CONFIG_TIME_KEY);
-    var historicalCacheBlob  = localStorage.getItem(CONFIG_CACHE_KEY);
-    var runtimeStatusField    = document.getElementById('nbf-txt-cache');
-
-    if (!forceInvalidationSignal && historicalTimeMarker && historicalCacheBlob && (Date.now() - Number(historicalTimeMarker) < CACHE_DURATION)) {
-      RUNTIME_MEMBERS = JSON.parse(historicalCacheBlob);
-      var totalCounterNode = document.getElementById('nbf-txt-counter');
-      if (totalCounterNode) totalCounterNode.textContent = RUNTIME_MEMBERS.length + ' members';
-      if (runtimeStatusField) {
-        runtimeStatusField.style.color = '#16a34a';
-        runtimeStatusField.textContent = '⚡ Cache Active';
-      }
-      var collectedSkills = RUNTIME_MEMBERS.map(function(m) { return m.racing_skill || 0; });
-      RUNTIME_MAX_SKILL = Math.max.apply(Math, collectedSkills);
-      if (RUNTIME_MAX_SKILL < 1) RUNTIME_MAX_SKILL = 1;
-      routerViewRefresh();
-    } else {
-      if (FLAG_IS_FETCHING) return;
-      if (runtimeStatusField) {
-        runtimeStatusField.style.color = '#eab308';
-        runtimeStatusField.textContent = '☁️ Syncing Core Alliance';
-      }
-      processNetworkTelemetryPipeline();
-    }
-  }
-
-  function processNetworkTelemetryPipeline() {
-    FLAG_IS_FETCHING = true;
-    var stackBuilder = [];
-    var notificationProgressBar = document.getElementById('nbf-layout-progress');
-
-    if (notificationProgressBar) {
-      notificationProgressBar.style.display = 'block';
-      notificationProgressBar.textContent = 'Mapping cluster signatures...';
     }
 
-    var factionIndex = 0;
-    function fetchNextFaction() {
-      if (factionIndex >= TARGET_FACTIONS.length) { processMembersData(stackBuilder); return; }
+    // --- BASE INTERFACE LAYOUT INITIALIZER ---
+    function initializeDashboardDom() {
+        if (document.getElementById('nbf-dashboard-root')) return;
 
-      var activeGroup = TARGET_FACTIONS[factionIndex];
-      if (notificationProgressBar) notificationProgressBar.textContent = 'Downloading roster: ' + activeGroup.name + '...';
+        var mainContainer = document.querySelector('.content-wrapper');
+        if (!mainContainer) return;
 
-      var url = 'https://api.torn.com/faction/' + activeGroup.id + '?selections=basic&key=' + STATE_API_KEY.trim();
-      securedAPIPacketFetch(url, function(response) {
-        if (response && !response.error && response.members) {
-          Object.keys(response.members).forEach(function(profileId) {
-            var profileObj = response.members[profileId];
-            stackBuilder.push({
-              id: profileId, name: profileObj.name, factionId: activeGroup.id, factionName: activeGroup.name,
-              racing_skill: 0, racing_wins: 0, races_entered: 0, racing_ratio: 0, racing_points: 0
-            });
-          });
-        }
-        factionIndex++; executeAsyncDelay(250, fetchNextFaction);
-      }, function() {
-        factionIndex++; executeAsyncDelay(250, fetchNextFaction);
-      });
-    }
-    fetchNextFaction();
-  }
+        var dashboardRoot = document.createElement('div');
+        dashboardRoot.id = 'nbf-dashboard-root';
+        dashboardRoot.style = 'background:#111827; color:#f3f4f6; padding:16px; border-radius:8px; margin-bottom:16px; font-family:sans-serif;';
+        
+        var controlHeader = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">';
+        controlHeader += '<h2 style="margin:0; font-size:18px;">Faction Racing Dashboard</h2>';
+        controlHeader += '<select id="nbf-faction-filter" style="background:#1f2937; color:#fff; border:1px solid #374151; padding:4px 8px; border-radius:4px; cursor:pointer;"><option value="all">All Factions</option><option value="1">Apex Racing</option><option value="2">Veloce Crew</option></select>';
+        controlHeader += '</div>';
+        
+        var bodyContainer = '<div id="nbf-layout-body"></div>';
+        
+        dashboardRoot.innerHTML = controlHeader + bodyContainer;
+        mainContainer.insertBefore(dashboardRoot, mainContainer.firstChild);
 
-  function processMembersData(stackBuilder) {
-    var notificationProgressBar = document.getElementById('nbf-layout-progress');
-    if (stackBuilder.length === 0) {
-      var mainBodyTarget = document.getElementById('nbf-layout-body');
-      if (mainBodyTarget) mainBodyTarget.innerHTML = '<p style="color:red; padding:1rem;">API failure or unauthorized key structure. Please verify verification profiles.</p>';
-      FLAG_IS_FETCHING = false; return;
-    }
-
-    RUNTIME_MEMBERS = stackBuilder;
-    var globalCountText = document.getElementById('nbf-txt-counter');
-    if (globalCountText) globalCountText.textContent = RUNTIME_MEMBERS.length + ' alliance members';
-
-    var structuralTotal = RUNTIME_MEMBERS.length;
-    var memberIndex = 0;
-
-    function fetchNextMember() {
-      if (memberIndex >= RUNTIME_MEMBERS.length) { completePipelineProcessing(); return; }
-
-      var trackingMemberNode = RUNTIME_MEMBERS[memberIndex];
-      if (notificationProgressBar) {
-        notificationProgressBar.textContent = 'Syncing Metrics [' + trackingMemberNode.factionName + '] (' + (memberIndex + 1) + ' / ' + structuralTotal + ')...';
-      }
-
-      var url = 'https://api.torn.com/user/' + trackingMemberNode.id + '?selections=personalstats&key=' + STATE_API_KEY.trim();
-      securedAPIPacketFetch(url, function(individualProfilePayload) {
-        if (individualProfilePayload && individualProfilePayload.personalstats) {
-          trackingMemberNode.racing_skill  = Number(individualProfilePayload.personalstats.racingskill) || 0;
-          trackingMemberNode.racing_wins   = Number(individualProfilePayload.personalstats.raceswon) || 0;
-          trackingMemberNode.racing_points = Number(individualProfilePayload.personalstats.racingpointsearned) || 0;
-          trackingMemberNode.races_entered = Number(individualProfilePayload.personalstats.racesentered) || 0;
-          trackingMemberNode.racing_ratio  = trackingMemberNode.races_entered > 0 ? (trackingMemberNode.racing_wins / trackingMemberNode.races_entered) * 100 : 0;
-        }
-        memberIndex++; executeAsyncDelay(650, fetchNextMember);
-      }, function() {
-        memberIndex++; executeAsyncDelay(650, fetchNextMember);
-      });
-    }
-    fetchNextMember();
-  }
-
-  function completePipelineProcessing() {
-    var notificationProgressBar = document.getElementById('nbf-layout-progress');
-    if (notificationProgressBar) notificationProgressBar.style.display = 'none';
-
-    var calculatedSkillsArray = RUNTIME_MEMBERS.map(function(m) { return m.racing_skill || 0; });
-    RUNTIME_MAX_SKILL = Math.max.apply(Math, calculatedSkillsArray);
-    if (RUNTIME_MAX_SKILL < 1) RUNTIME_MAX_SKILL = 1;
-
-    localStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(RUNTIME_MEMBERS));
-    localStorage.setItem(CONFIG_TIME_KEY, Date.now().toString());
-
-    var secondaryCacheLabel = document.getElementById('nbf-txt-cache');
-    if (secondaryCacheLabel) {
-      secondaryCacheLabel.style.color = '#16a34a';
-      secondaryCacheLabel.textContent = '⚡ Cache Active';
-    }
-
-    FLAG_IS_FETCHING = false;
-    routerViewRefresh();
-  }
-
-  if (window.location.href.indexOf('sid=racing') !== -1) {
-     if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', mountFloatingInterface); } else { mountFloatingInterface(); }
-     setInterval(mountFloatingInterface, 1500);
-  }
-})(window, document);
-// --- EMERGENCY OVERRIDE FOR TABLE RENDER ---
-window.runTableRenderer = function() {
-    var dataset = typeof parseRuntimePipeline === 'function' ? parseRuntimePipeline() : [];
-    var stateDarkMode = typeof STATE_DARK_MODE !== 'undefined' ? STATE_DARK_MODE : true;
-    var runMaxSkill = typeof RUNTIME_MAX_SKILL !== 'undefined' ? RUNTIME_MAX_SKILL : 10;
-    var compA = typeof STATE_COMPARE_A !== 'undefined' ? STATE_COMPARE_A : '';
-    var compB = typeof STATE_COMPARE_B !== 'undefined' ? STATE_COMPARE_B : '';
-
-    var sepLine = stateDarkMode ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
-    var lnkCol  = stateDarkMode ? '#60a5fa' : '#1d6fa4';
-    var mutCol  = stateDarkMode ? '#9ca3af' : '#475569';
-    var bldCol  = stateDarkMode ? '#f3f4f6' : '#0f172a';
-
-    var markupRows = dataset.map(function(p, i) {
-        var skill = p.racing_skill !== undefined ? p.racing_skill : 0;
-        var pWidth = runMaxSkill > 0 ? Math.round((skill / runMaxSkill) * 100) : 0;
-        var b = (typeof resolveRankBadge === 'function') ? resolveRankBadge(skill) : {bg:'#374151', text:'#fff', title:'—'};
-        var ratio = (p.racing_ratio !== undefined ? p.racing_ratio : 0).toFixed(1) + '%';
-        var hc = p.handicap !== undefined ? '+' + p.handicap.toFixed(1) : '0.0';
-        var rCls = (String(p.id) === compA || String(p.id) === compB) ? ' class="nbf-row-selected"' : '';
-
-        return '<tr' + rCls + ' style="' + sepLine + ' cursor:pointer;" data-pid="' + p.id + '">' +
-            '<td style="padding:8px 14px; color:var(--nbf-mut);">' + (i + 1) + '</td>' +
-            '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + p.id + '" target="_blank" style="color:' + lnkCol + '; text-decoration:none; font-weight:600;" onclick="event.stopPropagation();">' + (p.name || 'Unknown') + '</a></td>' +
-            '<td style="padding:8px 4px; color:' + mutCol + '; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;" title="' + (p.factionName || '') + '">' + (p.factionName || '—') + '</td>' +
-            '<td style="padding:8px 4px;"><span style="background:' + b.bg + '; color:' + b.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + b.title + '</span></td>' +
-            '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nbf-bdg); min-width:40px;"><div style="width:' + pWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + mutCol + '; min-width:28px; text-align:right;">' + skill.toFixed(2) + '</span></div></td>' +
-            '<td style="padding:8px 4px; color:' + mutCol + ';">' + (p.racing_wins !== undefined ? p.racing_wins : '—') + '</td>' +
-            '<td style="padding:8px 4px; color:' + mutCol + ';">' + (p.races_entered !== undefined ? p.races_entered : '—') + '</td>' +
-            '<td style="padding:8px 4px; font-weight:600; color:' + bldCol + ';">' + ratio + '</td>' +
-            '<td style="padding:8px 4px; color:' + mutCol + ';">' + (p.racing_points !== undefined ? p.racing_points : '—') + '</td>' +
-            '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48;">' + hc + '</td>' +
-            '</tr>';
-    }).join('');
-
-    var target = document.getElementById('nbf-layout-body');
-    if (!target) return;
-    target.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
-
-    var trs = target.querySelectorAll('tbody tr');
-    for (var j = 0; j < trs.length; j++) {
-        trs[j].addEventListener('click', function() {
-            if (typeof toggleDuelSelection === 'function') toggleDuelSelection(this.getAttribute('data-pid'));
+        document.getElementById('nbf-faction-filter').addEventListener('change', function(e) {
+            FILTERED_FACTION_ID = e.target.value;
+            runTableRenderer();
         });
+
+        runTableRenderer();
     }
-};
+
+    setTimeout(function() {
+        initializeDashboardDom();
+    }, 1500);
+
+})();
