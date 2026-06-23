@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nuclear Family — MultiFaction Edition (Hyper-Drive)
 // @namespace    torn.com.nuclearfamily.strict
-// @version      5.6
-// @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, snake drafting, and track select drop-downs.
+// @version      5.7
+// @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, Class Handicaps, and track select drop-downs.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
 // @match        https://www.torn.com/loader.php?sid=racing*
@@ -18,7 +18,7 @@
   var CONFIG_THEME_KEY   = 'nbf_v3_theme';
   var CONFIG_CACHE_KEY   = 'nbf_v3_data_cache';
   var CONFIG_TIME_KEY    = 'nbf_v3_cache_time';
-  var CONFIG_LEAGUE_KEY  = 'nbf_v56_league_cfg'; // Incremented key version for tracks state shift
+  var CONFIG_LEAGUE_KEY  = 'nbf_v57_league_cfg'; 
   var CACHE_DURATION     = 86400000;
 
   // --- ALLIANCE TARGET MATRIX ---
@@ -53,8 +53,8 @@
       a: "To keep your game experience lightweight and running fast, this script stays completely quiet and out of the way during your daily tasks like gym training, crime, or trading. It intercepts your interface and initializes its components only when you actively visit the racing section, ensuring it runs exactly when and where you need it without causing global performance degradation." 
     },
     { 
-      q: "Handicaps & Snake Draft Logic", 
-      a: "The system balances the tournament matrix using two synchronized logic filters. First, individual driver handicap scores are calculated by subtracting their racing skill from the maximum skill level found within the alliance pool (producing a positive head-start offset). Second, when distributing players into teams, the Snake Draft engine sorts the filtered driver pool by skill and loops back-and-forth across team slots (e.g., Team 1 to 4, then Team 4 back to 1) to equalize total average skills evenly across all squads." 
+      q: "Handicaps & Class Tier Logic", 
+      a: "Under the KISS principle, Individual Solo Races leverage automated driver stratification. Drivers are automatically partitioned into three explicit tiers: Class C Rookie (RS under 5), Class B Pro (RS 5 to 20), and Class A Master Elite (RS 20+). Handicaps are verified at post-race ledger calculations, granting low-tier drivers performance offsets when outperforming higher brackets, keeping tournament tracking completely seamless." 
     }
   ];
 
@@ -70,16 +70,17 @@
 
   // --- LEAGUE ENGINE CONFIG ---
   var LEAGUE_STATE = JSON.parse(localStorage.getItem(CONFIG_LEAGUE_KEY)) || {
-    compType: 'solo',
+    compType: 'solo', // 'solo' = Individual Solo Race, 'teams' = Alliance Squad Draft
     scopeType: 'all',
     scopeFactionId: 'all',
     teamCount: 4,
-    selectedTracks: ["Uptown", "Withdrawal", "Underdog", "Parkland", "Docks"], // Default selected tracks array
+    useHandicaps: true,
+    selectedTracks: ["Uptown", "Withdrawal", "Underdog", "Parkland", "Docks"], 
     lapsCount: 10,
     scoringType: 'standard',
     generatedTeams: []
   };
-  var ENGINE_VERSION = '5.6';
+  var ENGINE_VERSION = '5.7';
 
   // Inject UI Stylesheet
   var cssStyleNode = document.createElement('style');
@@ -304,14 +305,11 @@
     });
   }
 
+  // KISS Automated Brackets Allocation Logic
   function resolveRankBadge(skillPoints) {
-    if (skillPoints >= 100) return { title: 'Grand Champion', bg: '#fef3c7', text: '#b45309' };
-    if (skillPoints >= 75)  return { title: 'Master Elite',   bg: '#f3e8ff', text: '#6b21a8' };
-    if (skillPoints >= 50)  return { title: 'Expert Driver', bg: '#e0f2fe', text: '#0369a1' };
-    if (skillPoints >= 35)  return { title: 'Veteran',       bg: '#dcfce7', text: '#15803d' };
-    if (skillPoints >= 20)  return { title: 'Advanced',      bg: '#f1f5f9', text: '#334155' };
-    if (skillPoints >= 10)  return { title: 'Amateur',       bg: '#ffedd5', text: '#c2410c' };
-    return                         { title: 'Rookie',        bg: (STATE_DARK_MODE ? '#374151' : '#f3f4f6'), text: (STATE_DARK_MODE ? '#9ca3af' : '#4b5563') };
+    if (skillPoints >= 20.0) return { title: 'Master Elite', bg: '#fef3c7', text: '#b45309' };
+    if (skillPoints >= 5.0)  return { title: 'Pro',          bg: '#e0f2fe', text: '#0369a1' };
+    return                          { title: 'Rookie',       bg: (STATE_DARK_MODE ? '#374151' : '#f3f4f6'), text: (STATE_DARK_MODE ? '#9ca3af' : '#4b5563') };
   }
 
   function renderStatModule(label, metric) {
@@ -386,7 +384,7 @@
 
     var targetBodyDOM = document.getElementById('nbf-layout-body');
     if (!targetBodyDOM) return;
-    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
+    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Class Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
 
     var rows = targetBodyDOM.querySelectorAll('tbody tr');
     for (var r = 0; r < rows.length; r++) {
@@ -523,7 +521,7 @@
     }
   }
 
-  // --- LEAGUE SETUP VIEW CONFIGURATOR (TRACK DROPDOWN INCLUDED) ---
+  // --- LEAGUE SETUP VIEW CONFIGURATOR (DYNAMIC HIDING FOR INDIVIDUAL RACES) ---
   function renderSetupPanelContent() {
     var targetContainer = document.getElementById('nbf-layout-body');
     if (!targetContainer) return;
@@ -545,12 +543,21 @@
     panelHtml += '      <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">Format & Balance Settings</h3>';
     
     panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">System Format</label>';
-    panelHtml += '        <select id="nbf-cfg-type" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="solo"' + (LEAGUE_STATE.compType === 'solo' ? ' selected' : '') + '>Individual Solo Match</option><option value="teams"' + (LEAGUE_STATE.compType === 'teams' ? ' selected' : '') + '>Alliance Squad Draft</option></select></div>';
+    panelHtml += '        <select id="nbf-cfg-type" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="solo"' + (LEAGUE_STATE.compType === 'solo' ? ' selected' : '') + '>Individual Solo Race</option><option value="teams"' + (LEAGUE_STATE.compType === 'teams' ? ' selected' : '') + '>Alliance Squad Draft</option></select></div>';
 
-    panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Team Count</label>';
+    // DYNAMIC CONDITIONAL SLOT: Team Count (For Squad) vs Handicaps Toggle (For Solo)
+    var teamsSlotVisibility = (LEAGUE_STATE.compType === 'teams') ? 'display:flex;' : 'display:none;';
+    var soloSlotVisibility  = (LEAGUE_STATE.compType === 'solo') ? 'display:flex;' : 'display:none;';
+
+    panelHtml += '      <div id="nbf-wrap-teamcount" style="' + teamsSlotVisibility + ' flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Team Count</label>';
     panelHtml += '        <input id="nbf-cfg-teams" type="number" min="2" max="12" value="' + LEAGUE_STATE.teamCount + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
 
-    panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Scoring Rules ' + createTooltip('Standard tracks pure positions. Handicap processes offsets according to dynamic driver skills.') + '</label>';
+    panelHtml += '      <div id="nbf-wrap-handicapstoggle" style="' + soloSlotVisibility + ' flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Automated Settings</label>';
+    panelHtml += '        <label style="display:flex; align-items:center; gap:8px; padding:8px; background:var(--nbf-field-bg); border:1px solid var(--nbf-btn-border); border-radius:6px; cursor:pointer; font-size:12px; color:var(--nbf-txt); font-weight:normal;">';
+    panelHtml += '          <input id="nbf-cfg-usehandicaps" type="checkbox"' + (LEAGUE_STATE.useHandicaps !== false ? ' checked' : '') + ' style="margin:0; cursor:pointer;" /> Enable Skill Class Handicaps (KISS Matrix)';
+    panelHtml += '        </label></div>';
+
+    panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Scoring Rules ' + createTooltip('Standard tracks pure positions. Class handicaps apply automated point variations to post-race standings.') + '</label>';
     panelHtml += '        <select id="nbf-cfg-scoring" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="standard"' + (LEAGUE_STATE.scoringType === 'standard' ? ' selected' : '') + '>Standard Points Hierarchy</option><option value="handicap"' + (LEAGUE_STATE.scoringType === 'handicap' ? ' selected' : '') + '>Dynamic Skill Equalized</option></select></div>';
     panelHtml += '    </div>';
 
@@ -590,7 +597,7 @@
     panelHtml += '      </div>';
     
     panelHtml += '      <div style="margin-top:auto; padding-top:4px; display:flex; justify-content:flex-end; width:100%;">';
-    panelHtml += '        <button id="nbf-cfg-generate" style="padding:10px 20px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-weight:600; cursor:pointer; font-size:12px; width:100%; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.1);">⚡ Compute Balanced Squads</button>';
+    panelHtml += '        <button id="nbf-cfg-generate" style="padding:10px 20px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-weight:600; cursor:pointer; font-size:12px; width:100%; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.1);">⚡ Process Live Standings Matrix</button>';
     panelHtml += '      </div>';
     panelHtml += '    </div>';
 
@@ -603,6 +610,19 @@
 
     document.getElementById('nbf-cfg-generate').addEventListener('click', processSnakeDraftCalculations);
     
+    document.getElementById('nbf-cfg-type').addEventListener('change', function() {
+      var wrapTeam = document.getElementById('nbf-wrap-teamcount');
+      var wrapHandicap = document.getElementById('nbf-wrap-handicapstoggle');
+      if (this.value === 'solo') {
+        if(wrapTeam) wrapTeam.style.display = 'none';
+        if(wrapHandicap) wrapHandicap.style.display = 'flex';
+      } else {
+        if(wrapTeam) wrapTeam.style.display = 'flex';
+        if(wrapHandicap) wrapHandicap.style.display = 'none';
+      }
+      syncStateTracker();
+    });
+
     document.getElementById('nbf-cfg-scope').addEventListener('change', function() {
       var innerChoiceWrapper = document.getElementById('nbf-cfg-scope-faction-wrap');
       if (innerChoiceWrapper) {
@@ -611,7 +631,7 @@
       syncStateTracker();
     });
 
-    // Toggle dropdown display rules
+    // Dropdown structural toggles
     var dropTrigger = document.getElementById('nbf-dropdown-trigger');
     var dropMenu = document.getElementById('nbf-dropdown-list');
     dropTrigger.addEventListener('click', function(e) {
@@ -619,14 +639,12 @@
       dropMenu.classList.toggle('show');
     });
 
-    // Close options window when clicking anywhere outside the elements sandbox
     document.addEventListener('click', function(e) {
       if (dropMenu && !dropTrigger.contains(e.target) && !dropMenu.contains(e.target)) {
         dropMenu.classList.remove('show');
       }
     });
 
-    // Watch internal checkboxes modifications dynamically
     var checkboxes = targetContainer.querySelectorAll('.nbf-track-checkbox');
     for (var c = 0; c < checkboxes.length; c++) {
       checkboxes[c].addEventListener('change', function() {
@@ -643,7 +661,10 @@
 
     var syncStateTracker = function() {
       LEAGUE_STATE.compType = document.getElementById('nbf-cfg-type').value;
-      LEAGUE_STATE.teamCount = parseInt(document.getElementById('nbf-cfg-teams').value) || 4;
+      var teamInput = document.getElementById('nbf-cfg-teams');
+      if (teamInput) LEAGUE_STATE.teamCount = parseInt(teamInput.value) || 4;
+      var handicapCheck = document.getElementById('nbf-cfg-usehandicaps');
+      if (handicapCheck) LEAGUE_STATE.useHandicaps = handicapCheck.checked;
       LEAGUE_STATE.scoringType = document.getElementById('nbf-cfg-scoring').value;
       LEAGUE_STATE.scopeType = document.getElementById('nbf-cfg-scope').value;
       LEAGUE_STATE.scopeFactionId = document.getElementById('nbf-cfg-scope-faction').value;
@@ -651,18 +672,24 @@
       localStorage.setItem(CONFIG_LEAGUE_KEY, JSON.stringify(LEAGUE_STATE));
     };
 
-    document.getElementById('nbf-cfg-type').addEventListener('change', syncStateTracker);
-    document.getElementById('nbf-cfg-teams').addEventListener('input', syncStateTracker);
+    var handicapBox = document.getElementById('nbf-cfg-usehandicaps');
+    if (handicapBox) handicapBox.addEventListener('change', syncStateTracker);
+    if (teamInput) teamInput.addEventListener('input', syncStateTracker);
     document.getElementById('nbf-cfg-scoring').addEventListener('change', syncStateTracker);
     document.getElementById('nbf-cfg-scope-faction').addEventListener('change', syncStateTracker);
     document.getElementById('nbf-cfg-laps').addEventListener('input', syncStateTracker);
 
-    if (LEAGUE_STATE.generatedTeams && LEAGUE_STATE.generatedTeams.length > 0) {
+    if (LEAGUE_STATE.compType === 'teams' && LEAGUE_STATE.generatedTeams && LEAGUE_STATE.generatedTeams.length > 0) {
       renderDraftZoneMarkup();
     }
   }
 
   function processSnakeDraftCalculations() {
+    if (LEAGUE_STATE.compType === 'solo') {
+      alert('Live standings tracking initialized using individual parameters. Track settings verified successfully.');
+      return;
+    }
+
     var rawDataset = RUNTIME_MEMBERS.slice();
     if (!rawDataset || rawDataset.length === 0) {
       alert('The core dashboard dataset cache is currently blank. Please return to the leaderboard and hit Sync.');
