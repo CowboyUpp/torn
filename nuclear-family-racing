@@ -120,7 +120,36 @@
     var floatingActionBtn = document.createElement('button');
     floatingActionBtn.id = 'nbf-action-trigger-button';
     floatingActionBtn.textContent = '⚡ Nuclear Hyper-Drive';
-    floatingActionBtn.style.cssText = 'position: fixed !important; bottom: 170px !important; right: 16px !important; z-index: 999999 !important; background: #6366f1 !important; color: #ffffff !important; border: none !important; border-radius: 8px !important; padding: 10px 18px !important; font-size: 14px !important; font-weight: 600 !important; cursor: pointer !important; box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; display: block !important;';
+    
+    // Modern Professional Racing Style Overhaul
+    floatingActionBtn.style.cssText = 
+      'position: fixed !important; bottom: 170px !important; right: 16px !important; z-index: 999999 !important; ' +
+      'background: linear-gradient(135deg, #111827 0%, #1f2937 100%) !important; ' +
+      'color: #f3f4f6 !important; ' +
+      'border: 1px solid #4f46e5 !important; ' +
+      'border-radius: 4px !important; ' +
+      'padding: 10px 20px !important; ' +
+      'font-size: 12px !important; ' +
+      'font-weight: 800 !important; ' +
+      'text-transform: uppercase !important; ' +
+      'letter-spacing: 1.5px !important; ' +
+      'font-style: italic !important; ' +
+      'cursor: pointer !important; ' +
+      'box-shadow: 0 0 15px rgba(79, 70, 229, 0.4) !important; ' +
+      'transition: all 0.2s ease-in-out !important; ' +
+      'display: block !important;';
+
+    // Interactive Hover Track Animations
+    floatingActionBtn.addEventListener('mouseenter', function() {
+      this.style.setProperty('box-shadow', '0 0 25px rgba(236, 72, 153, 0.6)', 'important');
+      this.style.setProperty('border-color', '#ec4899', 'important');
+      this.style.setProperty('transform', 'scale(1.03)', 'important');
+    });
+    floatingActionBtn.addEventListener('mouseleave', function() {
+      this.style.setProperty('box-shadow', '0 0 15px rgba(79, 70, 229, 0.4)', 'important');
+      this.style.setProperty('border-color', '#4f46e5', 'important');
+      this.style.setProperty('transform', 'scale(1.0)', 'important');
+    });
 
     document.body.appendChild(floatingActionBtn);
     floatingActionBtn.addEventListener('click', function(e) {
@@ -305,7 +334,6 @@
     });
   }
 
-  // KISS Automated Brackets Allocation Logic
   function resolveRankBadge(skillPoints) {
     if (skillPoints >= 20.0) return { title: 'Master Elite', bg: '#fef3c7', text: '#b45309' };
     if (skillPoints >= 5.0)  return { title: 'Pro',          bg: '#e0f2fe', text: '#0369a1' };
@@ -521,7 +549,6 @@
     }
   }
 
-  // --- LEAGUE SETUP VIEW CONFIGURATOR (DYNAMIC HIDING FOR INDIVIDUAL RACES) ---
   function renderSetupPanelContent() {
     var targetContainer = document.getElementById('nbf-layout-body');
     if (!targetContainer) return;
@@ -545,7 +572,6 @@
     panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">System Format</label>';
     panelHtml += '        <select id="nbf-cfg-type" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="solo"' + (LEAGUE_STATE.compType === 'solo' ? ' selected' : '') + '>Individual Solo Race</option><option value="teams"' + (LEAGUE_STATE.compType === 'teams' ? ' selected' : '') + '>Alliance Squad Draft</option></select></div>';
 
-    // DYNAMIC CONDITIONAL SLOT: Team Count (For Squad) vs Handicaps Toggle (For Solo)
     var teamsSlotVisibility = (LEAGUE_STATE.compType === 'teams') ? 'display:flex;' : 'display:none;';
     var soloSlotVisibility  = (LEAGUE_STATE.compType === 'solo') ? 'display:flex;' : 'display:none;';
 
@@ -578,7 +604,6 @@
 
     panelHtml += '      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">';
     
-    // Custom Checkbox Dropdown Trigger
     panelHtml += '        <div style="display:flex; flex-direction:column; gap:4px; position:relative;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Track Playlist</label>';
     panelHtml += '          <button id="nbf-dropdown-trigger" style="padding:8px; text-align:left; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; cursor:pointer; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">' + dropdownLabel + ' ▼</button>';
     panelHtml += '          <div id="nbf-dropdown-list" class="nbf-dropdown-menu">';
@@ -631,7 +656,6 @@
       syncStateTracker();
     });
 
-    // Dropdown structural toggles
     var dropTrigger = document.getElementById('nbf-dropdown-trigger');
     var dropMenu = document.getElementById('nbf-dropdown-list');
     dropTrigger.addEventListener('click', function(e) {
@@ -659,9 +683,9 @@
       });
     }
 
+    var teamInput = document.getElementById('nbf-cfg-teams');
     var syncStateTracker = function() {
       LEAGUE_STATE.compType = document.getElementById('nbf-cfg-type').value;
-      var teamInput = document.getElementById('nbf-cfg-teams');
       if (teamInput) LEAGUE_STATE.teamCount = parseInt(teamInput.value) || 4;
       var handicapCheck = document.getElementById('nbf-cfg-usehandicaps');
       if (handicapCheck) LEAGUE_STATE.useHandicaps = handicapCheck.checked;
