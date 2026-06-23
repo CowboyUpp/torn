@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nuclear Family — MultiFaction Edition (Hyper-Drive)
 // @namespace    torn.com.nuclearfamily.strict
-// @version      5.4
+// @version      5.5
 // @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, snake drafting, and league configurators.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
@@ -64,13 +64,15 @@
   // --- LEAGUE ENGINE CONFIG ---
   var LEAGUE_STATE = JSON.parse(localStorage.getItem(CONFIG_LEAGUE_KEY)) || {
     compType: 'solo', // solo vs teams
+    scopeType: 'all', // all vs single
+    scopeFactionId: 'all',
     teamCount: 4,
     tracksCount: 5,
     lapsCount: 10,
     scoringType: 'standard', // standard, handicap, best_lap
     generatedTeams: []
   };
-  var ENGINE_VERSION = '5.4';
+  var ENGINE_VERSION = '5.5';
 
   // Inject UI Stylesheet
   var cssStyleNode = document.createElement('style');
@@ -549,15 +551,29 @@
     panelHtml += '        <select id="nbf-cfg-scoring" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="standard"' + (LEAGUE_STATE.scoringType === 'standard' ? ' selected' : '') + '>Standard Points Hierarchy</option><option value="handicap"' + (LEAGUE_STATE.scoringType === 'handicap' ? ' selected' : '') + '>Dynamic Skill Equalized</option></select></div>';
     panelHtml += '    </div>';
 
-    // COLUMN 2: Track Configuration & Laps Matrix Variables
+    // COLUMN 2: Track Configuration & Tournament Scope
     panelHtml += '    <div style="background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; display:flex; flex-direction:column; gap:14px;">';
-    panelHtml += '      <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">Track & Distance Layout</h3>';
+    panelHtml += '      <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">Track & Tournament Scope</h3>';
     
-    panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Total Tournament Tracks</label>';
-    panelHtml += '        <input id="nbf-cfg-tracks" type="number" min="1" max="25" value="' + (LEAGUE_STATE.tracksCount || 5) + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
+    // League Scope Selector (All Factions vs Single Faction choice)
+    panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">League Scope Context</label>';
+    panelHtml += '        <select id="nbf-cfg-scope" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="all"' + (LEAGUE_STATE.scopeType === 'all' ? ' selected' : '') + '>All Nuclear Family Factions</option><option value="single"' + (LEAGUE_STATE.scopeType === 'single' ? ' selected' : '') + '>Single Faction of Choice</option></select></div>';
 
-    panelHtml += '      <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Target Laps per Event</label>';
-    panelHtml += '        <input id="nbf-cfg-laps" type="number" min="1" max="100" value="' + (LEAGUE_STATE.lapsCount || 10) + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
+    // Choice Selector Dropdown (Dynamically displayed based on League Scope Context choice)
+    var choiceWrapperDisplay = (LEAGUE_STATE.scopeType === 'single') ? 'display:flex;' : 'display:none;';
+    panelHtml += '      <div id="nbf-cfg-scope-faction-wrap" style="' + choiceWrapperDisplay + ' flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Target Faction Profile</label>';
+    panelHtml += '        <select id="nbf-cfg-scope-faction" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;">';
+    TARGET_FACTIONS.forEach(function(fac) { 
+      panelHtml += '<option value="' + fac.id + '"' + (String(LEAGUE_STATE.scopeFactionId) === String(fac.id) ? ' selected' : '') + '>' + fac.name + '</option>'; 
+    });
+    panelHtml += '        </select></div>';
+
+    panelHtml += '      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">';
+    panelHtml += '        <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Total Tracks</label>';
+    panelHtml += '          <input id="nbf-cfg-tracks" type="number" min="1" max="25" value="' + (LEAGUE_STATE.tracksCount || 5) + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
+    panelHtml += '        <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Target Laps</label>';
+    panelHtml += '          <input id="nbf-cfg-laps" type="number" min="1" max="100" value="' + (LEAGUE_STATE.lapsCount || 10) + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
+    panelHtml += '      </div>';
     
     panelHtml += '      <div style="margin-top:auto; padding-top:4px; display:flex; justify-content:flex-end; width:100%;">';
     panelHtml += '        <button id="nbf-cfg-generate" style="padding:10px 20px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-weight:600; cursor:pointer; font-size:12px; width:100%; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.1);">⚡ Compute Balanced Squads</button>';
@@ -575,11 +591,22 @@
     // Attach generation hook handlers
     document.getElementById('nbf-cfg-generate').addEventListener('click', processSnakeDraftCalculations);
     
+    // Scope adjustment interactive display monitor
+    document.getElementById('nbf-cfg-scope').addEventListener('change', function() {
+      var innerChoiceWrapper = document.getElementById('nbf-cfg-scope-faction-wrap');
+      if (innerChoiceWrapper) {
+        innerChoiceWrapper.style.display = (this.value === 'single') ? 'flex' : 'none';
+      }
+      syncStateTracker();
+    });
+
     // Dynamic synchronous state save triggers
     var syncStateTracker = function() {
       LEAGUE_STATE.compType = document.getElementById('nbf-cfg-type').value;
       LEAGUE_STATE.teamCount = parseInt(document.getElementById('nbf-cfg-teams').value) || 4;
       LEAGUE_STATE.scoringType = document.getElementById('nbf-cfg-scoring').value;
+      LEAGUE_STATE.scopeType = document.getElementById('nbf-cfg-scope').value;
+      LEAGUE_STATE.scopeFactionId = document.getElementById('nbf-cfg-scope-faction').value;
       LEAGUE_STATE.tracksCount = parseInt(document.getElementById('nbf-cfg-tracks').value) || 5;
       LEAGUE_STATE.lapsCount = parseInt(document.getElementById('nbf-cfg-laps').value) || 10;
       localStorage.setItem(CONFIG_LEAGUE_KEY, JSON.stringify(LEAGUE_STATE));
@@ -588,6 +615,7 @@
     document.getElementById('nbf-cfg-type').addEventListener('change', syncStateTracker);
     document.getElementById('nbf-cfg-teams').addEventListener('input', syncStateTracker);
     document.getElementById('nbf-cfg-scoring').addEventListener('change', syncStateTracker);
+    document.getElementById('nbf-cfg-scope-faction').addEventListener('change', syncStateTracker);
     document.getElementById('nbf-cfg-tracks').addEventListener('input', syncStateTracker);
     document.getElementById('nbf-cfg-laps').addEventListener('input', syncStateTracker);
 
@@ -597,9 +625,21 @@
   }
 
   function processSnakeDraftCalculations() {
-    var rawDataset = parseRuntimePipeline();
+    var rawDataset = RUNTIME_MEMBERS.slice();
     if (!rawDataset || rawDataset.length === 0) {
-      alert('The current driver dataset filter context has no available members. Please expand or verify filters.');
+      alert('The core dashboard dataset cache is currently blank. Please return to the leaderboard and hit Sync.');
+      return;
+    }
+
+    // Apply League Scope rule to matching engine pipeline filters
+    if (LEAGUE_STATE.scopeType === 'single') {
+      rawDataset = rawDataset.filter(function(driver) {
+        return String(driver.factionId) === String(LEAGUE_STATE.scopeFactionId);
+      });
+    }
+
+    if (rawDataset.length === 0) {
+      alert('The chosen target faction criteria profile contains 0 matching driver instances inside the loaded cache.');
       return;
     }
 
@@ -609,7 +649,7 @@
       arrayBuckets.push({ id: t + 1, score: 0, members: [] });
     }
 
-    var structuralPool = rawDataset.slice().sort(function(m1, m2) {
+    var structuralPool = rawDataset.sort(function(m1, m2) {
       return (m2.racing_skill || 0) - (m1.racing_skill || 0);
     });
 
