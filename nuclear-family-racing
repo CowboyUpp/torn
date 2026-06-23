@@ -35,14 +35,20 @@
     { id: 9754,  name: 'Emergency Room' }
   ];
 
-  // --- PREDEFINED KNOWLEDGE BASE ITEMS ---
+  // --- CONSOLIDATED KNOWLEDGE BASE ITEMS ---
   var FAQ_DATABASE = [
-    { q: "is my api key safe?", a: "Yes completely. Your API key is stored strictly inside your secure local browser sandbox (localStorage). It is never sent to third-party analytics trackers or external logging platforms; it communicates only via direct, encrypted HTTPS requests directly to api.torn.com." },
-    { q: "why does the dashboard only show up on the racing pages?", a: "To keep your game running fast! There is no need for this script to slow down your browser or reload itself while you are checking your gym stats, traveling, or trading. It stays completely quiet and out of the way until you visit the racing section, popping up exactly when and where you actually need it." },
-    { q: "why does it say @grant none in the header?", a: "This is an advanced security measure. By declaring '@grant none', the script explicitly strips itself of elevated browser script privileges. This means it physically cannot bypass native browser sandbox policies or exfiltrate your game profile data to unintended locations." },
-    { q: "what key access level should i use?", a: "We strongly recommend using a Limited Access or Public Only API key. The dashboard only requires basic public data fields to read faction rosters and individual driver personalstats; it never requires Full Access." },
-    { q: "how does the dynamic handicap score work?", a: "The formula subtracts a driver's current racing skill from the maximum skill found within the alliance pool. This produces a positive offset handicap value, indicating the theoretical time head-start or points boost required to equalize the playing field." },
-    { q: "how does the snake draft system distribute players?", a: "The system sorts your selected driver pool from highest skill to lowest skill. It then steps back-and-forth through your team slots (e.g., Team 1 to Team 4, then Team 4 back to Team 1). This ensures that the overall skill averages across all teams remain as evenly matched as mathematically possible." }
+    { 
+      q: "API Access Security & Keys", 
+      a: "Your API key is stored completely secure inside your local browser sandbox (localStorage) and is never transmitted to external servers or logging platforms. We highly recommend utilizing a Limited Access or Public Only API key as the dashboard only requests basic public rosters and driver personalstats—never requiring Full Access permissions. Furthermore, by explicitly declaring '@grant none', the script physically strips itself of elevated privileges to guarantee complete isolation." 
+    },
+    { 
+      q: "Dashboard Visibility & Scope", 
+      a: "To keep your game experience lightweight and running fast, this script stays completely quiet and out of the way during your daily tasks like gym training, crime, or trading. It intercepts your interface and initializes its components only when you actively visit the racing section, ensuring it runs exactly when and where you need it without causing global performance degradation." 
+    },
+    { 
+      q: "Handicaps & Snake Draft Logic", 
+      a: "The system balances the tournament matrix using two synchronized logic filters. First, individual driver handicap scores are calculated by subtracting their racing skill from the maximum skill level found within the alliance pool (producing a positive head-start offset). Second, when distributing players into teams, the Snake Draft engine sorts the filtered driver pool by skill and loops back-and-forth across team slots (e.g., Team 1 to 4, then Team 4 back to 1) to equalize total average skills evenly across all squads." 
+    }
   ];
 
   // --- APP VARIABLE STATE ---
@@ -339,7 +345,6 @@
     return dataPool;
   }
 
-  // --- LEADERBOARD GRID RENDER ENGINE ---
   function runTableRenderer() {
     var dataset = parseRuntimePipeline();
     var separationLineStyle = STATE_DARK_MODE ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
@@ -468,6 +473,7 @@
     runTableRenderer();
   }
 
+  // --- HELP / ACCORDION COMPONENT ENGINE ---
   function renderHelpPanelContent() {
     var targetContainer = document.getElementById('nbf-layout-body');
     if (!targetContainer) return;
@@ -479,7 +485,7 @@
 
     FAQ_DATABASE.forEach(function(item, idx) {
       panelHtml += '    <div class="nbf-faq-item">';
-      panelHtml += '      <div class="nbf-faq-header" data-fidx="' + idx + '"><span style="text-transform:capitalize; color:var(--nbf-txt); font-size:12px;">' + item.q + '</span><span style="color:var(--nbf-mut); font-size:11px;">▼</span></div>';
+      panelHtml += '      <div class="nbf-faq-header" data-fidx="' + idx + '"><span style="color:var(--nbf-txt); font-size:12px;">' + item.q + '</span><span style="color:var(--nbf-mut); font-size:11px;">▼</span></div>';
       panelHtml += '      <div id="nbf-faq-content-' + idx + '" class="nbf-faq-content" style="font-size:12px;">' + item.a + '</div>';
       panelHtml += '    </div>';
     });
@@ -490,12 +496,22 @@
     var headers = targetContainer.querySelectorAll('.nbf-faq-header');
     for (var h = 0; h < headers.length; h++) {
       headers[h].addEventListener('click', function() {
-        var idx = this.getAttribute('data-fidx');
-        var contentBlock = document.getElementById('nbf-faq-content-' + idx);
-        if (contentBlock) {
-          var isHidden = contentBlock.style.display !== 'block';
-          contentBlock.style.display = isHidden ? 'block' : 'none';
-          this.querySelector('span:last-child').textContent = isHidden ? '▲' : '▼';
+        var currentIdx = this.getAttribute('data-fidx');
+        var targetContentBlock = document.getElementById('nbf-faq-content-' + currentIdx);
+        var isCurrentlyHidden = targetContentBlock.style.display !== 'block';
+
+        // MUTUAL EXCLUSION ACCORDION LOGIC: Collapse all rows first
+        var allContents = targetContainer.querySelectorAll('.nbf-faq-content');
+        var allHeaders  = targetContainer.querySelectorAll('.nbf-faq-header');
+        for (var c = 0; c < allContents.length; c++) {
+          allContents[c].style.display = 'none';
+          allHeaders[c].querySelector('span:last-child').textContent = '▼';
+        }
+
+        // If the clicked row was hidden, open it now
+        if (isCurrentlyHidden) {
+          targetContentBlock.style.display = 'block';
+          this.querySelector('span:last-child').textContent = '▲';
         }
       });
     }
@@ -559,7 +575,6 @@
       arrayBuckets.push({ id: t + 1, score: 0, members: [] });
     }
 
-    // Sort Descending matching core capabilities
     var structuralPool = rawDataset.slice().sort(function(m1, m2) {
       return (m2.racing_skill || 0) - (m1.racing_skill || 0);
     });
