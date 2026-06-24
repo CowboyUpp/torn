@@ -1,0 +1,1827 @@
+// ==UserScript==
+// @name         Nuclear Family — MultiFaction Edition (Hyper-Drive)
+// @namespace    torn.com.nuclearfamily.strict
+// @version      6.0
+// @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, Class Handicaps, track select drop-downs, Steward race scraper, and Cloudflare result ingestion.
+// @author       cowboyup
+// @match        https://www.torn.com/page.php?sid=racing*
+// @match        https://www.torn.com/loader.php?sid=racing*
+// @license      MIT
+// @grant        none
+// ==/UserScript==
+
+
+
+;(function (window, document) {
+  'use strict';
+
+
+
+  /**********************************************************************
+   * NUCLEAR FAMILY — LIBRARY EDITION INDEX
+   *
+   * Refactor rule:
+   *     This edition reorganizes the script into library shelves only.
+   *     The function bodies, UI behavior, storage keys, endpoints, and
+   *     runtime behavior are intentionally preserved.
+   *
+   * Table of Contents:
+   *     BOOK 01 — Configuration & Runtime State
+   *     BOOK 02 — Theme Engine & CSS Injection
+   *     BOOK 03 — General Utilities
+   *     BOOK 04 — Storage Helpers
+   *     BOOK 05 — Dashboard Shell & Core UI
+   *     BOOK 06 — Router & Navigation
+   *     BOOK 07 — Leaderboard Engine
+   *     BOOK 08 — League Setup Engine
+   *     BOOK 09 — Standings Engine
+   *     BOOK 10 — Steward Management
+   *     BOOK 11 — Race Log Scraper
+   *     BOOK 12 — Data Export
+   *     BOOK 13 — Torn API Sync Pipeline
+   *     BOOK 14 — Help Library
+   *     BOOK 15 — Entry Point
+   **********************************************************************/
+
+
+  /**********************************************************************
+   * BOOK 01 — CONFIGURATION & RUNTIME STATE
+   *
+   * Purpose:
+   *     Static configuration, storage keys, lists, defaults, runtime state, and CSS node setup.
+   *
+   * Contains:
+   *     - Storage/cache keys
+   *     - Cloudflare placeholders
+   *     - Faction matrix
+   *     - Track list
+   *     - FAQ database
+   *     - Runtime variables
+   *     - League defaults
+   *     - Steward registry state
+   *     - Style node creation
+   *
+   * Dependencies:
+   *     - Browser localStorage
+   *     - document.head / documentElement
+   **********************************************************************/
+
+  // ============================================================
+  // STORAGE & CACHE KEY CONFIGURATION
+  // ============================================================
+  var CONFIG_STORAGE_KEY   = 'nbf_v3_api_key';
+  var CONFIG_THEME_KEY     = 'nbf_v3_theme';
+  var CONFIG_CACHE_KEY     = 'nbf_v3_data_cache';
+  var CONFIG_TIME_KEY      = 'nbf_v3_cache_time';
+  var CONFIG_LEAGUE_KEY    = 'nbf_v57_league_cfg';
+  var CONFIG_STEWARD_KEY   = 'nbf_v58_stewards';       // Steward registry
+  var CONFIG_STOKEN_KEY    = 'nbf_v58_steward_token';  // This user's Steward token
+  var CACHE_DURATION       = 86400000;
+
+  // ============================================================
+  // *** PLACEHOLDER — REPLACE BEFORE DEPLOYMENT ***
+  // Cloudflare Worker ingestion endpoint.
+  // Replace this URL with your actual Worker route once deployed.
+  // ============================================================
+  var CF_INGEST_ENDPOINT    = 'https://YOUR-WORKER.workers.dev/ingest-race';    // ← PLACEHOLDER
+  var CF_STANDINGS_ENDPOINT = 'https://YOUR-WORKER.workers.dev/standings';      // ← PLACEHOLDER
+
+  // ============================================================
+  // ALLIANCE TARGET MATRIX
+  // ============================================================
+  var TARGET_FACTIONS = [
+    { id: 8085,  name: 'Nuclear Blast' },
+    { id: 8954,  name: 'Nuclear Armageddon' },
+    { id: 16282, name: 'Nuclear Winter' },
+    { id: 12094, name: 'Nuclear Fusion' },
+    { id: 21028, name: 'Nuclear Clinic' },
+    { id: 13851, name: 'Nuclear Therapy' },
+    { id: 17133, name: 'Torn Medical' },
+    { id: 366,   name: 'Evolution' },
+    { id: 15222, name: 'Ionization' },
+    { id: 9754,  name: 'Emergency Room' }
+  ];
+
+  // ============================================================
+  // TRACK LIST MATRIX
+  // ============================================================
+  var AVAILABLE_TRACKS = [
+    "Uptown", "Withdrawal", "Underdog", "Parkland", "Docks", "Commerce",
+    "Two Islands", "Industrial", "Vector", "Mudpit", "Hammerhead",
+    "Sewage", "Meltdown", "Speedway", "Stone Park", "Convict"
+  ];
+
+  // ============================================================
+  // FAQ / HELP DATABASE
+  // ============================================================
+  var FAQ_DATABASE = [
+    {
+      q: "Why Does the Sync Take So Long?",
+      a: "The short answer: the dashboard is fetching live data for every single driver across all 10 alliance factions — one by one. Here is what happens behind the scenes. First, the script contacts Torn\'s servers once per faction to pull the full member roster (10 requests total). Then, for every driver found, it sends an individual request to fetch their personal racing stats. With roughly 780 drivers across the alliance, that means around 790 separate requests to Torn\'s API. To avoid overloading Torn\'s servers and getting your API key flagged or rate-limited, the script deliberately waits 650 milliseconds between each driver request. At that pace, 780 drivers takes approximately 8 to 9 minutes to complete a full sync. The good news: once the sync finishes, all data is saved locally in your browser for 24 hours. Unless you manually hit the Sync button again, the dashboard loads instantly from that saved snapshot. You only pay the full wait time once per day."
+    },
+    {
+      q: "API Access Security & Keys",
+      a: "Your API key is stored completely secure inside your local browser sandbox (localStorage) and is never transmitted to external servers or logging platforms. We highly recommend utilizing a Limited Access or Public Only API key as the dashboard only requests basic public rosters and driver personalstats—never requiring Full Access permissions. Furthermore, by explicitly declaring '@grant none', the script physically strips itself of elevated privileges to guarantee complete isolation."
+    },
+    {
+      q: "Dashboard Visibility & Scope",
+      a: "To keep your game experience lightweight and running fast, this script stays completely quiet and out of the way during your daily tasks like gym training, crime, or trading. It intercepts your interface and initializes its components only when you actively visit the racing section, ensuring it runs exactly when and where you need it without causing global performance degradation."
+    },
+    {
+      q: "Handicaps & Class Tier Logic",
+      a: "Under the KISS principle, Individual Solo Races leverage automated driver stratification. Drivers are automatically partitioned into three explicit tiers: Class C Rookie (RS under 5), Class B Pro (RS 5 to 20), and Class A Master Elite (RS 20+). Handicaps are verified at post-race ledger calculations, granting low-tier drivers performance offsets when outperforming higher brackets, keeping tournament tracking completely seamless."
+    },
+    {
+      q: "League Standings & Scoring",
+      a: "The League Standings tab displays championship points calculated by the Cloudflare backend from all submitted race results. Points follow a standard hierarchy (25-18-15-12-10-8-6-4-2-1 for top 10 finishers). The standings update automatically each time a Steward submits a race log. When the backend is live, click Refresh on the Standings tab to pull the latest data."
+    },
+    {
+      q: "Steward System & Race Ingestion",
+      a: "Authorized Stewards are identified by their Torn player ID and a unique personal token stored locally. When a Steward navigates to a completed race log page (sid=racing&tab=log&raceID=XXXX), the script automatically detects the context, scrapes the results table from the DOM, and transmits the payload to the league backend via a secure POST request authenticated by their Steward token. No automation — the Steward simply views the page as normal."
+    }
+  ];
+
+  // ============================================================
+  // APP VARIABLE STATE
+  // ============================================================
+  var STATE_API_KEY     = localStorage.getItem(CONFIG_STORAGE_KEY) || '';
+  var STATE_DARK_MODE   = localStorage.getItem(CONFIG_THEME_KEY) === 'dark';
+  var RUNTIME_MEMBERS   = [];
+  var RUNTIME_MAX_SKILL = 100;
+  var FLAG_IS_FETCHING  = false;
+  var STATE_COMPARE_A   = '';
+  var STATE_COMPARE_B   = '';
+  var STATE_ACTIVE_TAB  = 'leaderboard';
+
+  // ============================================================
+  // LEAGUE ENGINE CONFIG
+  // ============================================================
+  var LEAGUE_STATE = JSON.parse(localStorage.getItem(CONFIG_LEAGUE_KEY)) || {
+    compType: 'solo',
+    scopeType: 'all',
+    scopeFactionId: 'all',
+    teamCount: 4,
+    useHandicaps: true,
+    selectedTracks: ["Uptown", "Withdrawal", "Underdog", "Parkland", "Docks"],
+    lapsCount: 10,
+    scoringType: 'standard',
+    generatedTeams: []
+  };
+
+  // ============================================================
+  // STEWARD REGISTRY
+  // Stored as array of { id: "tornPlayerID", name: "DisplayName", role: "event"|"liaison" }
+  // ============================================================
+  var STEWARD_REGISTRY = JSON.parse(localStorage.getItem(CONFIG_STEWARD_KEY)) || [];
+
+  // This user's own Steward token (empty string = not a Steward)
+  var STATE_STEWARD_TOKEN = localStorage.getItem(CONFIG_STOKEN_KEY) || '';
+
+  var ENGINE_VERSION = '6.0';
+
+  // ============================================================
+  // CSS INJECTION
+  // ============================================================
+  var cssStyleNode = document.createElement('style');
+  cssStyleNode.id = 'nbf-hyper-drive-styles';
+  (document.head || document.documentElement).appendChild(cssStyleNode);
+
+
+  /**********************************************************************
+   * BOOK 02 — THEME ENGINE & CSS INJECTION
+   *
+   * Purpose:
+   *     Defines all dynamic CSS and theme application behavior.
+   *
+   * Contains:
+   *     - dynamicCSSRefresh()
+   *     - applyModalThemeMatrix()
+   *
+   * Dependencies:
+   *     - Runtime State
+   *     - Style node
+   **********************************************************************/
+
+  function dynamicCSSRefresh() {
+    var bgHeader  = STATE_DARK_MODE ? '#1e293b' : '#ffffff';
+    var textHeader = STATE_DARK_MODE ? '#94a3b8' : '#64748b';
+    var bldColor  = STATE_DARK_MODE ? '#334155' : '#cbd5e1';
+    var tooltipBg = STATE_DARK_MODE ? '#1f2937' : '#0f172a';
+    var tooltipTxt = STATE_DARK_MODE ? '#f3f4f6' : '#ffffff';
+
+    cssStyleNode.textContent =
+      '#nbf-frame-scrollbox { overflow-y: auto !important; overflow-x: auto !important; flex: 1 !important; height: 100% !important; position: relative !important; }' +
+      '#nbf-table-view { width: 100% !important; border-collapse: separate !important; border-spacing: 0 !important; font-size: 11px !important; min-width: 720px !important; }' +
+      '#nbf-table-view thead th { position: sticky !important; top: 0 !important; z-index: 9999 !important; background-color: ' + bgHeader + ' !important; color: ' + textHeader + ' !important; font-weight: 600 !important; padding: 12px 4px 10px 14px !important; text-align: left !important; border-bottom: 2px solid ' + bldColor + ' !important; }' +
+      '#nbf-table-view th:first-child { padding-left: 14px !important; }' +
+      '#nbf-table-view th:last-child { padding-right: 14px !important; }' +
+      '.nbf-row-selected { background: rgba(99, 102, 241, 0.15) !important; }' +
+      '.nbf-tab-btn { padding: 6px 12px !important; border: 1px solid var(--nbf-bld) !important; background: var(--nbf-btn-base) !important; color: var(--nbf-txt) !important; font-size: 12px !important; font-weight: 600 !important; cursor: pointer !important; border-radius: 4px !important; }' +
+      '.nbf-tab-btn.active { background: #6366f1 !important; color: #ffffff !important; border-color: #6366f1 !important; }' +
+      '.nbf-tooltip-host { position: relative !important; display: inline-block !important; cursor: help !important; margin-left: 4px !important; background: var(--nbf-bdg) !important; color: var(--nbf-mut) !important; font-size: 10px !important; width: 14px !important; height: 14px !important; line-height: 14px !important; text-align: center !important; border-radius: 50% !important; font-weight: bold !important; }' +
+      '.nbf-tooltip-host .nbf-tooltip-text { visibility: hidden !important; width: 220px !important; background-color: ' + tooltipBg + ' !important; color: ' + tooltipTxt + ' !important; text-align: left !important; border-radius: 6px !important; padding: 8px !important; position: absolute !important; z-index: 9999999 !important; bottom: 125% !important; left: 50% !important; margin-left: -110px !important; opacity: 0 !important; transition: opacity 0.2s !important; font-size: 11px !important; font-family: sans-serif !important; font-weight: normal !important; line-height: 1.4 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important; pointer-events: none !important; white-space: normal !important; }' +
+      '.nbf-tooltip-host:hover .nbf-tooltip-text { visibility: visible !important; opacity: 1 !important; }' +
+      '.nbf-faq-item { border: 1px solid var(--nbf-bld) !important; border-radius: 6px !important; margin-bottom: 8px !important; background: var(--nbf-main) !important; overflow: hidden !important; }' +
+      '.nbf-dropdown-menu { display: none; position: absolute; left: 0; right: 0; top: 100%; background: var(--nbf-field-bg); border: 1px solid var(--nbf-btn-border); border-radius: 6px; max-height: 180px; overflow-y: auto; z-index: 100000; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 6px; }' +
+      '.nbf-dropdown-menu.show { display: block; }' +
+      '.nbf-track-option { display: flex; align-items: center; gap: 8px; padding: 4px 6px; cursor: pointer; border-radius: 4px; font-size: 11px; }' +
+      '.nbf-track-option:hover { background: rgba(99, 102, 241, 0.15); }' +
+      // Scraper toast notification styles
+      '#nbf-scraper-toast { position: fixed !important; bottom: 220px !important; right: 16px !important; z-index: 9999999 !important; padding: 10px 14px !important; border-radius: 6px !important; font-size: 12px !important; font-weight: 600 !important; font-family: Arial, sans-serif !important; max-width: 280px !important; box-shadow: 0 4px 16px rgba(0,0,0,0.3) !important; transition: opacity 0.4s !important; }' +
+      '#nbf-scraper-toast.success { background: #14532d !important; color: #bbf7d0 !important; border: 1px solid #16a34a !important; }' +
+      '#nbf-scraper-toast.error { background: #450a0a !important; color: #fca5a5 !important; border: 1px solid #dc2626 !important; }' +
+      '#nbf-scraper-toast.info { background: #1e1b4b !important; color: #c7d2fe !important; border: 1px solid #6366f1 !important; }';
+  }
+
+  // ============================================================
+  // STEWARD UTILITY FUNCTIONS
+  // ============================================================
+
+  function applyModalThemeMatrix(domElement) {
+    if (STATE_DARK_MODE) {
+      domElement.style.cssText = 'width: 95vw !important; max-width: 960px !important; height: 85vh !important; max-height: 740px !important; background: #111827 !important; color: #f3f4f6 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.6) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important; --nbf-main: #111827; --nbf-alt: #1f2937; --nbf-alt2: #1e293b; --nbf-txt: #f3f4f6; --nbf-mut: #9ca3af; --nbf-bld: #374151; --nbf-btn-border: #4b5563; --nbf-bdg: #374151; --nbf-field-bg: #1f2937; --nbf-btn-base: #374151; --nbf-btn-acc: #1e40af; --nbf-btn-acc-txt: #ffffff;';
+    } else {
+      domElement.style.cssText = 'width: 95vw !important; max-width: 960px !important; height: 85vh !important; max-height: 740px !important; background: #fff !important; color: #111 !important; border-radius: 12px !important; box-shadow: 0 12px 36px rgba(0,0,0,0.4) !important; display: flex !important; flex-direction: column !important; font-family: Arial, sans-serif !important; font-size: 13px !important; box-sizing: border-box !important; overflow: hidden !important; --nbf-main: #ffffff; --nbf-alt: #fcfcfc; --nbf-alt2: #f8fafc; --nbf-txt: #111111; --nbf-mut: #64748b; --nbf-bld: #e5e5e5; --nbf-btn-border: #cccccc; --nbf-bdg: #e2e8f0; --nbf-field-bg: #ffffff; --nbf-btn-base: #f1f5f9; --nbf-btn-acc: #e2e8f0; --nbf-btn-acc-txt: #0f172a;';
+    }
+  }
+
+  // ============================================================
+  // TAB ROUTER
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 03 — GENERAL UTILITIES
+   *
+   * Purpose:
+   *     Small reusable helpers that do not own feature state.
+   *
+   * Contains:
+   *     - createTooltip()
+   *     - resolveRankBadge()
+   *     - renderStatModule()
+   *     - showScraperToast()
+   *     - executeAsyncDelay()
+   *
+   * Dependencies:
+   *     - Runtime State where needed
+   *     - document.body for toast
+   **********************************************************************/
+
+  function createTooltip(text) {
+    return '<span class="nbf-tooltip-host">?<span class="nbf-tooltip-text">' + text + '</span></span>';
+  }
+
+  // ============================================================
+  // MODAL INTERFACE
+  // ============================================================
+
+  function resolveRankBadge(skillPoints) {
+    if (skillPoints >= 20.0) return { title: 'Master Elite', bg: '#fef3c7', text: '#b45309' };
+    if (skillPoints >= 5.0)  return { title: 'Pro',          bg: '#e0f2fe', text: '#0369a1' };
+    return                          { title: 'Rookie',       bg: (STATE_DARK_MODE ? '#374151' : '#f3f4f6'), text: (STATE_DARK_MODE ? '#9ca3af' : '#4b5563') };
+  }
+
+  function renderStatModule(label, metric) {
+    return '<div style="background:var(--nbf-main); border:1px solid var(--nbf-bld); border-radius:6px; padding:6px 10px; min-width:75px; flex:1;"><div style="font-size:10px; color:var(--nbf-mut); text-transform:uppercase;">' + label + '</div><div style="font-size:14px; font-weight:600; color:var(--nbf-txt); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + metric + '</div></div>';
+  }
+
+  // ============================================================
+  // LEADERBOARD DATA PIPELINE
+  // ============================================================
+
+  function showScraperToast(message, type, durationMs) {
+    var existing = document.getElementById('nbf-scraper-toast');
+    if (existing) existing.parentNode.removeChild(existing);
+
+    var toast = document.createElement('div');
+    toast.id = 'nbf-scraper-toast';
+    toast.className = type || 'info';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    window.setTimeout(function() {
+      if (toast.parentNode) {
+        toast.style.opacity = '0';
+        window.setTimeout(function() {
+          if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 400);
+      }
+    }, durationMs || 4000);
+  }
+
+  // ============================================================
+  // RACE LOG SCRAPER
+  // Fires only on: sid=racing & tab=log & raceID present
+  // Fires only if: Steward token is set
+  // ============================================================
+
+  function executeAsyncDelay(delayPeriod, targetCallback) { window.setTimeout(targetCallback, delayPeriod); }
+
+
+  /**********************************************************************
+   * BOOK 04 — STORAGE HELPERS
+   *
+   * Purpose:
+   *     Storage-focused helpers kept separate from feature rendering.
+   *
+   * Contains:
+   *     - saveStewardRegistry()
+   *
+   * Dependencies:
+   *     - localStorage
+   *     - Steward state
+   **********************************************************************/
+
+  function saveStewardRegistry() {
+    localStorage.setItem(CONFIG_STEWARD_KEY, JSON.stringify(STEWARD_REGISTRY));
+  }
+
+
+  /**********************************************************************
+   * BOOK 05 — DASHBOARD SHELL & CORE UI
+   *
+   * Purpose:
+   *     Creates the floating launch button, modal, toolbar, key panel, and primary shell.
+   *
+   * Contains:
+   *     - mountFloatingInterface()
+   *     - renderModalInterface()
+   *     - displayKeySetupPanel()
+   *
+   * Dependencies:
+   *     - Theme Engine
+   *     - Router
+   *     - Leaderboard
+   *     - Storage
+   *     - API Sync
+   **********************************************************************/
+
+  function mountFloatingInterface() {
+    if (document.getElementById('nbf-action-trigger-button')) return;
+    if (!document.body) return;
+
+    var floatingActionBtn = document.createElement('button');
+    floatingActionBtn.id = 'nbf-action-trigger-button';
+    floatingActionBtn.textContent = '⚡ Nuclear Hyper-Drive';
+
+    floatingActionBtn.style.cssText =
+      'position: fixed !important; bottom: 170px !important; right: 16px !important; z-index: 999999 !important; ' +
+      'background: linear-gradient(135deg, #111827 0%, #1f2937 100%) !important; ' +
+      'color: #f3f4f6 !important; ' +
+      'border: 1px solid #4f46e5 !important; ' +
+      'border-radius: 4px !important; ' +
+      'padding: 10px 20px !important; ' +
+      'font-size: 12px !important; ' +
+      'font-weight: 800 !important; ' +
+      'text-transform: uppercase !important; ' +
+      'letter-spacing: 1.5px !important; ' +
+      'font-style: italic !important; ' +
+      'cursor: pointer !important; ' +
+      'box-shadow: 0 0 15px rgba(79, 70, 229, 0.4) !important; ' +
+      'transition: all 0.2s ease-in-out !important; ' +
+      'display: block !important;';
+
+    floatingActionBtn.addEventListener('mouseenter', function() {
+      this.style.setProperty('box-shadow', '0 0 25px rgba(236, 72, 153, 0.6)', 'important');
+      this.style.setProperty('border-color', '#ec4899', 'important');
+      this.style.setProperty('transform', 'scale(1.03)', 'important');
+    });
+    floatingActionBtn.addEventListener('mouseleave', function() {
+      this.style.setProperty('box-shadow', '0 0 15px rgba(79, 70, 229, 0.4)', 'important');
+      this.style.setProperty('border-color', '#4f46e5', 'important');
+      this.style.setProperty('transform', 'scale(1.0)', 'important');
+    });
+
+    document.body.appendChild(floatingActionBtn);
+    floatingActionBtn.addEventListener('click', function(e) {
+      e.preventDefault(); e.stopPropagation();
+      var existingBackdrop = document.getElementById('nbf-backdrop-mask');
+      if (existingBackdrop) { existingBackdrop.parentNode.removeChild(existingBackdrop); } else { renderModalInterface(); }
+    });
+  }
+
+  function renderModalInterface() {
+    dynamicCSSRefresh();
+
+    var backdropMask = document.createElement('div');
+    backdropMask.id = 'nbf-backdrop-mask';
+    backdropMask.style.cssText = 'position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; background: rgba(0, 0, 0, 0.75) !important; z-index: 2147483640 !important; display: flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; padding: 12px !important;';
+
+    var modalContainer = document.createElement('div');
+    modalContainer.id = 'nbf-modal-container';
+    applyModalThemeMatrix(modalContainer);
+
+    var stewardBadge = isStewardAuthorized()
+      ? '<span style="font-size:10px; background:#14532d; color:#bbf7d0; border:1px solid #16a34a; padding:1px 6px; border-radius:4px; margin-left:4px;">🛡 Steward Active</span>'
+      : '';
+
+    var viewHtml = '<div id="nbf-layout-header" style="padding:14px; border-bottom:1px solid var(--nbf-bld); display:flex; flex-direction:column; gap:10px; background:var(--nbf-alt);">';
+    viewHtml += '  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; width:100%;">';
+    viewHtml += '    <span style="font-size:15px; font-weight:600; color:var(--nbf-txt);">Nuclear Family Engine</span>';
+    viewHtml += '    <span style="font-size:10px; color:var(--nbf-mut); background:var(--nbf-bdg); border:1px solid var(--nbf-bld); padding:1px 5px; border-radius:4px;">v' + ENGINE_VERSION + '</span>';
+    viewHtml += stewardBadge;
+    viewHtml += '    <button id="nbf-ctrl-theme" style="font-size:13px; background:none; border:none; cursor:pointer; padding:2px 4px;">' + (STATE_DARK_MODE ? '☀️' : '🌙') + '</button>';
+    viewHtml += '    <div style="display:flex; gap:4px; margin-left:12px;">';
+    viewHtml += '      <button id="nbf-tab-leaderboard" class="nbf-tab-btn active">Leaderboard</button>';
+    viewHtml += '      <button id="nbf-tab-setup" class="nbf-tab-btn">League Setup</button>';
+    viewHtml += '      <button id="nbf-tab-stewards" class="nbf-tab-btn">Stewards</button>';
+    viewHtml += '      <button id="nbf-tab-standings" class="nbf-tab-btn">🏆 Standings</button>';
+    viewHtml += '      <button id="nbf-tab-help" class="nbf-tab-btn">Help Central</button>';
+    viewHtml += '    </div>';
+    viewHtml += '    <button id="nbf-btn-close" style="margin-left:auto; padding:6px 12px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-base); color:var(--nbf-txt); font-weight:600;">✕ Close</button>';
+    viewHtml += '  </div>';
+
+    viewHtml += '  <div id="nbf-context-controls" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; width:100%;">';
+    viewHtml += '    <select id="nbf-field-faction" style="padding:6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; min-width:130px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="all">All Factions</option>';
+    TARGET_FACTIONS.forEach(function(fac) { viewHtml += '<option value="' + fac.id + '">' + fac.name + '</option>'; });
+    viewHtml += '    </select>';
+    viewHtml += '    <input id="nbf-field-search" type="text" placeholder="Search driver name..." style="padding:6px 8px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; width:140px; background:var(--nbf-field-bg); color:var(--nbf-txt);" />';
+    viewHtml += '    <select id="nbf-field-sort" style="padding:6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="racing_skill">Skill</option><option value="racing_ratio">Efficiency %</option><option value="racing_wins">Wins</option><option value="racing_points">Points</option><option value="handicap">Handicap</option><option value="name">Name</option></select>';
+    viewHtml += '    <select id="nbf-field-direction" style="padding:6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="desc">Desc</option><option value="asc">Asc</option></select>';
+    viewHtml += '    <button id="nbf-btn-sync" style="padding:6px 10px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:#16a34a; color:#fff; font-weight:600;">🔄 Sync</button>';
+    viewHtml += '    <button id="nbf-btn-auth" style="padding:6px 10px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-base); color:var(--nbf-txt);">🔑</button>';
+    viewHtml += '    <button id="nbf-btn-csv" style="padding:6px 12px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-acc); color:var(--nbf-btn-acc-txt); font-weight:600;">📥 Export</button>';
+    viewHtml += '    <span id="nbf-txt-counter" style="font-size:11px; color:var(--nbf-txt); background:var(--nbf-bdg); padding:4px 8px; border-radius:20px; margin-left:auto;">Loading...</span>';
+    viewHtml += '    <span id="nbf-txt-cache" style="font-size:11px; font-weight:600;"></span>';
+    viewHtml += '  </div>';
+    viewHtml += '</div>';
+    viewHtml += '<div id="nbf-layout-duel" style="display:none; padding:10px 14px; background:linear-gradient(90deg, #312e81, #1e1b4b); color:#fff; border-bottom:1px solid #4338ca; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;"></div>';
+    viewHtml += '<div id="nbf-layout-summary" style="display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid var(--nbf-bld); flex-wrap:wrap; background:var(--nbf-alt2);"></div>';
+    viewHtml += '<div id="nbf-layout-progress" style="text-align:center; font-size:11px; color:#1e40af; font-weight:bold; padding:6px 0; background:#eff6ff; border-bottom:1px solid #bfdbfe; display:none;"></div>';
+    viewHtml += '<div id="nbf-frame-scrollbox" style="background:var(--nbf-main);"><div id="nbf-layout-body"></div></div>';
+
+    modalContainer.innerHTML = viewHtml;
+    backdropMask.appendChild(modalContainer);
+    document.body.appendChild(backdropMask);
+
+    document.getElementById('nbf-btn-close').addEventListener('click', function() { backdropMask.parentNode.removeChild(backdropMask); });
+    backdropMask.addEventListener('click', function(e) { if (e.target === backdropMask) backdropMask.parentNode.removeChild(backdropMask); });
+
+    document.getElementById('nbf-tab-leaderboard').addEventListener('click', function() { switchViewRoute('leaderboard'); });
+    document.getElementById('nbf-tab-setup').addEventListener('click', function() { switchViewRoute('setup'); });
+    document.getElementById('nbf-tab-stewards').addEventListener('click', function() { switchViewRoute('stewards'); });
+    document.getElementById('nbf-tab-standings').addEventListener('click', function() { switchViewRoute('standings'); });
+    document.getElementById('nbf-tab-help').addEventListener('click', function() { switchViewRoute('help'); });
+
+    document.getElementById('nbf-field-faction').addEventListener('change', function() { routerViewRefresh(); });
+    document.getElementById('nbf-field-search').addEventListener('input', function() { routerViewRefresh(); });
+    document.getElementById('nbf-field-sort').addEventListener('change', function() { routerViewRefresh(); });
+    document.getElementById('nbf-field-direction').addEventListener('change', function() { routerViewRefresh(); });
+
+    document.getElementById('nbf-btn-auth').addEventListener('click', function() { displayKeySetupPanel(modalContainer, function() { baseCacheRouter(true); }); });
+    document.getElementById('nbf-btn-csv').addEventListener('click', processDataExportToCSV);
+    document.getElementById('nbf-btn-sync').addEventListener('click', function() { if (!FLAG_IS_FETCHING) baseCacheRouter(true); });
+
+    document.getElementById('nbf-ctrl-theme').addEventListener('click', function() {
+      STATE_DARK_MODE = !STATE_DARK_MODE;
+      localStorage.setItem(CONFIG_THEME_KEY, STATE_DARK_MODE ? 'dark' : 'light');
+      document.getElementById('nbf-ctrl-theme').textContent = STATE_DARK_MODE ? '☀️' : '🌙';
+      dynamicCSSRefresh();
+      applyModalThemeMatrix(modalContainer);
+      routerViewRefresh();
+    });
+
+    if (!STATE_API_KEY) { displayKeySetupPanel(modalContainer, function() { baseCacheRouter(true); }); } else { baseCacheRouter(false); }
+  }
+
+  function displayKeySetupPanel(modalWrapper, triggerOnSuccess) {
+    var layoutBody = document.getElementById('nbf-layout-body');
+    if (!layoutBody) return;
+    switchViewRoute('leaderboard');
+    var subControls = document.getElementById('nbf-context-controls');
+    if (subControls) subControls.style.display = 'none';
+
+    var keyLength = STATE_API_KEY ? STATE_API_KEY.trim().length : 0;
+    var cleanMask = '';
+    if (keyLength > 0) {
+      cleanMask = STATE_API_KEY.trim().slice(0, 4);
+      for (var m = 0; m < Math.max(0, keyLength - 4); m++) { cleanMask += '•'; }
+    }
+
+    var initializationHtml = '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:3rem; background:var(--nbf-main);">';
+    initializationHtml += '<div style="width:100%; max-width:420px; background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:10px; padding:24px 20px;">';
+    initializationHtml += '<div style="font-size:15px; font-weight:600; color:var(--nbf-txt); margin-bottom:4px;">Enter Family Alliance Key</div>';
+    initializationHtml += '<div style="font-size:12px; color:var(--nbf-mut); margin-bottom:16px; line-height:1.5;">Saved locally inside your browser sandbox structure. Only explicitly shared with <code style="font-size:11px; background:var(--nbf-bdg); color:var(--nbf-txt); padding:1px 5px; border-radius:4px;">api.torn.com</code>.</div>';
+    initializationHtml += '<div style="position:relative; display:flex; align-items:center; margin-bottom:12px; width:100%;">';
+    initializationHtml += '<input id="nbf-auth-entry" type="password" placeholder="' + (cleanMask ? 'Current: ' + cleanMask : 'Paste limited API key here...') + '" autocomplete="off" style="width:100%; padding:8px 36px 8px 10px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:13px; box-sizing:border-box; background:var(--nbf-field-bg); color:var(--nbf-txt);" />';
+    initializationHtml += '<button id="nbf-auth-reveal" style="position:absolute; right:10px; background:none; border:none; cursor:pointer; font-size:14px; color:var(--nbf-mut); padding:0;">👁</button></div>';
+    initializationHtml += '<div id="nbf-auth-warning" style="font-size:11px; color:#c62828; margin-bottom:8px; display:none;">Please enter a valid API key.</div>';
+    initializationHtml += '<div style="display:flex; gap:8px; margin-top:4px;"><button id="nbf-auth-commit" style="flex:1; padding:9px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Save and Load Data</button>';
+    initializationHtml += (STATE_API_KEY ? '<button id="nbf-auth-wipe" style="padding:9px 14px; background:var(--nbf-field-bg); color:#c62828; border:1px solid #fca5a5; border-radius:6px; font-size:13px; cursor:pointer;">Clear</button>' : '');
+    initializationHtml += '</div></div></div>';
+
+    layoutBody.innerHTML = initializationHtml;
+
+    document.getElementById('nbf-auth-reveal').addEventListener('click', function() {
+      var field = document.getElementById('nbf-auth-entry');
+      field.type = field.type === 'password' ? 'text' : 'password';
+    });
+    var purgeButton = document.getElementById('nbf-auth-wipe');
+    if (purgeButton) {
+      purgeButton.addEventListener('click', function() {
+        STATE_API_KEY = '';
+        localStorage.removeItem(CONFIG_STORAGE_KEY);
+        document.getElementById('nbf-auth-entry').value = '';
+        document.getElementById('nbf-auth-entry').placeholder = 'Paste limited API key here...';
+        purgeButton.parentNode.removeChild(purgeButton);
+      });
+    }
+
+    document.getElementById('nbf-auth-commit').addEventListener('click', function() {
+      var field = document.getElementById('nbf-auth-entry');
+      var standardValue = field.value.trim();
+      if (!standardValue && !STATE_API_KEY) { document.getElementById('nbf-auth-warning').style.display = 'block'; return; }
+      if (standardValue) { STATE_API_KEY = standardValue; localStorage.setItem(CONFIG_STORAGE_KEY, STATE_API_KEY); }
+      if (subControls) subControls.style.display = 'flex';
+      layoutBody.innerHTML = '<p style="padding:2rem; text-align:center; color:var(--nbf-mut);">Preparing connections...</p>';
+      triggerOnSuccess();
+    });
+  }
+
+  // ============================================================
+  // STEWARD PANEL
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 06 — ROUTER & NAVIGATION
+   *
+   * Purpose:
+   *     Controls active tabs and delegates rendering to the correct feature shelf.
+   *
+   * Contains:
+   *     - switchViewRoute()
+   *     - routerViewRefresh()
+   *
+   * Dependencies:
+   *     - Dashboard Shell
+   *     - Leaderboard
+   *     - League
+   *     - Standings
+   *     - Stewards
+   *     - Help
+   **********************************************************************/
+
+  function switchViewRoute(targetTab) {
+    STATE_ACTIVE_TAB = targetTab;
+    var tabs = ['leaderboard', 'setup', 'stewards', 'standings', 'help'];
+    tabs.forEach(function(t) {
+      var btn = document.getElementById('nbf-tab-' + t);
+      if (btn) { btn.classList.toggle('active', t === targetTab); }
+    });
+    var subControls = document.getElementById('nbf-context-controls');
+    var summaryLine = document.getElementById('nbf-layout-summary');
+    var duelBar     = document.getElementById('nbf-layout-duel');
+    if (targetTab === 'leaderboard') {
+      if (subControls) subControls.style.display = 'flex';
+      if (summaryLine) summaryLine.style.display = 'flex';
+      if (duelBar && STATE_COMPARE_A && STATE_COMPARE_B) duelBar.style.display = 'flex';
+    } else {
+      if (subControls) subControls.style.display = 'none';
+      if (summaryLine) summaryLine.style.display = 'none';
+      if (duelBar) duelBar.style.display = 'none';
+    }
+    routerViewRefresh();
+  }
+
+  function routerViewRefresh() {
+    if (STATE_ACTIVE_TAB === 'leaderboard') {
+      runTableRenderer();
+      refreshSummaryCards();
+    } else if (STATE_ACTIVE_TAB === 'setup') {
+      renderSetupPanelContent();
+    } else if (STATE_ACTIVE_TAB === 'stewards') {
+      renderStewardPanelContent();
+    } else if (STATE_ACTIVE_TAB === 'standings') {
+      renderStandingsPanelContent();
+    } else if (STATE_ACTIVE_TAB === 'help') {
+      renderHelpPanelContent();
+    }
+  }
+
+  // ============================================================
+  // API KEY SETUP PANEL
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 07 — LEADERBOARD ENGINE
+   *
+   * Purpose:
+   *     Handles driver filtering, sorting, summary cards, table rendering, and comparison mode.
+   *
+   * Contains:
+   *     - parseRuntimePipeline()
+   *     - runTableRenderer()
+   *     - refreshSummaryCards()
+   *     - executeInteractiveComparison()
+   *
+   * Dependencies:
+   *     - Runtime State
+   *     - Utilities
+   *     - Router
+   **********************************************************************/
+
+  function parseRuntimePipeline() {
+    var facEl = document.getElementById('nbf-field-faction');
+    var selectedFactionId = facEl ? facEl.value : 'all';
+    var searchEl = document.getElementById('nbf-field-search');
+    var filteringKey = (searchEl ? searchEl.value : '').toLowerCase();
+    var sortEl = document.getElementById('nbf-field-sort');
+    var sortedProperty = sortEl ? sortEl.value : 'racing_skill';
+    var dirEl = document.getElementById('nbf-field-direction');
+    var directionMode = dirEl ? dirEl.value : 'desc';
+
+    var dataPool = RUNTIME_MEMBERS.filter(function(item) {
+      if (selectedFactionId !== 'all' && String(item.factionId) !== selectedFactionId) return false;
+      return item.name.toLowerCase().indexOf(filteringKey) !== -1;
+    });
+
+    dataPool.forEach(function(item) {
+      var skill = item.racing_skill !== undefined ? item.racing_skill : 0;
+      item.handicap = Math.max(0, RUNTIME_MAX_SKILL - skill);
+    });
+
+    dataPool.sort(function(alpha, beta) {
+      var nodeA = alpha[sortedProperty] !== undefined ? alpha[sortedProperty] : 0;
+      var nodeB = beta[sortedProperty] !== undefined ? beta[sortedProperty] : 0;
+      if (typeof nodeA === 'string') { nodeA = nodeA.toLowerCase(); nodeB = nodeB.toLowerCase(); }
+      if (nodeA < nodeB) return directionMode === 'asc' ? -1 : 1;
+      if (nodeA > nodeB) return directionMode === 'asc' ?  1 : -1;
+      return 0;
+    });
+
+    return dataPool;
+  }
+
+  function runTableRenderer() {
+    var dataset = parseRuntimePipeline();
+    var separationLineStyle  = STATE_DARK_MODE ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
+    var dynamicAnchorColor   = STATE_DARK_MODE ? '#60a5fa' : '#1d6fa4';
+    var descriptionMutedText = STATE_DARK_MODE ? '#9ca3af' : '#475569';
+    var highlightBoldText    = STATE_DARK_MODE ? '#f3f4f6' : '#0f172a';
+
+    var markupRows = dataset.map(function(player, slot) {
+      var absoluteSkill   = player.racing_skill !== undefined ? player.racing_skill : 0;
+      var progressWidth   = RUNTIME_MAX_SKILL > 0 ? Math.round((absoluteSkill / RUNTIME_MAX_SKILL) * 100) : 0;
+      var badgeObject     = resolveRankBadge(absoluteSkill);
+      var calculatedRatio = (player.racing_ratio !== undefined ? player.racing_ratio : 0).toFixed(1) + '%';
+      var handicapDisplay = player.handicap !== undefined ? '+' + player.handicap.toFixed(1) : '0.0';
+      var rowClass = '';
+      if (String(player.id) === STATE_COMPARE_A || String(player.id) === STATE_COMPARE_B) { rowClass = ' class="nbf-row-selected"'; }
+
+      var rowString = '<tr' + rowClass + ' style="' + separationLineStyle + ' cursor:pointer;" data-pid="' + player.id + '">';
+      rowString += '<td style="padding:8px 14px; color:var(--nbf-mut);">' + (slot + 1) + '</td>';
+      rowString += '<td style="padding:8px 4px;"><a href="https://www.torn.com/profiles.php?XID=' + player.id + '" target="_blank" style="color:' + dynamicAnchorColor + '; text-decoration:none; font-weight:600;" onclick="event.stopPropagation();">' + player.name + '</a></td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:120px;" title="' + player.factionName + '">' + (player.factionName || '—') + '</td>';
+      rowString += '<td style="padding:8px 4px;"><span style="background:' + badgeObject.bg + '; color:' + badgeObject.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + badgeObject.title + '</span></td>';
+      rowString += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nbf-bdg); min-width:40px;"><div style="width:' + progressWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + descriptionMutedText + '; min-width:28px; text-align:right;">' + absoluteSkill.toFixed(2) + '</span></div></td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; text-align:right;">' + (player.racing_wins !== undefined ? player.racing_wins : '—') + '</td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; text-align:right;">' + (player.races_entered !== undefined ? player.races_entered : '—') + '</td>';
+      rowString += '<td style="padding:8px 4px; font-weight:600; color:' + highlightBoldText + '; text-align:right;">' + calculatedRatio + '</td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; text-align:right;">' + (player.racing_points !== undefined ? player.racing_points : '—') + '</td>';
+      rowString += '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48; text-align:right;">' + handicapDisplay + '</td>';
+      rowString += '</tr>';
+      return rowString;
+    }).join('');
+
+    var targetBodyDOM = document.getElementById('nbf-layout-body');
+    if (!targetBodyDOM) return;
+    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Class Tier</th><th>Skill Matrix</th><th style="text-align:right;">Wins</th><th style="text-align:right;">Runs</th><th style="text-align:right;">Efficiency</th><th style="text-align:right;">Pts</th><th style="text-align:right;">Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
+
+    var rows = targetBodyDOM.querySelectorAll('tbody tr');
+    for (var r = 0; r < rows.length; r++) {
+      rows[r].addEventListener('click', function() {
+        executeInteractiveComparison(this.getAttribute('data-pid'));
+      });
+    }
+
+    var totalCounterNode = document.getElementById('nbf-txt-counter');
+    if (totalCounterNode) { totalCounterNode.textContent = dataset.length + ' Drivers Filtered'; }
+  }
+
+  function refreshSummaryCards() {
+    var summaryWrapper = document.getElementById('nbf-layout-summary');
+    if (!summaryWrapper) return;
+    if (!RUNTIME_MEMBERS || RUNTIME_MEMBERS.length === 0) {
+      summaryWrapper.innerHTML = '<div style="color:var(--nbf-mut); padding:4px 0;">No active dataset pool loaded. Please run network synchronization.</div>';
+      return;
+    }
+
+    var driversCount = RUNTIME_MEMBERS.length;
+    var trackingWins = 0, trackingRuns = 0, accumulatedSkill = 0;
+    for (var i = 0; i < driversCount; i++) {
+      trackingWins     += (RUNTIME_MEMBERS[i].racing_wins  || 0);
+      trackingRuns     += (RUNTIME_MEMBERS[i].races_entered || 0);
+      accumulatedSkill += (RUNTIME_MEMBERS[i].racing_skill  || 0);
+    }
+
+    var networkAverageSkill = (accumulatedSkill / driversCount).toFixed(2);
+    var generalEfficiency   = trackingRuns > 0 ? ((trackingWins / trackingRuns) * 100).toFixed(1) + '%' : '0.0%';
+
+    summaryWrapper.innerHTML =
+      renderStatModule('Total Pool', driversCount) +
+      renderStatModule('Combined Wins', trackingWins.toLocaleString()) +
+      renderStatModule('Alliance Runs', trackingRuns.toLocaleString()) +
+      renderStatModule('Average Skill', networkAverageSkill) +
+      renderStatModule('Win Ratio', generalEfficiency);
+  }
+
+  // ============================================================
+  // DRIVER COMPARISON (DUEL BAR)
+  // ============================================================
+
+  function executeInteractiveComparison(selectedId) {
+    if (!selectedId) return;
+    if (STATE_COMPARE_A === selectedId)      { STATE_COMPARE_A = ''; }
+    else if (STATE_COMPARE_B === selectedId) { STATE_COMPARE_B = ''; }
+    else if (!STATE_COMPARE_A)               { STATE_COMPARE_A = selectedId; }
+    else if (!STATE_COMPARE_B)               { STATE_COMPARE_B = selectedId; }
+    else                                     { STATE_COMPARE_A = selectedId; STATE_COMPARE_B = ''; }
+
+    var duelBar = document.getElementById('nbf-layout-duel');
+    if (!STATE_COMPARE_A || !STATE_COMPARE_B) {
+      if (duelBar) duelBar.style.display = 'none';
+      runTableRenderer();
+      return;
+    }
+
+    var driverObjA = null, driverObjB = null;
+    for (var i = 0; i < RUNTIME_MEMBERS.length; i++) {
+      if (String(RUNTIME_MEMBERS[i].id) === STATE_COMPARE_A) driverObjA = RUNTIME_MEMBERS[i];
+      if (String(RUNTIME_MEMBERS[i].id) === STATE_COMPARE_B) driverObjB = RUNTIME_MEMBERS[i];
+    }
+
+    if (!driverObjA || !driverObjB) {
+      if (duelBar) duelBar.style.display = 'none';
+      runTableRenderer();
+      return;
+    }
+
+    if (duelBar) {
+      duelBar.style.display = 'flex';
+      var skillDiff  = (driverObjA.racing_skill || 0) - (driverObjB.racing_skill || 0);
+      var leaderText = skillDiff > 0
+        ? driverObjA.name + ' leads by +' + skillDiff.toFixed(2)
+        : (skillDiff < 0 ? driverObjB.name + ' leads by +' + Math.abs(skillDiff).toFixed(2) : 'Perfectly Matched');
+
+      duelBar.innerHTML =
+        '<div style="font-weight:600; font-size:12px;">📊 Matchup: <span style="color:#6366f1;">' + driverObjA.name + '</span> (' + (driverObjA.racing_skill || 0).toFixed(2) + ') vs <span style="color:#ec4899;">' + driverObjB.name + '</span> (' + (driverObjB.racing_skill || 0).toFixed(2) + ')</div>' +
+        '<div style="font-size:12px; font-weight:bold; background:rgba(255,255,255,0.1); padding:4px 10px; border-radius:4px;">' + leaderText + '</div>' +
+        '<button id="nbf-btn-duel-clear" style="background:none; border:1px solid rgba(255,255,255,0.3); color:#fff; padding:2px 8px; border-radius:4px; cursor:pointer; font-size:11px;">Clear Context</button>';
+
+      document.getElementById('nbf-btn-duel-clear').addEventListener('click', function(e) {
+        e.stopPropagation();
+        STATE_COMPARE_A = ''; STATE_COMPARE_B = '';
+        duelBar.style.display = 'none';
+        runTableRenderer();
+      });
+    }
+    runTableRenderer();
+  }
+
+
+  // ============================================================
+  // LEAGUE STANDINGS PANEL
+  // Fetches from CF_STANDINGS_ENDPOINT when live.
+  // Falls back to placeholder data when endpoint is still set
+  // to the placeholder URL so the UI is fully testable now.
+  // ============================================================
+
+  // Placeholder dataset — replace with nothing once CF is live,
+  // the live fetch path will take over automatically.
+  var STANDINGS_PLACEHOLDER = [
+    { rank:1,  name:'CowboyUpp',      faction:'Nuclear Blast',      points:118, wins:3, podiums:5, races:6, best:1 },
+    { rank:2,  name:'IronwheelX',     faction:'Nuclear Armageddon', points:97,  wins:2, podiums:4, races:6, best:1 },
+    { rank:3,  name:'DriftKing99',    faction:'Nuclear Winter',     points:84,  wins:1, podiums:3, races:5, best:2 },
+    { rank:4,  name:'TarmacGhost',    faction:'Nuclear Fusion',     points:76,  wins:1, podiums:2, races:6, best:2 },
+    { rank:5,  name:'BlazeRunner',    faction:'Nuclear Clinic',     points:63,  wins:0, podiums:3, races:5, best:3 },
+    { rank:6,  name:'OversteerOlaf',  faction:'Nuclear Therapy',    points:55,  wins:0, podiums:2, races:6, best:3 },
+    { rank:7,  name:'PedalToMetal',   faction:'Torn Medical',       points:44,  wins:0, podiums:1, races:4, best:4 },
+    { rank:8,  name:'SlipstreamSue',  faction:'Evolution',          points:38,  wins:0, podiums:1, races:5, best:4 },
+    { rank:9,  name:'ApexHunter',     faction:'Ionization',         points:29,  wins:0, podiums:0, races:4, best:5 },
+    { rank:10, name:'GravelTrap',     faction:'Emergency Room',     points:18,  wins:0, podiums:0, races:3, best:6 }
+  ];
+
+
+  /**********************************************************************
+   * BOOK 08 — LEAGUE SETUP ENGINE
+   *
+   * Purpose:
+   *     Handles competition setup UI, team draft generation, tracks, laps, and handicap toggles.
+   *
+   * Contains:
+   *     - renderSetupPanelContent()
+   *     - processSnakeDraftCalculations()
+   *     - renderDraftZoneMarkup()
+   *
+   * Dependencies:
+   *     - Runtime State
+   *     - Storage
+   *     - Leaderboard data
+   **********************************************************************/
+
+  function renderSetupPanelContent() {
+    var targetContainer = document.getElementById('nbf-layout-body');
+    if (!targetContainer) return;
+
+    var selectedCount = (LEAGUE_STATE.selectedTracks || []).length;
+    var dropdownLabel = selectedCount === 0 ? "Select Tracks..." : selectedCount + " Tracks Selected";
+
+    var panelHtml = '<div style="padding:24px; max-width:840px; margin:0 auto; background:var(--nbf-main); font-family:sans-serif;">';
+    panelHtml += '<div style="margin-bottom:20px; border-bottom:1px solid var(--nbf-bld); padding-bottom:12px;">';
+    panelHtml += '  <h2 style="margin:0; font-size:16px; font-weight:600; color:var(--nbf-txt);">Tournament & League Setup Profile</h2>';
+    panelHtml += '  <p style="margin:4px 0 0 0; font-size:12px; color:var(--nbf-mut);">Configure tracks, structural format rules, and balance algorithms for your active alliance tournament session.</p>';
+    panelHtml += '</div>';
+
+    panelHtml += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:24px;">';
+
+    // Column 1: Format & Balance
+    panelHtml += '<div style="background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; display:flex; flex-direction:column; gap:14px;">';
+    panelHtml += '  <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">Format & Balance Settings</h3>';
+
+    panelHtml += '  <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">System Format</label>';
+    panelHtml += '    <select id="nbf-cfg-type" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="solo"' + (LEAGUE_STATE.compType === 'solo' ? ' selected' : '') + '>Individual Solo Race</option><option value="teams"' + (LEAGUE_STATE.compType === 'teams' ? ' selected' : '') + '>Alliance Squad Draft</option></select></div>';
+
+    var teamsVis = (LEAGUE_STATE.compType === 'teams') ? 'display:flex;' : 'display:none;';
+    var soloVis  = (LEAGUE_STATE.compType === 'solo')  ? 'display:flex;' : 'display:none;';
+
+    panelHtml += '  <div id="nbf-wrap-teamcount" style="' + teamsVis + ' flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Team Count</label>';
+    panelHtml += '    <input id="nbf-cfg-teams" type="number" min="2" max="12" value="' + LEAGUE_STATE.teamCount + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
+
+    panelHtml += '  <div id="nbf-wrap-handicapstoggle" style="' + soloVis + ' flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Automated Settings</label>';
+    panelHtml += '    <label style="display:flex; align-items:center; gap:8px; padding:8px; background:var(--nbf-field-bg); border:1px solid var(--nbf-btn-border); border-radius:6px; cursor:pointer; font-size:12px; color:var(--nbf-txt); font-weight:normal;">';
+    panelHtml += '      <input id="nbf-cfg-usehandicaps" type="checkbox"' + (LEAGUE_STATE.useHandicaps !== false ? ' checked' : '') + ' style="margin:0; cursor:pointer;" /> Enable Skill Class Handicaps (KISS Matrix)';
+    panelHtml += '    </label></div>';
+
+    panelHtml += '  <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Scoring Rules ' + createTooltip('Standard tracks pure positions. Class handicaps apply automated point variations to post-race standings.') + '</label>';
+    panelHtml += '    <select id="nbf-cfg-scoring" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="standard"' + (LEAGUE_STATE.scoringType === 'standard' ? ' selected' : '') + '>Standard Points Hierarchy</option><option value="handicap"' + (LEAGUE_STATE.scoringType === 'handicap' ? ' selected' : '') + '>Dynamic Skill Equalized</option></select></div>';
+    panelHtml += '</div>';
+
+    // Column 2: Track & Scope
+    panelHtml += '<div style="background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; display:flex; flex-direction:column; gap:14px;">';
+    panelHtml += '  <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">Track & Tournament Scope</h3>';
+
+    panelHtml += '  <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">League Scope Context</label>';
+    panelHtml += '    <select id="nbf-cfg-scope" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;"><option value="all"' + (LEAGUE_STATE.scopeType === 'all' ? ' selected' : '') + '>All Nuclear Family Factions</option><option value="single"' + (LEAGUE_STATE.scopeType === 'single' ? ' selected' : '') + '>Single Faction of Choice</option></select></div>';
+
+    var choiceVis = (LEAGUE_STATE.scopeType === 'single') ? 'display:flex;' : 'display:none;';
+    panelHtml += '  <div id="nbf-cfg-scope-faction-wrap" style="' + choiceVis + ' flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Target Faction Profile</label>';
+    panelHtml += '    <select id="nbf-cfg-scope-faction" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%;">';
+    TARGET_FACTIONS.forEach(function(fac) {
+      panelHtml += '<option value="' + fac.id + '"' + (String(LEAGUE_STATE.scopeFactionId) === String(fac.id) ? ' selected' : '') + '>' + fac.name + '</option>';
+    });
+    panelHtml += '  </select></div>';
+
+    panelHtml += '  <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">';
+    panelHtml += '    <div style="display:flex; flex-direction:column; gap:4px; position:relative;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Track Playlist</label>';
+    panelHtml += '      <button id="nbf-dropdown-trigger" style="padding:8px; text-align:left; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; cursor:pointer; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">' + dropdownLabel + ' ▼</button>';
+    panelHtml += '      <div id="nbf-dropdown-list" class="nbf-dropdown-menu">';
+    AVAILABLE_TRACKS.forEach(function(track) {
+      var isChecked = (LEAGUE_STATE.selectedTracks || []).indexOf(track) !== -1 ? ' checked' : '';
+      panelHtml += '<label class="nbf-track-option"><input type="checkbox" class="nbf-track-checkbox" value="' + track + '"' + isChecked + ' style="margin:0; cursor:pointer;" /><span style="color:var(--nbf-txt);">' + track + '</span></label>';
+    });
+    panelHtml += '      </div></div>';
+
+    panelHtml += '    <div style="display:flex; flex-direction:column; gap:4px;"><label style="font-size:11px; color:var(--nbf-mut); font-weight:600;">Target Laps</label>';
+    panelHtml += '      <input id="nbf-cfg-laps" type="number" min="1" max="100" value="' + (LEAGUE_STATE.lapsCount || 10) + '" style="padding:8px; border:1px solid var(--nbf-btn-border); border-radius:6px; background:var(--nbf-field-bg); color:var(--nbf-txt); font-size:12px; width:100%; box-sizing:border-box;" /></div>';
+    panelHtml += '  </div>';
+
+    panelHtml += '  <div style="margin-top:auto; padding-top:4px;">';
+    panelHtml += '    <button id="nbf-cfg-generate" style="padding:10px 20px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-weight:600; cursor:pointer; font-size:12px; width:100%; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.1);">⚡ Process Live Standings Matrix</button>';
+    panelHtml += '  </div>';
+    panelHtml += '</div>';
+
+    panelHtml += '</div>'; // end grid
+
+    panelHtml += '<div id="nbf-cfg-results-zone"></div>';
+    panelHtml += '</div>';
+
+    targetContainer.innerHTML = panelHtml;
+
+    document.getElementById('nbf-cfg-generate').addEventListener('click', processSnakeDraftCalculations);
+
+    document.getElementById('nbf-cfg-type').addEventListener('change', function() {
+      var wrapTeam     = document.getElementById('nbf-wrap-teamcount');
+      var wrapHandicap = document.getElementById('nbf-wrap-handicapstoggle');
+      if (this.value === 'solo') {
+        if (wrapTeam)     wrapTeam.style.display = 'none';
+        if (wrapHandicap) wrapHandicap.style.display = 'flex';
+      } else {
+        if (wrapTeam)     wrapTeam.style.display = 'flex';
+        if (wrapHandicap) wrapHandicap.style.display = 'none';
+      }
+      syncStateTracker();
+    });
+
+    document.getElementById('nbf-cfg-scope').addEventListener('change', function() {
+      var wrap = document.getElementById('nbf-cfg-scope-faction-wrap');
+      if (wrap) wrap.style.display = (this.value === 'single') ? 'flex' : 'none';
+      syncStateTracker();
+    });
+
+    var dropTrigger = document.getElementById('nbf-dropdown-trigger');
+    var dropMenu    = document.getElementById('nbf-dropdown-list');
+    dropTrigger.addEventListener('click', function(e) { e.stopPropagation(); dropMenu.classList.toggle('show'); });
+    document.addEventListener('click', function(e) {
+      if (dropMenu && !dropTrigger.contains(e.target) && !dropMenu.contains(e.target)) dropMenu.classList.remove('show');
+    });
+
+    var checkboxes = targetContainer.querySelectorAll('.nbf-track-checkbox');
+    for (var c = 0; c < checkboxes.length; c++) {
+      checkboxes[c].addEventListener('change', function() {
+        var activeSelections = [];
+        var targets = targetContainer.querySelectorAll('.nbf-track-checkbox:checked');
+        for (var k = 0; k < targets.length; k++) { activeSelections.push(targets[k].value); }
+        LEAGUE_STATE.selectedTracks = activeSelections;
+        dropTrigger.textContent = activeSelections.length === 0 ? "Select Tracks..." : activeSelections.length + " Tracks Selected ▼";
+        syncStateTracker();
+      });
+    }
+
+    var teamInput = document.getElementById('nbf-cfg-teams');
+    var syncStateTracker = function() {
+      LEAGUE_STATE.compType      = document.getElementById('nbf-cfg-type').value;
+      if (teamInput) LEAGUE_STATE.teamCount = parseInt(teamInput.value) || 4;
+      var hcCheck = document.getElementById('nbf-cfg-usehandicaps');
+      if (hcCheck) LEAGUE_STATE.useHandicaps = hcCheck.checked;
+      LEAGUE_STATE.scoringType    = document.getElementById('nbf-cfg-scoring').value;
+      LEAGUE_STATE.scopeType      = document.getElementById('nbf-cfg-scope').value;
+      LEAGUE_STATE.scopeFactionId = document.getElementById('nbf-cfg-scope-faction').value;
+      LEAGUE_STATE.lapsCount      = parseInt(document.getElementById('nbf-cfg-laps').value) || 10;
+      localStorage.setItem(CONFIG_LEAGUE_KEY, JSON.stringify(LEAGUE_STATE));
+    };
+
+    var hcBox = document.getElementById('nbf-cfg-usehandicaps');
+    if (hcBox) hcBox.addEventListener('change', syncStateTracker);
+    if (teamInput) teamInput.addEventListener('input', syncStateTracker);
+    document.getElementById('nbf-cfg-scoring').addEventListener('change', syncStateTracker);
+    document.getElementById('nbf-cfg-scope-faction').addEventListener('change', syncStateTracker);
+    document.getElementById('nbf-cfg-laps').addEventListener('input', syncStateTracker);
+
+    if (LEAGUE_STATE.compType === 'teams' && LEAGUE_STATE.generatedTeams && LEAGUE_STATE.generatedTeams.length > 0) {
+      renderDraftZoneMarkup();
+    }
+  }
+
+  // ============================================================
+  // SNAKE DRAFT CALCULATOR
+  // ============================================================
+
+  function processSnakeDraftCalculations() {
+    if (LEAGUE_STATE.compType === 'solo') {
+      alert('Live standings tracking initialized using individual parameters. Track settings verified successfully.');
+      return;
+    }
+
+    var rawDataset = RUNTIME_MEMBERS.slice();
+    if (!rawDataset || rawDataset.length === 0) {
+      alert('The core dashboard dataset cache is currently blank. Please return to the leaderboard and hit Sync.');
+      return;
+    }
+
+    if (LEAGUE_STATE.scopeType === 'single') {
+      rawDataset = rawDataset.filter(function(driver) {
+        return String(driver.factionId) === String(LEAGUE_STATE.scopeFactionId);
+      });
+    }
+
+    if (rawDataset.length === 0) {
+      alert('The chosen target faction criteria profile contains 0 matching driver instances inside the loaded cache.');
+      return;
+    }
+
+    var targetsCount = LEAGUE_STATE.teamCount;
+    var arrayBuckets = [];
+    for (var t = 0; t < targetsCount; t++) { arrayBuckets.push({ id: t + 1, score: 0, members: [] }); }
+
+    var pool = rawDataset.sort(function(m1, m2) { return (m2.racing_skill || 0) - (m1.racing_skill || 0); });
+    var forward = true, pointer = 0;
+
+    for (var p = 0; p < pool.length; p++) {
+      arrayBuckets[pointer].members.push(pool[p]);
+      arrayBuckets[pointer].score += (pool[p].racing_skill || 0);
+      if (forward) {
+        if (pointer === targetsCount - 1) { forward = false; } else { pointer++; }
+      } else {
+        if (pointer === 0) { forward = true; } else { pointer--; }
+      }
+    }
+
+    LEAGUE_STATE.generatedTeams = arrayBuckets;
+    localStorage.setItem(CONFIG_LEAGUE_KEY, JSON.stringify(LEAGUE_STATE));
+    renderDraftZoneMarkup();
+  }
+
+  function renderDraftZoneMarkup() {
+    var zone = document.getElementById('nbf-cfg-results-zone');
+    if (!zone || !LEAGUE_STATE.generatedTeams) return;
+
+    var areaHtml = '<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px; background:var(--nbf-main);">';
+    LEAGUE_STATE.generatedTeams.forEach(function(squad) {
+      var avgVal = squad.members.length > 0 ? (squad.score / squad.members.length).toFixed(2) : '0.00';
+      areaHtml += '<div style="background:var(--nbf-alt); border:1px solid var(--nbf-bld); border-radius:8px; padding:12px; display:flex; flex-direction:column; gap:6px;">';
+      areaHtml += '  <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--nbf-bld); padding-bottom:6px; margin-bottom:4px;">';
+      areaHtml += '    <span style="font-weight:600; font-size:12px; color:var(--nbf-txt);">Squad Pool ' + squad.id + '</span>';
+      areaHtml += '    <span style="font-size:10px; font-weight:bold; background:var(--nbf-bdg); color:var(--nbf-mut); padding:2px 6px; border-radius:4px;">Avg: ' + avgVal + '</span>';
+      areaHtml += '  </div>';
+      squad.members.forEach(function(driver, idx) {
+        areaHtml += '<div style="display:flex; justify-content:space-between; font-size:11px; color:var(--nbf-txt); padding:2px 0;">';
+        areaHtml += '  <span>' + (idx + 1) + '. ' + driver.name + '</span>';
+        areaHtml += '  <span style="color:var(--nbf-mut); font-family:monospace;">' + (driver.racing_skill || 0).toFixed(2) + '</span>';
+        areaHtml += '</div>';
+      });
+      if (squad.members.length === 0) {
+        areaHtml += '<div style="font-size:11px; color:var(--nbf-mut); text-align:center; padding:10px 0;">No context distributed.</div>';
+      }
+      areaHtml += '</div>';
+    });
+    areaHtml += '</div>';
+    zone.innerHTML = areaHtml;
+  }
+
+  // ============================================================
+  // CSV EXPORT
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 09 — STANDINGS ENGINE
+   *
+   * Purpose:
+   *     Displays league standings from Cloudflare or placeholder data.
+   *
+   * Contains:
+   *     - STANDINGS_PLACEHOLDER
+   *     - renderStandingsPanelContent()
+   *     - drawStandingsTable()
+   *
+   * Dependencies:
+   *     - Cloudflare endpoint
+   *     - Theme State
+   **********************************************************************/
+
+  // ============================================================
+  // LEAGUE STANDINGS PANEL
+  // Fetches from CF_STANDINGS_ENDPOINT when live.
+  // Falls back to placeholder data when endpoint is still set
+  // to the placeholder URL so the UI is fully testable now.
+  // ============================================================
+
+  // Placeholder dataset — replace with nothing once CF is live,
+  // the live fetch path will take over automatically.
+  var STANDINGS_PLACEHOLDER = [
+    { rank:1,  name:'CowboyUpp',      faction:'Nuclear Blast',      points:118, wins:3, podiums:5, races:6, best:1 },
+    { rank:2,  name:'IronwheelX',     faction:'Nuclear Armageddon', points:97,  wins:2, podiums:4, races:6, best:1 },
+    { rank:3,  name:'DriftKing99',    faction:'Nuclear Winter',     points:84,  wins:1, podiums:3, races:5, best:2 },
+    { rank:4,  name:'TarmacGhost',    faction:'Nuclear Fusion',     points:76,  wins:1, podiums:2, races:6, best:2 },
+    { rank:5,  name:'BlazeRunner',    faction:'Nuclear Clinic',     points:63,  wins:0, podiums:3, races:5, best:3 },
+    { rank:6,  name:'OversteerOlaf',  faction:'Nuclear Therapy',    points:55,  wins:0, podiums:2, races:6, best:3 },
+    { rank:7,  name:'PedalToMetal',   faction:'Torn Medical',       points:44,  wins:0, podiums:1, races:4, best:4 },
+    { rank:8,  name:'SlipstreamSue',  faction:'Evolution',          points:38,  wins:0, podiums:1, races:5, best:4 },
+    { rank:9,  name:'ApexHunter',     faction:'Ionization',         points:29,  wins:0, podiums:0, races:4, best:5 },
+    { rank:10, name:'GravelTrap',     faction:'Emergency Room',     points:18,  wins:0, podiums:0, races:3, best:6 }
+  ];
+
+  function renderStandingsPanelContent() {
+    var targetContainer = document.getElementById('nbf-layout-body');
+    if (!targetContainer) return;
+
+    var isPlaceholder = CF_STANDINGS_ENDPOINT.indexOf('YOUR-WORKER') !== -1;
+
+    // Show loading state immediately
+    targetContainer.innerHTML =
+      '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:3rem; background:var(--nbf-main);">' +
+      '  <div style="font-size:12px; color:var(--nbf-mut);">' + (isPlaceholder ? '📋 Showing placeholder data — backend not yet connected.' : '⏳ Loading standings...') + '</div>' +
+      '</div>';
+
+    if (isPlaceholder) {
+      window.setTimeout(function() {
+        drawStandingsTable(targetContainer, STANDINGS_PLACEHOLDER, true);
+      }, 300);
+    } else {
+      fetch(CF_STANDINGS_ENDPOINT, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      })
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function(data) {
+        drawStandingsTable(targetContainer, data, false);
+      })
+      .catch(function(err) {
+        console.error('[NB Racing] Standings fetch error:', err);
+        targetContainer.innerHTML =
+          '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:3rem; background:var(--nbf-main); gap:8px;">' +
+          '  <div style="font-size:13px; font-weight:600; color:#c62828;">⚠️ Failed to load standings</div>' +
+          '  <div style="font-size:11px; color:var(--nbf-mut);">' + err.message + ' — check console for details.</div>' +
+          '  <button id="nbf-standings-retry" style="margin-top:8px; padding:8px 16px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">Retry</button>' +
+          '</div>';
+        var retryBtn = document.getElementById('nbf-standings-retry');
+        if (retryBtn) retryBtn.addEventListener('click', renderStandingsPanelContent);
+      });
+    }
+  }
+
+  function drawStandingsTable(container, dataset, isPlaceholder) {
+    var mutedColor  = STATE_DARK_MODE ? '#9ca3af' : '#475569';
+    var boldColor   = STATE_DARK_MODE ? '#f3f4f6' : '#0f172a';
+    var anchorColor = STATE_DARK_MODE ? '#60a5fa' : '#1d6fa4';
+    var rowSep      = STATE_DARK_MODE ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
+
+    // Summary stat cards
+    var totalRaces   = dataset.length > 0 ? dataset[0].races : 0;
+    var totalDrivers = dataset.length;
+    var leader       = dataset.length > 0 ? dataset[0] : null;
+
+    var summaryHtml = '<div style="display:flex; gap:6px; padding:12px 16px; flex-wrap:wrap; border-bottom:1px solid var(--nbf-bld); background:var(--nbf-alt2);">';
+    summaryHtml += renderStatModule('Drivers', totalDrivers);
+    summaryHtml += renderStatModule('Races Run', totalRaces);
+    if (leader) {
+      summaryHtml += renderStatModule('Leader', leader.name);
+      summaryHtml += renderStatModule('Leader Pts', leader.points);
+    }
+    if (isPlaceholder) {
+      summaryHtml += '<div style="display:flex; align-items:center; padding:4px 10px; background:#1e1b4b; border:1px solid #4338ca; border-radius:6px; font-size:11px; color:#c7d2fe; margin-left:auto;">📋 Placeholder data — live once CF Worker is deployed</div>';
+    } else {
+      summaryHtml += '<div style="display:flex; align-items:center; gap:6px; margin-left:auto;">';
+      summaryHtml += '  <button id="nbf-standings-refresh" style="padding:5px 10px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:11px; font-weight:600; cursor:pointer;">🔄 Refresh</button>';
+      summaryHtml += '</div>';
+    }
+    summaryHtml += '</div>';
+
+    // Table rows
+    var rowsHtml = dataset.map(function(driver) {
+      var medalIcon = driver.rank === 1 ? '🥇' : driver.rank === 2 ? '🥈' : driver.rank === 3 ? '🥉' : '';
+      var rankDisplay = medalIcon ? medalIcon : driver.rank;
+
+      // Points gap to leader
+      var leaderPts = dataset[0] ? dataset[0].points : 0;
+      var gapDisplay = driver.rank === 1 ? '<span style="color:#16a34a; font-weight:700;">LEAD</span>' : '<span style="color:' + mutedColor + ';">-' + (leaderPts - driver.points) + '</span>';
+
+      var rowHtml = '<tr style="' + rowSep + ' cursor:default;">';
+      rowHtml += '<td style="padding:8px 14px; font-weight:600; color:' + boldColor + '; font-size:13px;">' + rankDisplay + '</td>';
+      rowHtml += '<td style="padding:8px 4px; font-weight:600; color:' + anchorColor + ';">' + driver.name + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:130px;" title="' + driver.faction + '">' + driver.faction + '</td>';
+      rowHtml += '<td style="padding:8px 4px; font-weight:700; color:' + boldColor + '; font-size:13px;">' + driver.points + '</td>';
+      rowHtml += '<td style="padding:8px 4px; text-align:center;">' + gapDisplay + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; text-align:center;">' + driver.wins + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; text-align:center;">' + driver.podiums + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; text-align:center;">' + driver.races + '</td>';
+      rowHtml += '<td style="padding:8px 14px 8px 4px; color:' + mutedColor + '; text-align:center;">' + (driver.best === 1 ? '🥇 P1' : 'P' + driver.best) + '</td>';
+      rowHtml += '</tr>';
+      return rowHtml;
+    }).join('');
+
+    var tableHtml =
+      '<table id="nbf-standings-table" style="width:100%; border-collapse:separate; border-spacing:0; font-size:11px; min-width:640px;">' +
+      '  <thead>' +
+      '    <tr>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 14px; text-align:left; border-bottom:2px solid var(--nbf-bld);">#</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:left; border-bottom:2px solid var(--nbf-bld);">Driver</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:left; border-bottom:2px solid var(--nbf-bld);">Faction</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:left; border-bottom:2px solid var(--nbf-bld);">Points</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Gap</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Wins</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Podiums</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Races</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 14px 10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Best Finish</th>' +
+      '    </tr>' +
+      '  </thead>' +
+      '  <tbody>' + rowsHtml + '</tbody>' +
+      '</table>';
+
+    container.innerHTML =
+      summaryHtml +
+      '<div style="overflow-x:auto; overflow-y:auto; flex:1; background:var(--nbf-main);">' +
+      tableHtml +
+      '</div>';
+
+    // Wire refresh button if live
+    var refreshBtn = document.getElementById('nbf-standings-refresh');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', renderStandingsPanelContent);
+    }
+  }
+
+  // ============================================================
+  // HELP PANEL
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 10 — STEWARD MANAGEMENT
+   *
+   * Purpose:
+   *     Manages steward token, authorization checks, local steward registry, and steward UI.
+   *
+   * Contains:
+   *     - isStewardAuthorized()
+   *     - renderStewardPanelContent()
+   *
+   * Dependencies:
+   *     - Storage Helpers
+   *     - Runtime State
+   *     - Theme State
+   **********************************************************************/
+
+  function isStewardAuthorized() {
+    // A user is an authorized Steward if they have a non-empty token stored locally.
+    // The token is what gets validated server-side by Cloudflare.
+    return STATE_STEWARD_TOKEN && STATE_STEWARD_TOKEN.trim().length > 0;
+  }
+
+  // ============================================================
+  // SCRAPER TOAST NOTIFICATION
+  // ============================================================
+
+  function renderStewardPanelContent() {
+    var targetContainer = document.getElementById('nbf-layout-body');
+    if (!targetContainer) return;
+
+    var tokenMask = '';
+    if (STATE_STEWARD_TOKEN && STATE_STEWARD_TOKEN.length > 0) {
+      tokenMask = STATE_STEWARD_TOKEN.slice(0, 4) + '••••••••••••••••';
+    }
+
+    var panelHtml = '<div style="padding:24px; max-width:860px; margin:0 auto; background:var(--nbf-main); font-family:sans-serif;">';
+
+    panelHtml += '<div style="margin-bottom:20px; border-bottom:1px solid var(--nbf-bld); padding-bottom:12px;">';
+    panelHtml += '  <h2 style="margin:0; font-size:16px; font-weight:600; color:var(--nbf-txt);">Steward Management</h2>';
+    panelHtml += '  <p style="margin:4px 0 0 0; font-size:12px; color:var(--nbf-mut);">Manage authorized race Stewards and configure your personal Steward token for race log ingestion.</p>';
+    panelHtml += '</div>';
+
+    panelHtml += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:24px;">';
+
+    // LEFT: My Steward Token
+    panelHtml += '<div style="background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; display:flex; flex-direction:column; gap:12px;">';
+    panelHtml += '  <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">My Steward Token</h3>';
+    panelHtml += '  <p style="margin:0; font-size:11px; color:var(--nbf-mut); line-height:1.5;">Your personal Steward token is issued by the league admin. Paste it here — it stays local and is sent only to the league backend when you submit race results.</p>';
+
+    if (STATE_STEWARD_TOKEN) {
+      panelHtml += '  <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; background:var(--nbf-main); border:1px solid #16a34a; border-radius:6px;">';
+      panelHtml += '    <span style="font-size:11px; color:#16a34a; font-weight:600;">🛡 Active:</span>';
+      panelHtml += '    <span style="font-size:11px; color:var(--nbf-mut); font-family:monospace;">' + tokenMask + '</span>';
+      panelHtml += '  </div>';
+    }
+
+    panelHtml += '  <div style="position:relative; display:flex; align-items:center;">';
+    panelHtml += '    <input id="nbf-steward-token-input" type="password" placeholder="' + (STATE_STEWARD_TOKEN ? 'Replace existing token...' : 'Paste your Steward token here...') + '" autocomplete="off" style="width:100%; padding:8px 36px 8px 10px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; box-sizing:border-box; background:var(--nbf-field-bg); color:var(--nbf-txt);" />';
+    panelHtml += '    <button id="nbf-steward-token-reveal" style="position:absolute; right:10px; background:none; border:none; cursor:pointer; font-size:13px; color:var(--nbf-mut);">👁</button>';
+    panelHtml += '  </div>';
+    panelHtml += '  <div style="display:flex; gap:8px;">';
+    panelHtml += '    <button id="nbf-steward-token-save" style="flex:1; padding:8px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">Save Token</button>';
+    if (STATE_STEWARD_TOKEN) {
+      panelHtml += '  <button id="nbf-steward-token-clear" style="padding:8px 12px; background:var(--nbf-field-bg); color:#c62828; border:1px solid #fca5a5; border-radius:6px; font-size:12px; cursor:pointer;">Clear</button>';
+    }
+    panelHtml += '  </div>';
+    panelHtml += '  <div id="nbf-steward-token-msg" style="font-size:11px; display:none;"></div>';
+    panelHtml += '</div>';
+
+    // RIGHT: Steward Registry (read-only view + add entry)
+    panelHtml += '<div style="background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; display:flex; flex-direction:column; gap:12px;">';
+    panelHtml += '  <h3 style="margin:0; font-size:13px; font-weight:600; color:var(--nbf-txt); border-bottom:1px solid var(--nbf-bld); padding-bottom:6px;">Steward Registry</h3>';
+    panelHtml += '  <p style="margin:0; font-size:11px; color:var(--nbf-mut); line-height:1.5;">Add authorized Stewards by Torn ID. This is a local reference list — tokens are held by each Steward individually.</p>';
+
+    // Registry list
+    panelHtml += '  <div id="nbf-steward-list" style="display:flex; flex-direction:column; gap:6px; max-height:180px; overflow-y:auto;">';
+    if (STEWARD_REGISTRY.length === 0) {
+      panelHtml += '    <div style="font-size:11px; color:var(--nbf-mut); text-align:center; padding:16px 0;">No Stewards registered yet.</div>';
+    } else {
+      STEWARD_REGISTRY.forEach(function(s, idx) {
+        var roleColor = s.role === 'liaison' ? '#7c3aed' : '#0369a1';
+        var roleBg    = s.role === 'liaison' ? '#ede9fe' : '#e0f2fe';
+        var roleLabel = s.role === 'liaison' ? 'Liaison' : 'Event';
+        panelHtml += '<div style="display:flex; align-items:center; gap:8px; padding:6px 8px; background:var(--nbf-main); border:1px solid var(--nbf-bld); border-radius:6px; font-size:11px;">';
+        panelHtml += '  <span style="font-weight:600; color:var(--nbf-txt);">' + s.name + '</span>';
+        panelHtml += '  <span style="color:var(--nbf-mut);">#' + s.id + '</span>';
+        panelHtml += '  <span style="font-size:10px; background:' + roleBg + '; color:' + roleColor + '; padding:1px 6px; border-radius:4px; margin-left:auto;">' + roleLabel + '</span>';
+        panelHtml += '  <button class="nbf-steward-remove-btn" data-idx="' + idx + '" style="background:none; border:none; cursor:pointer; color:#c62828; font-size:12px; padding:0 2px;" title="Remove">✕</button>';
+        panelHtml += '</div>';
+      });
+    }
+    panelHtml += '  </div>';
+
+    // Add Steward form
+    panelHtml += '  <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:6px; align-items:end;">';
+    panelHtml += '    <div><label style="font-size:10px; color:var(--nbf-mut); font-weight:600; display:block; margin-bottom:3px;">Torn ID</label><input id="nbf-new-steward-id" type="text" placeholder="e.g. 12345" style="width:100%; padding:7px 8px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; box-sizing:border-box; background:var(--nbf-field-bg); color:var(--nbf-txt);" /></div>';
+    panelHtml += '    <div><label style="font-size:10px; color:var(--nbf-mut); font-weight:600; display:block; margin-bottom:3px;">Display Name</label><input id="nbf-new-steward-name" type="text" placeholder="e.g. CowboyUpp" style="width:100%; padding:7px 8px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; box-sizing:border-box; background:var(--nbf-field-bg); color:var(--nbf-txt);" /></div>';
+    panelHtml += '    <div><label style="font-size:10px; color:var(--nbf-mut); font-weight:600; display:block; margin-bottom:3px;">Role</label><select id="nbf-new-steward-role" style="padding:7px 6px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; background:var(--nbf-field-bg); color:var(--nbf-txt);"><option value="event">Event</option><option value="liaison">Liaison</option></select></div>';
+    panelHtml += '  </div>';
+    panelHtml += '  <button id="nbf-steward-add-btn" style="padding:8px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; width:100%;">+ Add Steward</button>';
+    panelHtml += '  <div id="nbf-steward-add-msg" style="font-size:11px; display:none;"></div>';
+    panelHtml += '</div>';
+
+    panelHtml += '</div>'; // end grid
+
+    // Scraper status info box
+    var endpointStatus = CF_INGEST_ENDPOINT.indexOf('YOUR-WORKER') !== -1
+      ? '<span style="color:#c62828; font-weight:600;">⚠️ PLACEHOLDER — not yet configured</span>'
+      : '<span style="color:#16a34a; font-weight:600;">✅ ' + CF_INGEST_ENDPOINT + '</span>';
+
+    panelHtml += '<div style="background:var(--nbf-alt2); border:1px solid var(--nbf-bld); border-radius:8px; padding:16px; margin-top:4px;">';
+    panelHtml += '  <h3 style="margin:0 0 8px 0; font-size:13px; font-weight:600; color:var(--nbf-txt);">Race Ingestion Status</h3>';
+    panelHtml += '  <div style="display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--nbf-mut);">';
+    panelHtml += '    <div><strong style="color:var(--nbf-txt);">Endpoint:</strong> ' + endpointStatus + '</div>';
+    panelHtml += '    <div><strong style="color:var(--nbf-txt);">My Token:</strong> ' + (STATE_STEWARD_TOKEN ? '<span style="color:#16a34a; font-weight:600;">✅ Set</span>' : '<span style="color:#c62828; font-weight:600;">❌ Not set</span>') + '</div>';
+    panelHtml += '    <div><strong style="color:var(--nbf-txt);">Scraper Active:</strong> ' + (isStewardAuthorized() ? '<span style="color:#16a34a; font-weight:600;">✅ Will fire on race log pages</span>' : '<span style="color:var(--nbf-mut);">Inactive — requires Steward token</span>') + '</div>';
+    panelHtml += '    <div style="font-size:11px; margin-top:4px; color:var(--nbf-mut);">To trigger: navigate to any finished race at <code style="background:var(--nbf-bdg); padding:1px 4px; border-radius:3px;">page.php?sid=racing&tab=log&raceID=XXXX</code></div>';
+    panelHtml += '  </div>';
+    panelHtml += '</div>';
+
+    panelHtml += '</div>'; // end outer wrapper
+    targetContainer.innerHTML = panelHtml;
+
+    // Token save
+    document.getElementById('nbf-steward-token-reveal').addEventListener('click', function() {
+      var inp = document.getElementById('nbf-steward-token-input');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+
+    document.getElementById('nbf-steward-token-save').addEventListener('click', function() {
+      var val = document.getElementById('nbf-steward-token-input').value.trim();
+      var msg = document.getElementById('nbf-steward-token-msg');
+      if (!val) {
+        msg.style.display = 'block';
+        msg.style.color = '#c62828';
+        msg.textContent = 'Token cannot be empty.';
+        return;
+      }
+      STATE_STEWARD_TOKEN = val;
+      localStorage.setItem(CONFIG_STOKEN_KEY, val);
+      msg.style.display = 'block';
+      msg.style.color = '#16a34a';
+      msg.textContent = '✅ Steward token saved.';
+      window.setTimeout(function() { renderStewardPanelContent(); }, 800);
+    });
+
+    var clearBtn = document.getElementById('nbf-steward-token-clear');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function() {
+        STATE_STEWARD_TOKEN = '';
+        localStorage.removeItem(CONFIG_STOKEN_KEY);
+        renderStewardPanelContent();
+      });
+    }
+
+    // Add Steward
+    document.getElementById('nbf-steward-add-btn').addEventListener('click', function() {
+      var newId   = document.getElementById('nbf-new-steward-id').value.trim();
+      var newName = document.getElementById('nbf-new-steward-name').value.trim();
+      var newRole = document.getElementById('nbf-new-steward-role').value;
+      var addMsg  = document.getElementById('nbf-steward-add-msg');
+
+      if (!newId || !newName) {
+        addMsg.style.display = 'block';
+        addMsg.style.color = '#c62828';
+        addMsg.textContent = 'Torn ID and Display Name are required.';
+        return;
+      }
+      var duplicate = STEWARD_REGISTRY.some(function(s) { return String(s.id) === String(newId); });
+      if (duplicate) {
+        addMsg.style.display = 'block';
+        addMsg.style.color = '#c62828';
+        addMsg.textContent = 'A Steward with that ID already exists.';
+        return;
+      }
+      STEWARD_REGISTRY.push({ id: newId, name: newName, role: newRole });
+      saveStewardRegistry();
+      renderStewardPanelContent();
+    });
+
+    // Remove Steward buttons
+    var removeBtns = targetContainer.querySelectorAll('.nbf-steward-remove-btn');
+    for (var r = 0; r < removeBtns.length; r++) {
+      removeBtns[r].addEventListener('click', function() {
+        var idx = parseInt(this.getAttribute('data-idx'));
+        STEWARD_REGISTRY.splice(idx, 1);
+        saveStewardRegistry();
+        renderStewardPanelContent();
+      });
+    }
+  }
+
+  // ============================================================
+  // RANK BADGE & STAT MODULE HELPERS
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 11 — RACE LOG SCRAPER
+   *
+   * Purpose:
+   *     Detects finished race logs, extracts visible results, packages payloads, and sends to Cloudflare.
+   *
+   * Contains:
+   *     - checkAndScrapeRace()
+   *     - transmitRacePayload()
+   *
+   * Dependencies:
+   *     - Steward authorization
+   *     - Cloudflare endpoint
+   *     - Utilities
+   **********************************************************************/
+
+  function checkAndScrapeRace() {
+    // Must be on the log tab with a raceID
+    var params = new URLSearchParams(window.location.search);
+    var tab    = params.get('tab');
+    var raceID = params.get('raceID');
+
+    if (tab !== 'log' || !raceID) return;
+
+    // Must be an authorized Steward
+    if (!isStewardAuthorized()) return;
+
+    // Wait for the leaderboard DOM to be present (page may still be loading)
+    var attempts = 0;
+    var maxAttempts = 20;
+
+    function tryExtract() {
+      attempts++;
+      var leaderBoard = document.getElementById('leaderBoard');
+
+      if (!leaderBoard) {
+        if (attempts < maxAttempts) {
+          window.setTimeout(tryExtract, 500);
+        } else {
+          console.warn('[NB Racing] Scraper: leaderBoard element not found after ' + maxAttempts + ' attempts.');
+        }
+        return;
+      }
+
+      var drivers = leaderBoard.querySelectorAll('li[id^="lbr-"]');
+      if (drivers.length === 0) {
+        if (attempts < maxAttempts) {
+          window.setTimeout(tryExtract, 500);
+          return;
+        }
+      }
+
+      var results = [];
+      drivers.forEach(function(driverLi) {
+        results.push({
+          position: driverLi.querySelector('.race-place')  ? driverLi.querySelector('.race-place').textContent.trim()  : null,
+          name:     driverLi.querySelector('.race-name')   ? driverLi.querySelector('.race-name').textContent.trim()   : null,
+          time:     driverLi.querySelector('.time')        ? driverLi.querySelector('.time').textContent.trim()        : null
+        });
+      });
+
+      var payload = {
+        race_id:        raceID,
+        scraped_at:     new Date().toISOString(),
+        steward_token:  STATE_STEWARD_TOKEN.trim(),
+        results:        results
+      };
+
+      console.log('[NB Racing] Scraper payload ready:', payload);
+      showScraperToast('⚡ Race #' + raceID + ' detected — transmitting ' + results.length + ' results...', 'info', 3000);
+      transmitRacePayload(payload);
+    }
+
+    tryExtract();
+  }
+
+  // ============================================================
+  // CLOUDFLARE POST — TRANSMIT RACE PAYLOAD
+  // ============================================================
+
+  function transmitRacePayload(payload) {
+    // Abort if endpoint is still the placeholder
+    if (CF_INGEST_ENDPOINT.indexOf('YOUR-WORKER') !== -1) {
+      console.warn('[NB Racing] CF endpoint is still a placeholder. Set CF_INGEST_ENDPOINT before deploying.');
+      showScraperToast('⚠️ Cloudflare endpoint not configured yet. Results logged to console only.', 'error', 5000);
+      return;
+    }
+
+    fetch(CF_INGEST_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // Steward token sent as a bearer token — Cloudflare Worker validates this
+        'Authorization': 'Bearer ' + payload.steward_token
+      },
+      body: JSON.stringify(payload)
+    })
+    .then(function(res) {
+      if (res.ok) {
+        showScraperToast('✅ Race #' + payload.race_id + ' ingested successfully (' + payload.results.length + ' drivers).', 'success', 5000);
+        console.log('[NB Racing] Ingestion success for race ' + payload.race_id);
+      } else {
+        res.text().then(function(txt) {
+          showScraperToast('❌ Ingestion failed: HTTP ' + res.status + '. Check console.', 'error', 6000);
+          console.error('[NB Racing] Ingestion HTTP error:', res.status, txt);
+        });
+      }
+    })
+    .catch(function(err) {
+      showScraperToast('❌ Network error — payload not delivered. Check console.', 'error', 6000);
+      console.error('[NB Racing] Ingestion network error:', err);
+    });
+  }
+
+  // ============================================================
+  // FLOATING TRIGGER BUTTON (Dashboard)
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 12 — DATA EXPORT
+   *
+   * Purpose:
+   *     Exports the current runtime driver dataset to CSV.
+   *
+   * Contains:
+   *     - processDataExportToCSV()
+   *
+   * Dependencies:
+   *     - Runtime Members
+   *     - Browser Blob API
+   **********************************************************************/
+
+  function processDataExportToCSV() {
+    var rawExportCollection = parseRuntimePipeline();
+    if (!rawExportCollection || rawExportCollection.length === 0) { alert('The target collection contains no items to structure.'); return; }
+
+    var lineHeaders = ['Rank', 'Driver ID', 'Driver Name', 'Faction Name', 'Racing Skill', 'Wins Count', 'Runs Executed', 'Calculated Efficiency', 'Racing Points', 'Handicap Applied'];
+    var matrixRows  = [lineHeaders.join(',')];
+
+    rawExportCollection.forEach(function(item, idx) {
+      matrixRows.push([
+        idx + 1,
+        item.id,
+        '"' + item.name.replace(/"/g, '""') + '"',
+        '"' + (item.factionName || '').replace(/"/g, '""') + '"',
+        (item.racing_skill || 0).toFixed(4),
+        item.racing_wins   || 0,
+        item.races_entered || 0,
+        (item.racing_ratio || 0).toFixed(2),
+        item.racing_points || 0,
+        (item.handicap     || 0).toFixed(2)
+      ].join(','));
+    });
+
+    var dataBlob       = new Blob([matrixRows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    var layoutAnchor   = document.createElement('a');
+    var downloadUri    = URL.createObjectURL(dataBlob);
+    layoutAnchor.setAttribute('href', downloadUri);
+    layoutAnchor.setAttribute('download', 'nuclear_family_alliance_export_' + Date.now() + '.csv');
+    layoutAnchor.style.visibility = 'hidden';
+    document.body.appendChild(layoutAnchor);
+    layoutAnchor.click();
+    document.body.removeChild(layoutAnchor);
+  }
+
+  // ============================================================
+  // CACHE ROUTER & API FETCH PIPELINE
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 13 — TORN API SYNC PIPELINE
+   *
+   * Purpose:
+   *     Loads cached data, fetches faction rosters, fetches individual racing stats, and completes sync.
+   *
+   * Contains:
+   *     - baseCacheRouter()
+   *     - processFactionQueueBatches()
+   *     - processIndividualDriversSequence()
+   *     - completePipelineProcessing()
+   *
+   * Dependencies:
+   *     - Torn API
+   *     - Runtime State
+   *     - Storage
+   *     - Router
+   *     - Utilities
+   **********************************************************************/
+
+  function baseCacheRouter(bypassCacheMode) {
+    if (FLAG_IS_FETCHING) return;
+
+    var targetCacheBlob = localStorage.getItem(CONFIG_CACHE_KEY);
+    var timestampMarker = localStorage.getItem(CONFIG_TIME_KEY);
+    var cachedLabel     = document.getElementById('nbf-txt-cache');
+
+    if (!bypassCacheMode && targetCacheBlob && timestampMarker) {
+      var ageOfData = Date.now() - parseInt(timestampMarker);
+      if (ageOfData < CACHE_DURATION) {
+        RUNTIME_MEMBERS = JSON.parse(targetCacheBlob);
+        var skillsArray = RUNTIME_MEMBERS.map(function(m) { return m.racing_skill || 0; });
+        RUNTIME_MAX_SKILL = Math.max.apply(Math, skillsArray);
+        if (RUNTIME_MAX_SKILL < 1) RUNTIME_MAX_SKILL = 1;
+        if (cachedLabel) { cachedLabel.style.color = '#16a34a'; cachedLabel.textContent = '⚡ Cache Active'; }
+        routerViewRefresh();
+        return;
+      }
+    }
+
+    if (!STATE_API_KEY) return;
+    if (cachedLabel) { cachedLabel.style.color = '#ef4444'; cachedLabel.textContent = '🔄 Fetching Server Records...'; }
+    FLAG_IS_FETCHING = true;
+    RUNTIME_MEMBERS  = [];
+    processFactionQueueBatches(0);
+  }
+
+  function processFactionQueueBatches(factionPointer) {
+    if (factionPointer >= TARGET_FACTIONS.length) { completePipelineProcessing(); return; }
+
+    var activeTargetFactionObj = TARGET_FACTIONS[factionPointer];
+    var progressTrackerNode    = document.getElementById('nbf-layout-progress');
+    if (progressTrackerNode) {
+      progressTrackerNode.style.display = 'block';
+      progressTrackerNode.textContent   = 'Contacting mainframe database: Processing target ' + activeTargetFactionObj.name + ' (' + (factionPointer + 1) + ' / ' + TARGET_FACTIONS.length + ')...';
+    }
+
+    fetch('https://api.torn.com/faction/' + activeTargetFactionObj.id + '?selections=basic&key=' + STATE_API_KEY)
+      .then(function(res) { return res.json(); })
+      .then(function(payload) {
+        if (payload.error) {
+          console.error('[NB Racing] Faction fetch error for ' + activeTargetFactionObj.name + ' (ID: ' + activeTargetFactionObj.id + '):', payload.error.error || 'Unknown error', '| Code:', payload.error.code);
+          executeAsyncDelay(750, function() { processFactionQueueBatches(factionPointer + 1); });
+          return;
+        }
+        var rosterDataset = payload.members || {};
+        if (Object.keys(rosterDataset).length === 0) {
+          console.warn('[NB Racing] No members for faction: ' + activeTargetFactionObj.name + ' (ID: ' + activeTargetFactionObj.id + ')');
+        }
+        var extractedProfileCollection = [];
+        for (var keyId in rosterDataset) {
+          if (rosterDataset.hasOwnProperty(keyId)) {
+            extractedProfileCollection.push({
+              id: keyId,
+              name: rosterDataset[keyId].name,
+              factionId: activeTargetFactionObj.id,
+              factionName: activeTargetFactionObj.name
+            });
+          }
+        }
+        processIndividualDriversSequence(extractedProfileCollection, 0, function() {
+          executeAsyncDelay(750, function() { processFactionQueueBatches(factionPointer + 1); });
+        });
+      })
+      .catch(function(err) {
+        console.error(err);
+        executeAsyncDelay(750, function() { processFactionQueueBatches(factionPointer + 1); });
+      });
+  }
+
+  function processIndividualDriversSequence(profileCollection, memberIndex, continuousCallback) {
+    if (memberIndex >= profileCollection.length) { continuousCallback(); return; }
+
+    var trackingMemberNode = profileCollection[memberIndex];
+    var dataProgressBar    = document.getElementById('nbf-layout-progress');
+    if (dataProgressBar) dataProgressBar.textContent = 'Syncing metric nodes: Reading driver attributes (' + trackingMemberNode.name + ')...';
+
+    fetch('https://api.torn.com/user/' + trackingMemberNode.id + '?selections=personalstats&key=' + STATE_API_KEY)
+      .then(function(res) { return res.json(); })
+      .then(function(payload) {
+        if (payload.error) {
+          console.error('[NB Racing] User fetch error for ID ' + trackingMemberNode.id + ' (' + trackingMemberNode.name + '):', payload.error.error);
+          executeAsyncDelay(650, function() { processIndividualDriversSequence(profileCollection, memberIndex + 1, continuousCallback); });
+          return;
+        }
+        var s = payload.personalstats || {};
+        trackingMemberNode.racing_skill  = s.racingskill   !== undefined ? s.racingskill   : 0;
+        trackingMemberNode.racing_wins   = s.raceswon             !== undefined ? s.raceswon             : 0;
+        trackingMemberNode.races_entered = s.racesentered  !== undefined ? s.racesentered  : 0;
+        trackingMemberNode.racing_points = s.racingpointsearned   !== undefined ? s.racingpointsearned   : 0;
+        trackingMemberNode.racing_ratio  = trackingMemberNode.races_entered > 0
+          ? (trackingMemberNode.racing_wins / trackingMemberNode.races_entered) * 100 : 0;
+        RUNTIME_MEMBERS.push(trackingMemberNode);
+        executeAsyncDelay(650, function() { processIndividualDriversSequence(profileCollection, memberIndex + 1, continuousCallback); });
+      })
+      .catch(function(err) {
+        console.error(err);
+        executeAsyncDelay(650, function() { processIndividualDriversSequence(profileCollection, memberIndex + 1, continuousCallback); });
+      });
+  }
+
+  function completePipelineProcessing() {
+    var notificationProgressBar = document.getElementById('nbf-layout-progress');
+    if (notificationProgressBar) notificationProgressBar.style.display = 'none';
+
+    var calculatedSkillsArray = RUNTIME_MEMBERS.map(function(m) { return m.racing_skill || 0; });
+    RUNTIME_MAX_SKILL = Math.max.apply(Math, calculatedSkillsArray);
+    if (RUNTIME_MAX_SKILL < 1) RUNTIME_MAX_SKILL = 1;
+
+    localStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(RUNTIME_MEMBERS));
+    localStorage.setItem(CONFIG_TIME_KEY, Date.now().toString());
+
+    var secondaryCacheLabel = document.getElementById('nbf-txt-cache');
+    if (secondaryCacheLabel) { secondaryCacheLabel.style.color = '#16a34a'; secondaryCacheLabel.textContent = '⚡ Cache Active'; }
+
+    FLAG_IS_FETCHING = false;
+    routerViewRefresh();
+  }
+
+
+  /**********************************************************************
+   * BOOK 14 — HELP LIBRARY
+   *
+   * Purpose:
+   *     Renders the internal help and FAQ panel.
+   *
+   * Contains:
+   *     - renderHelpPanelContent()
+   *
+   * Dependencies:
+   *     - FAQ database
+   *     - Dashboard shell
+   **********************************************************************/
+
+  function renderHelpPanelContent() {
+    var targetContainer = document.getElementById('nbf-layout-body');
+    if (!targetContainer) return;
+
+    var panelHtml = '<div style="padding:20px; max-width:760px; margin:0 auto; background:var(--nbf-main);">';
+    panelHtml += '<h2 style="margin-top:0; margin-bottom:6px; font-size:16px; color:var(--nbf-txt);">Documentation & Security Core</h2>';
+    panelHtml += '<p style="margin-top:0; margin-bottom:20px; font-size:12px; color:var(--nbf-mut); line-height:1.5;">This script isolates execution loops strictly inside the client sandbox environment. Zero external logging proxies or metric data collectors are integrated into the architecture operations.</p>';
+    panelHtml += '<div style="display:flex; flex-direction:column; gap:8px;">';
+
+    FAQ_DATABASE.forEach(function(item, idx) {
+      panelHtml += '<div class="nbf-faq-item">';
+      panelHtml += '  <div class="nbf-faq-header" data-fidx="' + idx + '" style="padding:10px 12px; background:var(--nbf-alt); font-weight:600; cursor:pointer; display:flex; justify-content:space-between; align-items:center;"><span style="color:var(--nbf-txt); font-size:12px;">' + item.q + '</span><span class="nbf-arrow-indicator" style="color:var(--nbf-mut); font-size:11px;">▼</span></div>';
+      panelHtml += '  <div id="nbf-faq-content-' + idx + '" class="nbf-faq-content" style="font-size:12px; padding:12px; border-top:1px solid var(--nbf-bld); display:none !important; line-height:1.5; color:var(--nbf-txt); background:var(--nbf-main);">' + item.a + '</div>';
+      panelHtml += '</div>';
+    });
+
+    panelHtml += '</div></div>';
+    targetContainer.innerHTML = panelHtml;
+
+    var headers = targetContainer.querySelectorAll('.nbf-faq-header');
+    for (var h = 0; h < headers.length; h++) {
+      headers[h].addEventListener('click', function(e) {
+        e.preventDefault();
+        var currentIdx       = this.getAttribute('data-fidx');
+        var targetBlock      = document.getElementById('nbf-faq-content-' + currentIdx);
+        var isHidden         = targetBlock.style.getPropertyValue('display').indexOf('none') !== -1;
+        var allContents      = targetContainer.querySelectorAll('.nbf-faq-content');
+        var allArrows        = targetContainer.querySelectorAll('.nbf-arrow-indicator');
+        for (var c = 0; c < allContents.length; c++) {
+          allContents[c].style.setProperty('display', 'none', 'important');
+          if (allArrows[c]) allArrows[c].textContent = '▼';
+        }
+        if (isHidden) {
+          targetBlock.style.setProperty('display', 'block', 'important');
+          var arrow = this.querySelector('.nbf-arrow-indicator');
+          if (arrow) arrow.textContent = '▲';
+        }
+      });
+    }
+  }
+
+  // ============================================================
+  // LEAGUE SETUP PANEL
+  // ============================================================
+
+
+  /**********************************************************************
+   * BOOK 15 — ENTRY POINT
+   *
+   * Purpose:
+   *     Chooses dashboard mode or steward scraper mode based on the current Torn Racing URL.
+   *
+   * Contains:
+   *     - URL context detection
+   *     - DOMContentLoaded handling
+   *
+   * Dependencies:
+   *     - Dashboard Shell
+   *     - Race Log Scraper
+   **********************************************************************/
+
+
+  // ============================================================
+  // ENTRY POINT — URL CONTEXT DETECTION
+  // Two modes:
+  //   1. sid=racing (no tab=log) → mount the dashboard float button
+  //   2. sid=racing&tab=log&raceID=X → fire the Steward scraper
+  // ============================================================
+
+  if (window.location.href.indexOf('sid=racing') !== -1) {
+    var urlParams = new URLSearchParams(window.location.search);
+    var isLogPage = urlParams.get('tab') === 'log' && urlParams.get('raceID');
+
+    if (isLogPage) {
+      // Steward scraper mode — no dashboard button needed on log pages
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', checkAndScrapeRace);
+      } else {
+        checkAndScrapeRace();
+      }
+    } else {
+      // Dashboard mode
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', mountFloatingInterface);
+      } else {
+        mountFloatingInterface();
+      }
+    }
+  }
+
+})(window, document);
