@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nuclear Family — MultiFaction Edition (Hyper-Drive)
 // @namespace    torn.com.nuclearfamily.strict
-// @version      5.8
+// @version      5.9
 // @description  Deeply isolated multi-faction alliance tournament dashboard. Built on KISS principles with dynamic tooltips, Class Handicaps, track select drop-downs, Steward race scraper, and Cloudflare result ingestion.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=racing*
@@ -30,7 +30,8 @@
   // Cloudflare Worker ingestion endpoint.
   // Replace this URL with your actual Worker route once deployed.
   // ============================================================
-  var CF_INGEST_ENDPOINT = 'https://YOUR-WORKER.workers.dev/ingest-race'; // ← PLACEHOLDER
+  var CF_INGEST_ENDPOINT    = 'https://YOUR-WORKER.workers.dev/ingest-race';    // ← PLACEHOLDER
+  var CF_STANDINGS_ENDPOINT = 'https://YOUR-WORKER.workers.dev/standings';      // ← PLACEHOLDER
 
   // ============================================================
   // ALLIANCE TARGET MATRIX
@@ -74,6 +75,10 @@
       a: "Under the KISS principle, Individual Solo Races leverage automated driver stratification. Drivers are automatically partitioned into three explicit tiers: Class C Rookie (RS under 5), Class B Pro (RS 5 to 20), and Class A Master Elite (RS 20+). Handicaps are verified at post-race ledger calculations, granting low-tier drivers performance offsets when outperforming higher brackets, keeping tournament tracking completely seamless."
     },
     {
+      q: "League Standings & Scoring",
+      a: "The League Standings tab displays championship points calculated by the Cloudflare backend from all submitted race results. Points follow a standard hierarchy (25-18-15-12-10-8-6-4-2-1 for top 10 finishers). The standings update automatically each time a Steward submits a race log. When the backend is live, click Refresh on the Standings tab to pull the latest data."
+    },
+    {
       q: "Steward System & Race Ingestion",
       a: "Authorized Stewards are identified by their Torn player ID and a unique personal token stored locally. When a Steward navigates to a completed race log page (sid=racing&tab=log&raceID=XXXX), the script automatically detects the context, scrapes the results table from the DOM, and transmits the payload to the league backend via a secure POST request authenticated by their Steward token. No automation — the Steward simply views the page as normal."
     }
@@ -115,7 +120,7 @@
   // This user's own Steward token (empty string = not a Steward)
   var STATE_STEWARD_TOKEN = localStorage.getItem(CONFIG_STOKEN_KEY) || '';
 
-  var ENGINE_VERSION = '5.8';
+  var ENGINE_VERSION = '5.9';
 
   // ============================================================
   // CSS INJECTION
@@ -378,6 +383,7 @@
     viewHtml += '      <button id="nbf-tab-leaderboard" class="nbf-tab-btn active">Leaderboard</button>';
     viewHtml += '      <button id="nbf-tab-setup" class="nbf-tab-btn">League Setup</button>';
     viewHtml += '      <button id="nbf-tab-stewards" class="nbf-tab-btn">Stewards</button>';
+    viewHtml += '      <button id="nbf-tab-standings" class="nbf-tab-btn">🏆 Standings</button>';
     viewHtml += '      <button id="nbf-tab-help" class="nbf-tab-btn">Help Central</button>';
     viewHtml += '    </div>';
     viewHtml += '    <button id="nbf-btn-close" style="margin-left:auto; padding:6px 12px; border:1px solid var(--nbf-btn-border); border-radius:6px; font-size:12px; cursor:pointer; background:var(--nbf-btn-base); color:var(--nbf-txt); font-weight:600;">✕ Close</button>';
@@ -412,6 +418,7 @@
     document.getElementById('nbf-tab-leaderboard').addEventListener('click', function() { switchViewRoute('leaderboard'); });
     document.getElementById('nbf-tab-setup').addEventListener('click', function() { switchViewRoute('setup'); });
     document.getElementById('nbf-tab-stewards').addEventListener('click', function() { switchViewRoute('stewards'); });
+    document.getElementById('nbf-tab-standings').addEventListener('click', function() { switchViewRoute('standings'); });
     document.getElementById('nbf-tab-help').addEventListener('click', function() { switchViewRoute('help'); });
 
     document.getElementById('nbf-field-faction').addEventListener('change', function() { routerViewRefresh(); });
@@ -449,7 +456,7 @@
 
   function switchViewRoute(targetTab) {
     STATE_ACTIVE_TAB = targetTab;
-    var tabs = ['leaderboard', 'setup', 'stewards', 'help'];
+    var tabs = ['leaderboard', 'setup', 'stewards', 'standings', 'help'];
     tabs.forEach(function(t) {
       var btn = document.getElementById('nbf-tab-' + t);
       if (btn) { btn.classList.toggle('active', t === targetTab); }
@@ -477,6 +484,8 @@
       renderSetupPanelContent();
     } else if (STATE_ACTIVE_TAB === 'stewards') {
       renderStewardPanelContent();
+    } else if (STATE_ACTIVE_TAB === 'standings') {
+      renderStandingsPanelContent();
     } else if (STATE_ACTIVE_TAB === 'help') {
       renderHelpPanelContent();
     }
@@ -884,6 +893,152 @@
       });
     }
     runTableRenderer();
+  }
+
+
+  // ============================================================
+  // LEAGUE STANDINGS PANEL
+  // Fetches from CF_STANDINGS_ENDPOINT when live.
+  // Falls back to placeholder data when endpoint is still set
+  // to the placeholder URL so the UI is fully testable now.
+  // ============================================================
+
+  // Placeholder dataset — replace with nothing once CF is live,
+  // the live fetch path will take over automatically.
+  var STANDINGS_PLACEHOLDER = [
+    { rank:1,  name:'CowboyUpp',      faction:'Nuclear Blast',      points:118, wins:3, podiums:5, races:6, best:1 },
+    { rank:2,  name:'IronwheelX',     faction:'Nuclear Armageddon', points:97,  wins:2, podiums:4, races:6, best:1 },
+    { rank:3,  name:'DriftKing99',    faction:'Nuclear Winter',     points:84,  wins:1, podiums:3, races:5, best:2 },
+    { rank:4,  name:'TarmacGhost',    faction:'Nuclear Fusion',     points:76,  wins:1, podiums:2, races:6, best:2 },
+    { rank:5,  name:'BlazeRunner',    faction:'Nuclear Clinic',     points:63,  wins:0, podiums:3, races:5, best:3 },
+    { rank:6,  name:'OversteerOlaf',  faction:'Nuclear Therapy',    points:55,  wins:0, podiums:2, races:6, best:3 },
+    { rank:7,  name:'PedalToMetal',   faction:'Torn Medical',       points:44,  wins:0, podiums:1, races:4, best:4 },
+    { rank:8,  name:'SlipstreamSue',  faction:'Evolution',          points:38,  wins:0, podiums:1, races:5, best:4 },
+    { rank:9,  name:'ApexHunter',     faction:'Ionization',         points:29,  wins:0, podiums:0, races:4, best:5 },
+    { rank:10, name:'GravelTrap',     faction:'Emergency Room',     points:18,  wins:0, podiums:0, races:3, best:6 }
+  ];
+
+  function renderStandingsPanelContent() {
+    var targetContainer = document.getElementById('nbf-layout-body');
+    if (!targetContainer) return;
+
+    var isPlaceholder = CF_STANDINGS_ENDPOINT.indexOf('YOUR-WORKER') !== -1;
+
+    // Show loading state immediately
+    targetContainer.innerHTML =
+      '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:3rem; background:var(--nbf-main);">' +
+      '  <div style="font-size:12px; color:var(--nbf-mut);">' + (isPlaceholder ? '📋 Showing placeholder data — backend not yet connected.' : '⏳ Loading standings...') + '</div>' +
+      '</div>';
+
+    if (isPlaceholder) {
+      window.setTimeout(function() {
+        drawStandingsTable(targetContainer, STANDINGS_PLACEHOLDER, true);
+      }, 300);
+    } else {
+      fetch(CF_STANDINGS_ENDPOINT, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      })
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function(data) {
+        drawStandingsTable(targetContainer, data, false);
+      })
+      .catch(function(err) {
+        console.error('[NB Racing] Standings fetch error:', err);
+        targetContainer.innerHTML =
+          '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:3rem; background:var(--nbf-main); gap:8px;">' +
+          '  <div style="font-size:13px; font-weight:600; color:#c62828;">⚠️ Failed to load standings</div>' +
+          '  <div style="font-size:11px; color:var(--nbf-mut);">' + err.message + ' — check console for details.</div>' +
+          '  <button id="nbf-standings-retry" style="margin-top:8px; padding:8px 16px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">Retry</button>' +
+          '</div>';
+        var retryBtn = document.getElementById('nbf-standings-retry');
+        if (retryBtn) retryBtn.addEventListener('click', renderStandingsPanelContent);
+      });
+    }
+  }
+
+  function drawStandingsTable(container, dataset, isPlaceholder) {
+    var mutedColor  = STATE_DARK_MODE ? '#9ca3af' : '#475569';
+    var boldColor   = STATE_DARK_MODE ? '#f3f4f6' : '#0f172a';
+    var anchorColor = STATE_DARK_MODE ? '#60a5fa' : '#1d6fa4';
+    var rowSep      = STATE_DARK_MODE ? 'border-bottom:1px solid #1f2937;' : 'border-bottom:1px solid #f1f5f9;';
+
+    // Summary stat cards
+    var totalRaces   = dataset.length > 0 ? dataset[0].races : 0;
+    var totalDrivers = dataset.length;
+    var leader       = dataset.length > 0 ? dataset[0] : null;
+
+    var summaryHtml = '<div style="display:flex; gap:6px; padding:12px 16px; flex-wrap:wrap; border-bottom:1px solid var(--nbf-bld); background:var(--nbf-alt2);">';
+    summaryHtml += renderStatModule('Drivers', totalDrivers);
+    summaryHtml += renderStatModule('Races Run', totalRaces);
+    if (leader) {
+      summaryHtml += renderStatModule('Leader', leader.name);
+      summaryHtml += renderStatModule('Leader Pts', leader.points);
+    }
+    if (isPlaceholder) {
+      summaryHtml += '<div style="display:flex; align-items:center; padding:4px 10px; background:#1e1b4b; border:1px solid #4338ca; border-radius:6px; font-size:11px; color:#c7d2fe; margin-left:auto;">📋 Placeholder data — live once CF Worker is deployed</div>';
+    } else {
+      summaryHtml += '<div style="display:flex; align-items:center; gap:6px; margin-left:auto;">';
+      summaryHtml += '  <button id="nbf-standings-refresh" style="padding:5px 10px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:11px; font-weight:600; cursor:pointer;">🔄 Refresh</button>';
+      summaryHtml += '</div>';
+    }
+    summaryHtml += '</div>';
+
+    // Table rows
+    var rowsHtml = dataset.map(function(driver) {
+      var medalIcon = driver.rank === 1 ? '🥇' : driver.rank === 2 ? '🥈' : driver.rank === 3 ? '🥉' : '';
+      var rankDisplay = medalIcon ? medalIcon : driver.rank;
+
+      // Points gap to leader
+      var leaderPts = dataset[0] ? dataset[0].points : 0;
+      var gapDisplay = driver.rank === 1 ? '<span style="color:#16a34a; font-weight:700;">LEAD</span>' : '<span style="color:' + mutedColor + ';">-' + (leaderPts - driver.points) + '</span>';
+
+      var rowHtml = '<tr style="' + rowSep + ' cursor:default;">';
+      rowHtml += '<td style="padding:8px 14px; font-weight:600; color:' + boldColor + '; font-size:13px;">' + rankDisplay + '</td>';
+      rowHtml += '<td style="padding:8px 4px; font-weight:600; color:' + anchorColor + ';">' + driver.name + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:130px;" title="' + driver.faction + '">' + driver.faction + '</td>';
+      rowHtml += '<td style="padding:8px 4px; font-weight:700; color:' + boldColor + '; font-size:13px;">' + driver.points + '</td>';
+      rowHtml += '<td style="padding:8px 4px; text-align:center;">' + gapDisplay + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; text-align:center;">' + driver.wins + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; text-align:center;">' + driver.podiums + '</td>';
+      rowHtml += '<td style="padding:8px 4px; color:' + mutedColor + '; text-align:center;">' + driver.races + '</td>';
+      rowHtml += '<td style="padding:8px 14px 8px 4px; color:' + mutedColor + '; text-align:center;">' + (driver.best === 1 ? '🥇 P1' : 'P' + driver.best) + '</td>';
+      rowHtml += '</tr>';
+      return rowHtml;
+    }).join('');
+
+    var tableHtml =
+      '<table id="nbf-standings-table" style="width:100%; border-collapse:separate; border-spacing:0; font-size:11px; min-width:640px;">' +
+      '  <thead>' +
+      '    <tr>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 14px; text-align:left; border-bottom:2px solid var(--nbf-bld);">#</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:left; border-bottom:2px solid var(--nbf-bld);">Driver</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:left; border-bottom:2px solid var(--nbf-bld);">Faction</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:left; border-bottom:2px solid var(--nbf-bld);">Points</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Gap</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Wins</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Podiums</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Races</th>' +
+      '      <th style="position:sticky; top:0; z-index:9999; background:var(--nbf-alt); color:var(--nbf-mut); font-weight:600; padding:10px 14px 10px 4px; text-align:center; border-bottom:2px solid var(--nbf-bld);">Best Finish</th>' +
+      '    </tr>' +
+      '  </thead>' +
+      '  <tbody>' + rowsHtml + '</tbody>' +
+      '</table>';
+
+    container.innerHTML =
+      summaryHtml +
+      '<div style="overflow-x:auto; overflow-y:auto; flex:1; background:var(--nbf-main);">' +
+      tableHtml +
+      '</div>';
+
+    // Wire refresh button if live
+    var refreshBtn = document.getElementById('nbf-standings-refresh');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', renderStandingsPanelContent);
+    }
   }
 
   // ============================================================
