@@ -63,6 +63,10 @@
   // ============================================================
   var FAQ_DATABASE = [
     {
+      q: "Why Does the Sync Take So Long?",
+      a: "The short answer: the dashboard is fetching live data for every single driver across all 10 alliance factions — one by one. Here is what happens behind the scenes. First, the script contacts Torn\'s servers once per faction to pull the full member roster (10 requests total). Then, for every driver found, it sends an individual request to fetch their personal racing stats. With roughly 780 drivers across the alliance, that means around 790 separate requests to Torn\'s API. To avoid overloading Torn\'s servers and getting your API key flagged or rate-limited, the script deliberately waits 650 milliseconds between each driver request. At that pace, 780 drivers takes approximately 8 to 9 minutes to complete a full sync. The good news: once the sync finishes, all data is saved locally in your browser for 24 hours. Unless you manually hit the Sync button again, the dashboard loads instantly from that saved snapshot. You only pay the full wait time once per day."
+    },
+    {
       q: "API Access Security & Keys",
       a: "Your API key is stored completely secure inside your local browser sandbox (localStorage) and is never transmitted to external servers or logging platforms. We highly recommend utilizing a Limited Access or Public Only API key as the dashboard only requests basic public rosters and driver personalstats—never requiring Full Access permissions. Furthermore, by explicitly declaring '@grant none', the script physically strips itself of elevated privileges to guarantee complete isolation."
     },
@@ -791,18 +795,18 @@
       rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:120px;" title="' + player.factionName + '">' + (player.factionName || '—') + '</td>';
       rowString += '<td style="padding:8px 4px;"><span style="background:' + badgeObject.bg + '; color:' + badgeObject.text + '; font-size:10px; padding:1px 6px; border-radius:20px;">' + badgeObject.title + '</span></td>';
       rowString += '<td style="padding:8px 4px;"><div style="display:flex; align-items:center; gap:4px;"><div style="flex:1; height:5px; border-radius:3px; background:var(--nbf-bdg); min-width:40px;"><div style="width:' + progressWidth + '%; height:100%; border-radius:3px; background:#6366f1;"></div></div><span style="font-size:11px; color:' + descriptionMutedText + '; min-width:28px; text-align:right;">' + absoluteSkill.toFixed(2) + '</span></div></td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_wins !== undefined ? player.racing_wins : '—') + '</td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.races_entered !== undefined ? player.races_entered : '—') + '</td>';
-      rowString += '<td style="padding:8px 4px; font-weight:600; color:' + highlightBoldText + ';">' + calculatedRatio + '</td>';
-      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + ';">' + (player.racing_points !== undefined ? player.racing_points : '—') + '</td>';
-      rowString += '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48;">' + handicapDisplay + '</td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; text-align:right;">' + (player.racing_wins !== undefined ? player.racing_wins : '—') + '</td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; text-align:right;">' + (player.races_entered !== undefined ? player.races_entered : '—') + '</td>';
+      rowString += '<td style="padding:8px 4px; font-weight:600; color:' + highlightBoldText + '; text-align:right;">' + calculatedRatio + '</td>';
+      rowString += '<td style="padding:8px 4px; color:' + descriptionMutedText + '; text-align:right;">' + (player.racing_points !== undefined ? player.racing_points : '—') + '</td>';
+      rowString += '<td style="padding:8px 14px 8px 4px; font-weight:600; color:#e11d48; text-align:right;">' + handicapDisplay + '</td>';
       rowString += '</tr>';
       return rowString;
     }).join('');
 
     var targetBodyDOM = document.getElementById('nbf-layout-body');
     if (!targetBodyDOM) return;
-    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Class Tier</th><th>Skill Matrix</th><th>Wins</th><th>Runs</th><th>Efficiency</th><th>Pts</th><th>Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
+    targetBodyDOM.innerHTML = '<table id="nbf-table-view"><thead><tr><th>#</th><th>Driver</th><th>Faction</th><th>Class Tier</th><th>Skill Matrix</th><th style="text-align:right;">Wins</th><th style="text-align:right;">Runs</th><th style="text-align:right;">Efficiency</th><th style="text-align:right;">Pts</th><th style="text-align:right;">Handicap</th></tr></thead><tbody>' + markupRows + '</tbody></table>';
 
     var rows = targetBodyDOM.querySelectorAll('tbody tr');
     for (var r = 0; r < rows.length; r++) {
