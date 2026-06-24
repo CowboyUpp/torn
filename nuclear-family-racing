@@ -1274,7 +1274,6 @@
     var dataProgressBar    = document.getElementById('nbf-layout-progress');
     if (dataProgressBar) dataProgressBar.textContent = 'Syncing metric nodes: Reading driver attributes (' + trackingMemberNode.name + ')...';
 
-    console.log('[NB Racing] Fetching user stats for:', trackingMemberNode.id, trackingMemberNode.name);
     fetch('https://api.torn.com/user/' + trackingMemberNode.id + '?selections=personalstats&key=' + STATE_API_KEY)
       .then(function(res) { return res.json(); })
       .then(function(payload) {
