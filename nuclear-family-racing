@@ -1238,7 +1238,7 @@
       .then(function(res) { return res.json(); })
       .then(function(payload) {
         if (payload.error) {
-          console.error('API Pipeline Reject:', payload.error.error || 'Unknown Matrix Alert.');
+          console.error('[NB Racing] Faction fetch error for ' + activeTargetFactionObj.name + ' (ID: ' + activeTargetFactionObj.id + '):', payload.error.error || 'Unknown error', '| Code:', payload.error.code);
           executeAsyncDelay(750, function() { processFactionQueueBatches(factionPointer + 1); });
           return;
         }
@@ -1274,9 +1274,15 @@
     var dataProgressBar    = document.getElementById('nbf-layout-progress');
     if (dataProgressBar) dataProgressBar.textContent = 'Syncing metric nodes: Reading driver attributes (' + trackingMemberNode.name + ')...';
 
+    console.log('[NB Racing] Fetching user stats for:', trackingMemberNode.id, trackingMemberNode.name);
     fetch('https://api.torn.com/user/' + trackingMemberNode.id + '?selections=personalstats&key=' + STATE_API_KEY)
       .then(function(res) { return res.json(); })
       .then(function(payload) {
+        if (payload.error) {
+          console.error('[NB Racing] User fetch error for ID ' + trackingMemberNode.id + ' (' + trackingMemberNode.name + '):', payload.error.error);
+          executeAsyncDelay(650, function() { processIndividualDriversSequence(profileCollection, memberIndex + 1, continuousCallback); });
+          return;
+        }
         var s = payload.personalstats || {};
         trackingMemberNode.racing_skill  = s.racingskill   !== undefined ? s.racingskill   : 0;
         trackingMemberNode.racing_wins   = s.racingwins    !== undefined ? s.racingwins    : 0;
