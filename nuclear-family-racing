@@ -1234,24 +1234,33 @@
       progressTrackerNode.textContent   = 'Contacting mainframe database: Processing target ' + activeTargetFactionObj.name + ' (' + (factionPointer + 1) + ' / ' + TARGET_FACTIONS.length + ')...';
     }
 
-    fetch('https://api.torn.com/faction/' + activeTargetFactionObj.id + '?selections=basic&key=' + STATE_API_KEY)
-      .then(function(res) { return res.json(); })
-      .then(function(payload) {
-        if (payload.error) {
-          console.error('API Pipeline Reject:', payload.error.error || 'Unknown Matrix Alert.');
-          executeAsyncDelay(750, function() { processFactionQueueBatches(factionPointer + 1); });
-          return;
-        }
-        var rosterDataset = payload.roster || {};
-        var extractedProfileCollection = [];
-        for (var keyId in rosterDataset) {
-          if (rosterDataset.hasOwnProperty(keyId)) {
-            extractedProfileCollection.push({
-              id: keyId,
-              name: rosterDataset[keyId].name,
-              factionId: activeTargetFactionObj.id,
-              factionName: activeTargetFactionObj.name
-            });
+    fetch('https://api.torn.com/user/' + trackingMemberNode.id + '?selections=personalstats&key=' + STATE_API_KEY)
+    .then(function(res) { return res.json(); })
+    .then(function(payload) {
+      // ADD THIS CHECK: Handle API errors inside the payload
+      if (payload.error) {
+        console.error('Individual Sync Error for ID ' + trackingMemberNode.id + ':', payload.error.error);
+        // Continue to next member even if this one fails
+        return executeAsyncDelay(650, function() { 
+          processIndividualDriversSequence(profileCollection, memberIndex + 1, continuousCallback); 
+        });
+      }
+
+      var s = payload.personalstats || {};
+      trackingMemberNode.racing_skill  = s.racingskill  !== undefined ? s.racingskill  : 0;
+      trackingMemberNode.racing_wins   = s.racingwins   !== undefined ? s.racingwins   : 0;
+      trackingMemberNode.races_entered = s.racesentered !== undefined ? s.racesentered : 0;
+      trackingMemberNode.racing_points = s.racingpoints !== undefined ? s.racingpoints : 0;
+      trackingMemberNode.racing_ratio  = trackingMemberNode.races_entered > 0
+        ? (trackingMemberNode.racing_wins / trackingMemberNode.races_entered) * 100 : 0;
+      
+      RUNTIME_MEMBERS.push(trackingMemberNode);
+      executeAsyncDelay(650, function() { processIndividualDriversSequence(profileCollection, memberIndex + 1, continuousCallback); });
+    })
+    .catch(function(err) {
+      console.error('Network or Parse Error for ID ' + trackingMemberNode.id + ':', err);
+      executeAsyncDelay(650, function() { processIndividualDriversSequence(profileCollection, memberIndex + 1, continuousCallback); });
+    });
           }
         }
         processIndividualDriversSequence(extractedProfileCollection, 0, function() {
