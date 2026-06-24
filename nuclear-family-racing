@@ -1439,9 +1439,9 @@
         }
         var s = payload.personalstats || {};
         trackingMemberNode.racing_skill  = s.racingskill   !== undefined ? s.racingskill   : 0;
-        trackingMemberNode.racing_wins   = s.racingwins    !== undefined ? s.racingwins    : 0;
+        trackingMemberNode.racing_wins   = s.raceswon             !== undefined ? s.raceswon             : 0;
         trackingMemberNode.races_entered = s.racesentered  !== undefined ? s.racesentered  : 0;
-        trackingMemberNode.racing_points = s.racingpoints  !== undefined ? s.racingpoints  : 0;
+        trackingMemberNode.racing_points = s.racingpointsearned   !== undefined ? s.racingpointsearned   : 0;
         trackingMemberNode.racing_ratio  = trackingMemberNode.races_entered > 0
           ? (trackingMemberNode.racing_wins / trackingMemberNode.races_entered) * 100 : 0;
         RUNTIME_MEMBERS.push(trackingMemberNode);
