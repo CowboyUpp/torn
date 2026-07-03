@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Torn Item Market Portfolio
+// @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
 // @version      2.9.1
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
