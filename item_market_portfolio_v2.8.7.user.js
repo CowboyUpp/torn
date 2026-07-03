@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Item Market Portfolio
+// @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.8.7
+// @version      2.9.0
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,62 +15,67 @@
 (function () {
     'use strict';
 
-    /*************************************************************************
+    /**************************************************************************
      * Item Market Portfolio
-     * -----------------------------------------------------------------------
-     * Shows an aggregated portfolio view for active Item Market listings.
-     * Fetches Torn v2 user/itemmarket pages, groups identical item IDs, and
-     * combines listing total, market value, Torn buyback value, and quantity.
-     *
-     * v2.8.7 cleanup:
-     * - Reorganized into professional categories.
-     * - Removed stale/unused debug-style code paths.
-     * - Hardened API-key handling and URL construction.
-     * - Kept the original inline toggle behavior with version label.
-     * - Keeps the inline toggle hidden while the popup is open.
-     *************************************************************************/
+     * ------------------------------------------------------------------------
+     * Sections:
+     *  01. Constants
+     *  02. Runtime State
+     *  03. Styles
+     *  04. Utilities
+     *  05. API Helpers
+     *  06. Local Cache
+     *  07. Data Loading
+     *  08. Portfolio Aggregation
+     *  09. UI Rendering
+     *  10. Event Wiring
+     *  11. App Bootstrap
+     **************************************************************************/
 
-    /*************************************************************************
-     * 1) Constants & Settings
-     *************************************************************************/
+    /**************************************************************************
+     * 01. Constants
+     **************************************************************************/
 
-    const SCRIPT = Object.freeze({
-        name: 'Item Market Portfolio',
-        version: '2.8.7',
-        title: 'Item Market Portfolio',
-        subtitle: 'Aggregated Listings Summary'
-    });
+    const SCRIPT_VERSION = '2.9.0';
+    const TARGET_HASH = '#/viewListing';
 
-    const ROUTE = Object.freeze({
-        itemMarketHash: '#/viewListing'
-    });
+    const STORAGE = {
+        API_KEY: 'imp_api_key',
+        LEGACY_API_KEY: 'torn_api_key',
 
-    const STORAGE = Object.freeze({
-        apiKey: 'torn_api_key',
-        itemCatalog: 'tm_item_catalog_cache_v2',
-        itemCatalogTime: 'tm_item_catalog_cache_time_v2'
-    });
+        ITEMS_DB: 'imp_items_db_v2',
+        ITEMS_DB_TIME: 'imp_items_db_time_v2',
 
-    const API = Object.freeze({
-        base: 'https://api.torn.com/v2',
-        pageSize: 100,
-        pageDelayMs: 650,
-        maxPages: 1000, // 100,000 listing rows safety cap
-        timeoutMs: 15000,
-        itemCatalogTtlMs: 24 * 60 * 60 * 1000
-    });
+        PORTFOLIO_DATA: 'imp_portfolio_data_v2',
+        PORTFOLIO_TIME: 'imp_portfolio_time_v2'
+    };
 
-    /*************************************************************************
-     * 2) Runtime State
-     *************************************************************************/
+    const TTL = {
+        ITEM_CATALOG_MS: 24 * 60 * 60 * 1000,
+        PORTFOLIO_MS: 10 * 60 * 1000
+    };
 
-    let apiKey = String(GM_getValue(STORAGE.apiKey, '') || '').trim();
-    let itemCatalogCache = GM_getValue(STORAGE.itemCatalog, null);
-    let itemCatalogCacheTime = Number(GM_getValue(STORAGE.itemCatalogTime, 0)) || 0;
+    const API = {
+        BASE: 'https://api.torn.com/v2',
+        PAGE_SIZE: 100,
+        MAX_PAGES: 2000,
+        PAGE_DELAY_MS: 350
+    };
 
-    /*************************************************************************
-     * 3) Styles
-     *************************************************************************/
+    /**************************************************************************
+     * 02. Runtime State
+     **************************************************************************/
+
+    let apiKey = GM_getValue(STORAGE.API_KEY, '') || GM_getValue(STORAGE.LEGACY_API_KEY, '');
+    let itemsCache = GM_getValue(STORAGE.ITEMS_DB, null);
+    let itemsCacheTime = Number(GM_getValue(STORAGE.ITEMS_DB_TIME, 0)) || 0;
+    let portfolioCache = GM_getValue(STORAGE.PORTFOLIO_DATA, null);
+    let portfolioCacheTime = Number(GM_getValue(STORAGE.PORTFOLIO_TIME, 0)) || 0;
+    let isFetching = false;
+
+    /**************************************************************************
+     * 03. Styles
+     **************************************************************************/
 
     GM_addStyle(`
         #tm-market-fixed-toggle {
@@ -90,6 +95,7 @@
             box-shadow: 0 4px 12px rgba(0,0,0,0.7);
             user-select: none;
         }
+
         #tm-market-fixed-toggle.tm-inline-toggle {
             position: static;
             display: none;
@@ -104,7 +110,10 @@
             font-weight: normal;
             color: #555;
         }
-        #tm-market-fixed-toggle.tm-inline-toggle:hover { color: #222; }
+
+        #tm-market-fixed-toggle.tm-inline-toggle:hover {
+            color: #222;
+        }
 
         .tm-switch {
             position: relative;
@@ -113,7 +122,13 @@
             height: 18px;
             margin-right: 8px;
         }
-        .tm-switch input { opacity: 0; width: 0; height: 0; }
+
+        .tm-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
         .tm-slider {
             position: absolute;
             cursor: pointer;
@@ -121,10 +136,11 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: #555;
+            background-color: #ccc;
             transition: .2s;
             border-radius: 20px;
         }
+
         .tm-slider:before {
             position: absolute;
             content: "";
@@ -136,10 +152,15 @@
             transition: .2s;
             border-radius: 50%;
         }
-        .tm-inline-toggle .tm-slider { background-color: #ccc; }
-        input:checked + .tm-slider { background-color: #3788E5; }
-        input:checked + .tm-slider:before { transform: translateX(16px); }
-        .tm-inline-toggle input:checked + .tm-slider { background-color: #4e97d9; }
+
+        input:checked + .tm-slider {
+            background-color: #4e97d9;
+        }
+
+        input:checked + .tm-slider:before {
+            transform: translateX(16px);
+        }
+
         .tm-version {
             margin-left: 6px;
             font-size: 11px;
@@ -149,185 +170,206 @@
 
         #tm-summary-overlay {
             position: fixed;
-            top: 92px;
-            right: 18px;
-            width: min(760px, calc(100vw - 36px));
-            max-height: 82vh;
-            background: #f4f6f8;
-            border: 1px solid rgba(0,0,0,.22);
-            border-radius: 10px;
+            top: 120px;
+            right: 15px;
+            width: 500px;
+            max-height: 80vh;
+            background: #f7f8fa;
+            border: 1px solid #cfd6df;
+            border-radius: 8px;
             z-index: 2147483646;
-            box-shadow: 0 16px 45px rgba(0,0,0,.35);
+            box-shadow: 0 10px 28px rgba(0,0,0,0.28);
             display: none;
             flex-direction: column;
-            color: #27313d;
+            color: #333;
             font-family: Arial, Helvetica, sans-serif;
             overflow: hidden;
         }
+
         .tm-header {
-            background: linear-gradient(180deg,#ffffff 0%,#dfe5ec 100%);
-            padding: 12px 14px;
-            font-weight: 800;
-            border-bottom: 1px solid rgba(0,0,0,.18);
+            background: linear-gradient(#ffffff, #eceff3);
+            padding: 11px 13px;
+            font-weight: bold;
+            border-bottom: 1px solid #cfd6df;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            color: #27313d;
-            text-shadow: 0 1px 0 rgba(255,255,255,.85);
+            color: #333;
         }
+
         .tm-header-title {
             display: flex;
-            flex-direction: column;
-            gap: 2px;
+            align-items: baseline;
+            gap: 6px;
         }
-        .tm-header-title small {
-            color: #68717c;
+
+        .tm-header-version {
             font-size: 11px;
-            font-weight: 700;
+            color: #888;
+            font-weight: normal;
         }
+
         .tm-close {
             cursor: pointer;
-            color: #6b7280;
-            font-size: 20px;
-            font-weight: 900;
+            color: #777;
+            font-size: 18px;
+            font-weight: bold;
             line-height: 1;
-            border-radius: 50%;
-            width: 26px;
-            height: 26px;
+        }
+
+        .tm-close:hover {
+            color: #b33;
+        }
+
+        .tm-body {
+            padding: 12px;
+            overflow-y: auto;
+            flex-grow: 1;
+        }
+
+        .tm-toolbar {
             display: flex;
             align-items: center;
-            justify-content: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 10px;
         }
-        .tm-close:hover { color: #b91c1c; background: rgba(185,28,28,.08); }
-        .tm-body { padding: 14px; overflow-y: auto; flex-grow: 1; background: #f4f6f8; }
 
-        .tm-metrics {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 10px;
-            margin-bottom: 12px;
-        }
-        .tm-card {
-            background: linear-gradient(180deg,#ffffff 0%,#eef2f6 100%);
-            padding: 10px;
-            border-radius: 8px;
-            border: 1px solid rgba(0,0,0,.12);
-            box-shadow: inset 0 1px 0 rgba(255,255,255,.8), 0 1px 2px rgba(0,0,0,.06);
-            font-size: 11px;
-            color: #68717c;
-            font-weight: 800;
-        }
-        .tm-card span { display: block; font-size: 14px; font-weight: 900; margin-top: 5px; }
-        .c-blue { color: #2563eb; }
-        .c-green { color: #15803d; }
-        .c-orange { color: #d97706; }
-
-        .tm-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            font-size: 12px;
-            text-align: left;
-            background: #fff;
-            border: 1px solid rgba(0,0,0,.12);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        .tm-table th, .tm-table td { padding: 9px 8px; border-bottom: 1px solid rgba(0,0,0,.08); }
-        .tm-table tr:last-child td { border-bottom: none; }
-        .tm-table th {
-            background: linear-gradient(180deg,#f7f9fb 0%,#e4e9ef 100%);
-            color: #4b5563;
-            font-weight: 800;
-            text-shadow: 0 1px 0 rgba(255,255,255,.75);
-        }
-        .tm-table tbody tr:hover { background: #f7fafc; }
-
-        .tm-input-field {
-            background: #fff;
-            color: #27313d;
-            border: 1px solid rgba(0,0,0,.24);
-            padding: 7px 8px;
-            border-radius: 5px;
-            width: 65%;
-            margin-right: 6px;
-            box-shadow: inset 0 1px 2px rgba(0,0,0,.08);
-        }
-        .tm-btn {
-            background: linear-gradient(180deg,#4f9be8 0%,#2563eb 100%);
-            color: #fff;
-            border: 1px solid rgba(0,0,0,.18);
-            padding: 7px 12px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-weight: 800;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 1px 2px rgba(0,0,0,.12);
-        }
-        .tm-btn:hover { filter: brightness(1.04); }
-
-        .tm-debug-details {
-            margin-bottom: 12px;
-            color: #667085;
-            background: linear-gradient(180deg,#ffffff 0%,#f1f4f7 100%);
-            border: 1px solid rgba(0,0,0,.12);
-            border-radius: 7px;
+        .tm-cache-line,
+        .tm-debug-row {
+            margin: 8px 0 12px;
             padding: 8px 10px;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,.75);
+            border: 1px solid #d5dde7;
+            background: #eef3f8;
+            border-radius: 6px;
+            color: #4b5a69;
+            font-size: 12px;
+            line-height: 1.35;
         }
-        .tm-debug-details summary {
+
+        .tm-debug-row summary {
             cursor: pointer;
+            color: #5c6c7c;
             font-size: 11px;
-            color: #6b7280;
-            font-weight: 700;
         }
-        .tm-debug-details pre {
-            background: #f8fafc !important;
-            color: #374151 !important;
-            border: 1px solid rgba(0,0,0,.10) !important;
+
+        .tm-debug-row pre {
+            background: #f8fafc;
+            color: #364555;
             padding: 8px;
-            border-radius: 5px;
+            border: 1px solid #d8e0ea;
+            border-radius: 4px;
             font-size: 11px;
             overflow-x: auto;
             white-space: pre-wrap;
             word-break: break-all;
-            margin-top: 7px;
+            margin-top: 6px;
         }
-        .tm-cache-notice {
-            margin: 10px 0 12px;
-            padding: 9px 12px;
-            border: 1px solid #c9d9ec;
-            background: #edf4fc;
+
+        .tm-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .tm-card {
+            background: #fff;
+            padding: 8px;
             border-radius: 6px;
-            color: #3d4b5c;
-            font-size: 12px;
-        }
-        .tm-warning-notice {
-            margin: 10px 0 12px;
-            padding: 9px 12px;
-            border: 1px solid #f4d19b;
-            background: #fff6e8;
-            border-radius: 6px;
-            color: #765019;
-            font-size: 12px;
-        }
-        .tm-muted-line {
+            border: 1px solid #d6dde5;
             font-size: 11px;
-            color: #888;
-            margin: -4px 0 10px;
+            color: #666;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
         }
-        @media (max-width: 720px) {
-            .tm-metrics { grid-template-columns: 1fr; }
-            #tm-summary-overlay { right: 8px; width: calc(100vw - 16px); }
+
+        .tm-card span {
+            display: block;
+            font-size: 13px;
+            font-weight: bold;
+            margin-top: 4px;
+        }
+
+        .tm-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            text-align: left;
+            background: #fff;
+            border: 1px solid #d6dde5;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .tm-table th,
+        .tm-table td {
+            padding: 8px 6px;
+            border-bottom: 1px solid #e4e8ee;
+        }
+
+        .tm-table th {
+            background: #f0f3f7;
+            color: #596775;
+            font-weight: 600;
+        }
+
+        .tm-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .tm-muted {
+            color: #777;
+            font-size: 11px;
+        }
+
+        .c-blue { color: #2e78bf; }
+        .c-green { color: #60902a; }
+        .c-orange { color: #cf7d00; }
+
+        .tm-input-field {
+            background: #fff;
+            color: #222;
+            border: 1px solid #bfc8d2;
+            padding: 6px;
+            border-radius: 4px;
+            width: 65%;
+            margin-right: 5px;
+        }
+
+        .tm-btn {
+            background: #4e97d9;
+            color: #fff;
+            border: 1px solid #357fbe;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 12px;
+        }
+
+        .tm-btn:hover {
+            background: #367fbe;
+        }
+
+        .tm-btn-secondary {
+            background: #f9fafc;
+            color: #4b5a69;
+            border: 1px solid #c7d0db;
+        }
+
+        .tm-btn-secondary:hover {
+            background: #edf2f7;
+        }
+
+        .tm-btn:disabled {
+            opacity: 0.6;
+            cursor: default;
         }
     `);
 
-    /*************************************************************************
-     * 4) Utilities
-     *************************************************************************/
-
-    function $(id) {
-        return document.getElementById(id);
-    }
+    /**************************************************************************
+     * 04. Utilities
+     **************************************************************************/
 
     function esc(value) {
         return String(value).replace(/[&<>"']/g, (char) => ({
@@ -339,16 +381,20 @@
         }[char]));
     }
 
+    function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function isValidApiKey(value) {
+        return /^[A-Za-z0-9]{16}$/.test(String(value || '').trim());
+    }
+
     function formatMoney(value) {
-        const number = Number(value) || 0;
-        return '$' + Math.floor(number).toLocaleString('en-US');
+        const num = Number(value) || 0;
+        return '$' + Math.floor(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
 
-    function formatNumber(value) {
-        return Math.floor(Number(value) || 0).toLocaleString('en-US');
-    }
-
-    function formatCacheDateTime(timestamp) {
+    function formatDateTime(timestamp) {
         if (!timestamp) return 'unknown';
         try {
             return new Date(timestamp).toLocaleString();
@@ -357,38 +403,48 @@
         }
     }
 
-    function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+    function cacheAgeText(timestamp) {
+        if (!timestamp) return 'not cached';
+        const diff = Math.max(0, Date.now() - timestamp);
+        const mins = Math.floor(diff / 60000);
+        if (mins < 1) return 'just now';
+        if (mins < 60) return `${mins} min ago`;
+        const hours = Math.floor(mins / 60);
+        if (hours < 48) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+        const days = Math.floor(hours / 24);
+        return `${days} day${days === 1 ? '' : 's'} ago`;
     }
-
-    function isValidApiKey(value) {
-        return /^[A-Za-z0-9]{16}$/.test(String(value || '').trim());
-    }
-
-    /*************************************************************************
-     * 5) API Helpers
-     *************************************************************************/
 
     function buildApiUrl(path, params = {}) {
-        const url = new URL(API.base + path);
+        const url = new URL(API.BASE + path);
         Object.entries(params).forEach(([key, value]) => {
             if (value !== undefined && value !== null && value !== '') {
-                url.searchParams.set(key, String(value));
+                url.searchParams.set(key, value);
             }
         });
-        if (apiKey) url.searchParams.set('key', apiKey);
+        url.searchParams.set('key', apiKey);
         return url.toString();
     }
 
-    function requestJson(url) {
+    function ensureApiKeyInNextUrl(nextUrl) {
+        const url = new URL(nextUrl, API.BASE);
+        url.searchParams.set('key', apiKey);
+        return url.toString();
+    }
+
+    /**************************************************************************
+     * 05. API Helpers
+     **************************************************************************/
+
+    function apiGet(url) {
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
                 method: 'GET',
                 url,
-                timeout: API.timeoutMs,
-                onload: (response) => {
+                timeout: 20000,
+                onload: (res) => {
                     try {
-                        resolve(JSON.parse(response.responseText));
+                        resolve(JSON.parse(res.responseText));
                     } catch (error) {
                         resolve({ error: { error: 'Payload parsing error' } });
                     }
@@ -399,36 +455,54 @@
         });
     }
 
-    function ensureKeyOnUrl(url) {
-        if (!url) return null;
-        try {
-            const nextUrl = new URL(url, API.base);
-            if (!nextUrl.searchParams.get('key')) nextUrl.searchParams.set('key', apiKey);
-            return nextUrl.toString();
-        } catch (error) {
-            return null;
-        }
+    /**************************************************************************
+     * 06. Local Cache
+     **************************************************************************/
+
+    function isFresh(timestamp, ttl) {
+        return timestamp && (Date.now() - timestamp) < ttl;
     }
 
-    function getNextPageUrl(response) {
-        const links = response && response._metadata && response._metadata.links;
-        const next = links && (links.next || links.next_page || links['next']);
-        if (typeof next === 'string' && next) return ensureKeyOnUrl(next);
-        if (next && typeof next.href === 'string') return ensureKeyOnUrl(next.href);
-        return null;
+    function saveApiKey(value) {
+        apiKey = value.trim();
+        GM_setValue(STORAGE.API_KEY, apiKey);
+        GM_setValue(STORAGE.LEGACY_API_KEY, apiKey);
     }
 
-    /*************************************************************************
-     * 6) Item Catalog Cache
-     *************************************************************************/
+    function saveItemsCache(itemsDb) {
+        itemsCache = itemsDb;
+        itemsCacheTime = Date.now();
+        GM_setValue(STORAGE.ITEMS_DB, itemsCache);
+        GM_setValue(STORAGE.ITEMS_DB_TIME, itemsCacheTime);
+    }
 
-    function normalizeItemCatalog(rawItems) {
+    function savePortfolioCache(portfolio) {
+        portfolioCache = portfolio;
+        portfolioCacheTime = Date.now();
+        GM_setValue(STORAGE.PORTFOLIO_DATA, portfolioCache);
+        GM_setValue(STORAGE.PORTFOLIO_TIME, portfolioCacheTime);
+    }
+
+    function clearPortfolioCache() {
+        portfolioCache = null;
+        portfolioCacheTime = 0;
+        GM_setValue(STORAGE.PORTFOLIO_DATA, null);
+        GM_setValue(STORAGE.PORTFOLIO_TIME, 0);
+    }
+
+    /**************************************************************************
+     * 07. Data Loading
+     **************************************************************************/
+
+    function normalizeItemsDB(rawItems) {
         const map = {};
 
         if (Array.isArray(rawItems)) {
             rawItems.forEach((item) => {
-                const id = item && (item.id ?? item.item_id);
-                if (id !== undefined && id !== null) map[id] = item;
+                const id = item.id ?? item.item_id;
+                if (id !== undefined && id !== null) {
+                    map[id] = item;
+                }
             });
             return map;
         }
@@ -440,356 +514,364 @@
         return map;
     }
 
-    function hasCatalogCache() {
-        return itemCatalogCache && typeof itemCatalogCache === 'object' && Object.keys(itemCatalogCache).length > 0;
-    }
-
-    function isCatalogCacheFresh() {
-        return hasCatalogCache() && (Date.now() - itemCatalogCacheTime) < API.itemCatalogTtlMs;
-    }
-
-    async function loadItemCatalog() {
-        if (isCatalogCacheFresh()) {
-            return { items: itemCatalogCache, error: null, usedCache: true };
+    async function loadItemsDB(forceRefresh = false) {
+        if (!forceRefresh && itemsCache && isFresh(itemsCacheTime, TTL.ITEM_CATALOG_MS)) {
+            return {
+                itemsDB: itemsCache,
+                fromCache: true,
+                error: null
+            };
         }
 
-        const response = await requestJson(buildApiUrl('/torn/items'));
-        if (response.error) {
-            if (hasCatalogCache()) {
-                return { items: itemCatalogCache, error: response.error.error || 'Catalog refresh failed', usedCache: true };
-            }
-            return { items: {}, error: response.error.error || 'Catalog refresh failed', usedCache: false };
-        }
+        const res = await apiGet(buildApiUrl('/torn/items'));
 
-        itemCatalogCache = normalizeItemCatalog(response.items);
-        itemCatalogCacheTime = Date.now();
-        GM_setValue(STORAGE.itemCatalog, itemCatalogCache);
-        GM_setValue(STORAGE.itemCatalogTime, itemCatalogCacheTime);
-
-        return { items: itemCatalogCache, error: null, usedCache: false };
-    }
-
-    /*************************************************************************
-     * 7) Listing Fetching
-     *************************************************************************/
-
-    function resolveItemId(listing) {
-        // Confirmed Torn v2 shape: listing.id = listing id, listing.item.id = item id.
-        if (listing && listing.item && listing.item.id !== undefined) return listing.item.id;
-        if (listing && listing.item_id !== undefined) return listing.item_id;
-        return undefined;
-    }
-
-    async function fetchAllListings(onProgress) {
-        const listings = [];
-        const seenListingIds = new Set();
-        const seenPageFingerprints = new Set();
-        let nextUrl = buildApiUrl('/user/itemmarket', { limit: API.pageSize });
-        let offset = 0;
-        let pagesFetched = 0;
-        let warning = null;
-
-        while (pagesFetched < API.maxPages) {
-            const url = nextUrl || buildApiUrl('/user/itemmarket', { limit: API.pageSize, offset });
-            const response = await requestJson(url);
-
-            if (response.error) {
-                const message = response.error.error || 'Pagination request failed';
-                if (listings.length > 0) {
-                    warning = message;
-                    break;
-                }
-                return { listings: null, pagesFetched, warning: message };
-            }
-
-            const page = Array.isArray(response.itemmarket) ? response.itemmarket : [];
-            const fingerprint = page.map(row => row && row.id).join('|');
-            if (fingerprint && seenPageFingerprints.has(fingerprint)) {
-                warning = 'Stopped because the API returned a duplicate page.';
-                break;
-            }
-            seenPageFingerprints.add(fingerprint);
-
-            page.forEach((row) => {
-                const listingId = row && row.id;
-                if (listingId === undefined || !seenListingIds.has(listingId)) {
-                    listings.push(row);
-                    if (listingId !== undefined) seenListingIds.add(listingId);
-                }
-            });
-
-            pagesFetched += 1;
-            if (typeof onProgress === 'function') onProgress(listings.length, pagesFetched);
-
-            const apiNextUrl = getNextPageUrl(response);
-            if (apiNextUrl) {
-                nextUrl = apiNextUrl;
-                await sleep(API.pageDelayMs);
-                continue;
-            }
-
-            if (page.length < API.pageSize) break;
-
-            offset += API.pageSize;
-            nextUrl = buildApiUrl('/user/itemmarket', { limit: API.pageSize, offset });
-            await sleep(API.pageDelayMs);
-        }
-
-        if (pagesFetched >= API.maxPages) {
-            warning = `Stopped after ${(API.maxPages * API.pageSize).toLocaleString()} listing rows (safety cap reached).`;
-        }
-
-        return { listings, pagesFetched, warning };
-    }
-
-    /*************************************************************************
-     * 8) Data Aggregation
-     *************************************************************************/
-
-    function aggregateListings(listings, itemCatalog) {
-        const totals = {
-            listed: 0,
-            market: 0,
-            buyback: 0,
-            quantity: 0
-        };
-        const grouped = {};
-        let rowsSkipped = 0;
-
-        listings.forEach((listing) => {
-            const itemId = resolveItemId(listing);
-            if (itemId === undefined) {
-                rowsSkipped += 1;
-                return;
-            }
-
-            const catalogInfo = itemCatalog[itemId] || {};
-            const quantity = Number(listing.amount) || 1;
-            const listedTotal = Number(listing.price) || 0;
-            const marketUnit = listing.average_price !== undefined && listing.average_price !== null
-                ? Number(listing.average_price) || 0
-                : Number(catalogInfo && catalogInfo.value && catalogInfo.value.market_price) || (quantity ? listedTotal / quantity : 0);
-            const buybackUnit = Number(catalogInfo && catalogInfo.value && catalogInfo.value.sell_price) || 0;
-            const itemName = (listing.item && listing.item.name) || catalogInfo.name || `Item #${itemId}`;
-
-            if (!grouped[itemId]) {
-                grouped[itemId] = {
-                    name: itemName,
-                    quantity: 0,
-                    listed: 0,
-                    market: 0,
-                    buyback: 0
+        if (res.error) {
+            if (itemsCache) {
+                return {
+                    itemsDB: itemsCache,
+                    fromCache: true,
+                    error: res.error.error || 'Could not refresh item catalog'
                 };
             }
 
-            const marketTotal = marketUnit * quantity;
-            const buybackTotal = buybackUnit * quantity;
+            return {
+                itemsDB: {},
+                fromCache: false,
+                error: res.error.error || 'Could not load item catalog'
+            };
+        }
 
-            grouped[itemId].quantity += quantity;
-            grouped[itemId].listed += listedTotal;
-            grouped[itemId].market += marketTotal;
-            grouped[itemId].buyback += buybackTotal;
-
-            totals.quantity += quantity;
-            totals.listed += listedTotal;
-            totals.market += marketTotal;
-            totals.buyback += buybackTotal;
-        });
+        const normalized = normalizeItemsDB(res.items);
+        saveItemsCache(normalized);
 
         return {
-            rows: Object.values(grouped).sort((a, b) => a.name.localeCompare(b.name)),
-            totals,
-            uniqueCount: Object.keys(grouped).length,
-            rowsSkipped
+            itemsDB: normalized,
+            fromCache: false,
+            error: null
         };
     }
 
-    /*************************************************************************
-     * 9) UI Helpers
-     *************************************************************************/
+    function getNextLink(response) {
+        return response?._metadata?.links?.next
+            || response?._metadata?.next
+            || response?.metadata?.links?.next
+            || response?.pagination?.next
+            || null;
+    }
 
-    function findItemMarketHeader() {
-        const knownHeader = document.querySelector('.title___Cd3XN');
-        if (knownHeader) return knownHeader;
+    function extractListings(response) {
+        if (Array.isArray(response?.itemmarket)) return response.itemmarket;
+        if (Array.isArray(response?.items)) return response.items;
+        if (Array.isArray(response?.data)) return response.data;
+        return [];
+    }
 
-        const candidates = document.querySelectorAll('div, span, h1, h2, h3');
-        for (const element of candidates) {
-            if (element.children.length === 0 && element.textContent.trim() === 'Your items on the Item Market') {
-                return element;
+    async function fetchAllItemMarketListings(progressCallback) {
+        const listings = [];
+        const seenUrls = new Set();
+
+        let page = 0;
+        let offset = 0;
+        let nextUrl = buildApiUrl('/user/itemmarket', {
+            limit: API.PAGE_SIZE,
+            offset
+        });
+
+        while (nextUrl && page < API.MAX_PAGES) {
+            const safeNextUrl = ensureApiKeyInNextUrl(nextUrl);
+
+            if (seenUrls.has(safeNextUrl)) {
+                return {
+                    listings,
+                    warning: 'Stopped because Torn returned a duplicate next-page URL.',
+                    pagesFetched: page
+                };
+            }
+
+            seenUrls.add(safeNextUrl);
+            page++;
+
+            if (progressCallback) {
+                progressCallback(`Fetching listings page ${page} — ${listings.length.toLocaleString()} listing rows loaded...`);
+            }
+
+            const res = await apiGet(safeNextUrl);
+
+            if (res.error) {
+                if (listings.length > 0) {
+                    return {
+                        listings,
+                        warning: res.error.error || 'Pagination request failed',
+                        pagesFetched: page
+                    };
+                }
+
+                throw new Error(res.error.error || 'Access denied');
+            }
+
+            const pageRows = extractListings(res);
+            listings.push(...pageRows);
+
+            const linkNext = getNextLink(res);
+            if (linkNext) {
+                nextUrl = linkNext;
+            } else if (pageRows.length >= API.PAGE_SIZE) {
+                offset += API.PAGE_SIZE;
+                nextUrl = buildApiUrl('/user/itemmarket', {
+                    limit: API.PAGE_SIZE,
+                    offset
+                });
+            } else {
+                nextUrl = null;
+            }
+
+            if (nextUrl) {
+                await sleep(API.PAGE_DELAY_MS);
             }
         }
-        return null;
+
+        const warning = page >= API.MAX_PAGES
+            ? `Stopped after ${API.MAX_PAGES.toLocaleString()} pages as a safety limit.`
+            : null;
+
+        return {
+            listings,
+            warning,
+            pagesFetched: page
+        };
     }
 
-    function getToggleDisplayMode() {
-        const toggle = $('tm-market-fixed-toggle');
-        return toggle && toggle.classList.contains('tm-inline-toggle') ? 'inline-flex' : 'flex';
+    /**************************************************************************
+     * 08. Portfolio Aggregation
+     **************************************************************************/
+
+    function resolveItemId(listing) {
+        if (listing?.item?.id !== undefined && listing.item.id !== null) return listing.item.id;
+        if (listing?.item_id !== undefined && listing.item_id !== null) return listing.item_id;
+        return undefined;
     }
 
-    function setMainToggleVisible(visible) {
-        const toggle = $('tm-market-fixed-toggle');
-        if (!toggle) return;
-        toggle.style.display = visible ? getToggleDisplayMode() : 'none';
+    function aggregatePortfolio(listings, itemsDB, meta = {}) {
+        let sumListed = 0;
+        let sumMarket = 0;
+        let sumBuyback = 0;
+        let totalQuantity = 0;
+
+        const groupedItems = {};
+        const rawSample = listings.slice(0, 3);
+
+        listings.forEach((listing) => {
+            const itemId = resolveItemId(listing);
+            if (itemId === undefined) return;
+
+            const info = itemsDB[itemId] || {};
+            const quantity = Number(listing.amount || 1);
+            const totalListed = Number(listing.price || 0);
+
+            const perUnitMarketValue = listing.average_price !== undefined && listing.average_price !== null
+                ? Number(listing.average_price)
+                : (
+                    info.value && info.value.market_price !== undefined && info.value.market_price !== null
+                        ? Number(info.value.market_price)
+                        : (quantity ? totalListed / quantity : 0)
+                );
+
+            const sellPrice = info.value && info.value.sell_price !== undefined
+                ? Number(info.value.sell_price)
+                : 0;
+
+            const totalMarket = perUnitMarketValue * quantity;
+            const totalBuyback = sellPrice * quantity;
+
+            sumListed += totalListed;
+            sumMarket += totalMarket;
+            sumBuyback += totalBuyback;
+            totalQuantity += quantity;
+
+            const itemName = listing.item?.name || info.name || `Item #${itemId}`;
+
+            if (!groupedItems[itemId]) {
+                groupedItems[itemId] = {
+                    id: itemId,
+                    name: itemName,
+                    quantity: 0,
+                    totalListed: 0,
+                    totalMarket: 0,
+                    totalBuyback: 0
+                };
+            }
+
+            groupedItems[itemId].quantity += quantity;
+            groupedItems[itemId].totalListed += totalListed;
+            groupedItems[itemId].totalMarket += totalMarket;
+            groupedItems[itemId].totalBuyback += totalBuyback;
+        });
+
+        const rows = Object.values(groupedItems)
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        return {
+            version: SCRIPT_VERSION,
+            createdAt: Date.now(),
+            rows,
+            metrics: {
+                sumListed,
+                sumMarket,
+                sumBuyback,
+                totalQuantity,
+                uniqueItemCount: rows.length,
+                listingRows: listings.length
+            },
+            debug: {
+                rawSample,
+                pagesFetched: meta.pagesFetched || 0,
+                warning: meta.warning || null
+            },
+            catalog: {
+                timestamp: itemsCacheTime,
+                fromCache: Boolean(meta.itemsFromCache),
+                error: meta.itemsError || null
+            }
+        };
     }
 
-    function openOverlay() {
-        const overlay = $('tm-summary-overlay');
-        if (!overlay) return;
-        setMainToggleVisible(false);
-        overlay.style.display = 'flex';
-        processMarketSummary();
-    }
+    async function buildFreshPortfolio(progressCallback, forceCatalogRefresh = false) {
+        const itemsResult = await loadItemsDB(forceCatalogRefresh);
 
-    function closeOverlay() {
-        const checkbox = $('tm-toggle-checkbox');
-        const overlay = $('tm-summary-overlay');
-        if (checkbox) checkbox.checked = false;
-        if (overlay) overlay.style.display = 'none';
-        if (window.location.hash === ROUTE.itemMarketHash) setMainToggleVisible(true);
-    }
-
-    function setBodyHtml(html) {
-        const body = $('tm-overlay-body');
-        if (body) body.innerHTML = html;
-    }
-
-    /*************************************************************************
-     * 10) UI Rendering
-     *************************************************************************/
-
-    function ensureElementsExist() {
-        if ($('tm-market-fixed-toggle')) return;
-
-        const toggleWrap = document.createElement('div');
-        toggleWrap.id = 'tm-market-fixed-toggle';
-        toggleWrap.innerHTML = `
-            <label class="tm-switch">
-                <input type="checkbox" id="tm-toggle-checkbox">
-                <span class="tm-slider"></span>
-            </label>
-            <span>My Listings Summary</span><span class="tm-version">v${SCRIPT.version}</span>
-        `;
-
-        const header = findItemMarketHeader();
-        if (header) {
-            toggleWrap.classList.add('tm-inline-toggle');
-            header.insertAdjacentElement('afterend', toggleWrap);
-        } else {
-            document.body.appendChild(toggleWrap);
+        if (itemsResult.error && Object.keys(itemsResult.itemsDB).length === 0) {
+            throw new Error(`Could not load item catalog: ${itemsResult.error}`);
         }
 
-        const overlay = document.createElement('div');
-        overlay.id = 'tm-summary-overlay';
-        overlay.innerHTML = `
-            <div class="tm-header">
-                <span class="tm-header-title">
-                    <span>${esc(SCRIPT.title)}</span>
-                    <small>${esc(SCRIPT.subtitle)} · v${esc(SCRIPT.version)}</small>
-                </span>
-                <span class="tm-close" id="tm-close-overlay">×</span>
-            </div>
-            <div class="tm-body" id="tm-overlay-body">Initializing summary view...</div>
-        `;
-        document.body.appendChild(overlay);
+        const listingResult = await fetchAllItemMarketListings(progressCallback);
 
-        $('tm-toggle-checkbox').addEventListener('change', function () {
-            if (this.checked) openOverlay();
-            else closeOverlay();
+        const portfolio = aggregatePortfolio(listingResult.listings, itemsResult.itemsDB, {
+            pagesFetched: listingResult.pagesFetched,
+            warning: listingResult.warning,
+            itemsFromCache: itemsResult.fromCache,
+            itemsError: itemsResult.error
         });
-        $('tm-close-overlay').addEventListener('click', closeOverlay);
+
+        savePortfolioCache(portfolio);
+        return portfolio;
+    }
+
+    /**************************************************************************
+     * 09. UI Rendering
+     **************************************************************************/
+
+    function getBody() {
+        return document.getElementById('tm-overlay-body');
     }
 
     function renderKeyConfigForm() {
-        setBodyHtml(`
+        const body = getBody();
+
+        body.innerHTML = `
             <div style="padding: 10px 0;">
-                <p style="margin-bottom: 12px; line-height: 1.4; color: #9a6700;">
-                    <strong>V2 API Notice:</strong> A Torn API key with the required Item Market access is needed.
+                <p style="margin-bottom: 12px; line-height: 1.4; color: #a56500;">
+                    <strong>V2 API Notice:</strong> A Full Access Torn API key is required to read your Item Market listings.
                 </p>
                 <div style="display: flex; margin-bottom: 15px;">
-                    <input type="password" id="tm-key-input" class="tm-input-field" placeholder="Paste Torn API Key" maxlength="16" autocomplete="off">
+                    <input type="text" id="tm-key-input" class="tm-input-field" placeholder="Paste Full Access API Key" maxlength="16">
                     <button id="tm-save-key-btn" class="tm-btn">Save Key</button>
                 </div>
-                <p style="font-size: 11px; color: #888;">
-                    The key is stored locally by your userscript manager and is only sent to api.torn.com.
-                </p>
+                <p class="tm-muted">The key is stored locally in your browser and is only sent directly to Torn's official API.</p>
             </div>
-        `);
+        `;
 
-        $('tm-save-key-btn').addEventListener('click', () => {
-            const value = $('tm-key-input').value.trim();
+        document.getElementById('tm-save-key-btn').addEventListener('click', () => {
+            const value = document.getElementById('tm-key-input').value.trim();
+
             if (!isValidApiKey(value)) {
                 alert('Please enter a valid 16-character Torn API key.');
                 return;
             }
-            apiKey = value;
-            GM_setValue(STORAGE.apiKey, apiKey);
-            processMarketSummary();
+
+            saveApiKey(value);
+            clearPortfolioCache();
+            processMarketSummary({ forceRefresh: true });
         });
     }
 
-    function renderApiError(message, detail) {
-        setBodyHtml(`
-            <div class="tm-warning-notice">
-                <strong>${esc(message)}</strong>
-                ${detail ? `<br>${esc(detail)}` : ''}
-            </div>
+    function renderApiError(message, detail = '') {
+        const body = getBody();
+
+        body.innerHTML = `
+            <p style="color: #b33; margin-bottom: 10px;">${esc(message)}</p>
+            ${detail ? `<p class="tm-muted" style="margin-bottom: 12px;">${esc(detail)}</p>` : ''}
             <button id="tm-reset-key-btn" class="tm-btn">Change API Key</button>
-        `);
-        $('tm-reset-key-btn').addEventListener('click', () => {
+        `;
+
+        document.getElementById('tm-reset-key-btn').addEventListener('click', () => {
             apiKey = '';
+            clearPortfolioCache();
             renderKeyConfigForm();
         });
     }
 
-    function renderProgress(listingCount, pageCount) {
-        setBodyHtml(`<span style="color:#6b7280;">Fetched ${formatNumber(listingCount)} active listing row${listingCount === 1 ? '' : 's'} from ${formatNumber(pageCount)} API page${pageCount === 1 ? '' : 's'}...</span>`);
+    function renderLoading(message) {
+        const body = getBody();
+        body.innerHTML = `
+            <div class="tm-cache-line">${esc(message)}</div>
+        `;
     }
 
-    function renderSummary(aggregation, listings, pagesFetched, catalogResult, listingWarning) {
-        const rowsHtml = aggregation.rows.map((item) => `
+    function renderPortfolio(portfolio, options = {}) {
+        const body = getBody();
+        const isCachedPortfolio = Boolean(options.fromCache);
+        const metrics = portfolio.metrics || {};
+        const debug = portfolio.debug || {};
+        const catalog = portfolio.catalog || {};
+
+        const rowsHtml = (portfolio.rows || []).map((item) => `
             <tr>
-                <td><strong>${esc(item.name)}</strong> <span style="color:#777;">×${formatNumber(item.quantity)}</span></td>
-                <td class="c-blue">${formatMoney(item.listed)}</td>
-                <td class="c-orange">${formatMoney(item.market)}</td>
-                <td class="c-green">${formatMoney(item.buyback)}</td>
+                <td><strong>${esc(item.name)}</strong> <span class="tm-muted">x${Number(item.quantity).toLocaleString()}</span></td>
+                <td class="c-blue">${formatMoney(item.totalListed)}</td>
+                <td class="c-orange">${formatMoney(item.totalMarket)}</td>
+                <td class="c-green">${formatMoney(item.totalBuyback)}</td>
             </tr>
         `).join('');
 
-        const catalogNotice = catalogResult.usedCache
-            ? `<div class="tm-cache-notice">Using 24-hour cached item catalog, last update: <strong>${esc(formatCacheDateTime(itemCatalogCacheTime))}</strong></div>`
-            : `<div class="tm-cache-notice">Item catalog refreshed, last update: <strong>${esc(formatCacheDateTime(itemCatalogCacheTime))}</strong></div>`;
+        const cachedText = isCachedPortfolio
+            ? `Using cached portfolio data, last refresh: ${formatDateTime(portfolio.createdAt)} (${cacheAgeText(portfolio.createdAt)}).`
+            : `Fresh portfolio data loaded, last refresh: ${formatDateTime(portfolio.createdAt)}.`;
 
-        const catalogWarning = catalogResult.error
-            ? `<div class="tm-warning-notice">Item catalog refresh skipped/failed: ${esc(catalogResult.error)}. ${catalogResult.usedCache ? 'Using cached catalog.' : 'Showing listing data only; Torn buyback may be unavailable until the next successful catalog refresh.'}</div>`
+        const catalogText = `Using 24-hour cached item catalog, last update: ${formatDateTime(catalog.timestamp || itemsCacheTime)}.`;
+
+        const warningHtml = debug.warning
+            ? `<div class="tm-cache-line" style="border-color:#e4c27a;background:#fff7e5;color:#7a5700;">Warning: ${esc(debug.warning)}</div>`
             : '';
 
-        const listingWarningHtml = listingWarning
-            ? `<div class="tm-warning-notice">Warning: listing data may be incomplete (${esc(listingWarning)})</div>`
+        const catalogErrorHtml = catalog.error
+            ? `<div class="tm-cache-line" style="border-color:#e4c27a;background:#fff7e5;color:#7a5700;">Catalog refresh warning: ${esc(catalog.error)}</div>`
             : '';
 
-        const skippedWarning = aggregation.rowsSkipped
-            ? `<div class="tm-warning-notice">Skipped ${formatNumber(aggregation.rowsSkipped)} unrecognized listing row${aggregation.rowsSkipped === 1 ? '' : 's'}.</div>`
-            : '';
-
-        const debugBlock = `
-            <details class="tm-debug-details">
-                <summary>Debug: raw data (${formatNumber(listings.length)} listings, ${formatNumber(pagesFetched)} page${pagesFetched === 1 ? '' : 's'} fetched)</summary>
-                <pre>${esc(JSON.stringify(listings.slice(0, 3), null, 2))}</pre>
-            </details>
-        `;
-
-        setBodyHtml(`
-            ${debugBlock}
-            <div class="tm-metrics">
-                <div class="tm-card">Sum Listed Items <span><b class="c-blue">${formatMoney(aggregation.totals.listed)}</b></span></div>
-                <div class="tm-card">Sum Market Value <span><b class="c-orange">${formatMoney(aggregation.totals.market)}</b></span></div>
-                <div class="tm-card">Sum Torn Buyback <span><b class="c-green">${formatMoney(aggregation.totals.buyback)}</b></span></div>
+        body.innerHTML = `
+            <div class="tm-toolbar">
+                <div class="tm-muted">${esc(cachedText)}</div>
+                <button id="tm-manual-refresh-btn" class="tm-btn tm-btn-secondary">Refresh now</button>
             </div>
-            <p class="tm-muted-line">${formatNumber(aggregation.uniqueCount)} unique item${aggregation.uniqueCount === 1 ? '' : 's'} listed · ${formatNumber(aggregation.totals.quantity)} total quantity</p>
-            ${catalogNotice}
-            ${catalogWarning}
-            ${listingWarningHtml}
-            ${skippedWarning}
+
+            <div class="tm-cache-line">${esc(catalogText)}</div>
+            ${warningHtml}
+            ${catalogErrorHtml}
+
+            <details class="tm-debug-row">
+                <summary>Debug: raw data (${Number(metrics.listingRows || 0).toLocaleString()} listing rows, ${Number(debug.pagesFetched || 0).toLocaleString()} page${debug.pagesFetched === 1 ? '' : 's'} fetched)</summary>
+                <pre>${esc(JSON.stringify(debug.rawSample || [], null, 2))}</pre>
+            </details>
+
+            <div class="tm-metrics">
+                <div class="tm-card">Sum Listed Items <span><b class="c-blue">${formatMoney(metrics.sumListed)}</b></span></div>
+                <div class="tm-card">Sum Market Value <span><b class="c-orange">${formatMoney(metrics.sumMarket)}</b></span></div>
+                <div class="tm-card">Sum Torn Buyback <span><b class="c-green">${formatMoney(metrics.sumBuyback)}</b></span></div>
+            </div>
+
+            <p class="tm-muted" style="margin: -4px 0 10px;">
+                ${Number(metrics.uniqueItemCount || 0).toLocaleString()} unique item${metrics.uniqueItemCount === 1 ? '' : 's'} listed &middot;
+                ${Number(metrics.totalQuantity || 0).toLocaleString()} total quantity
+            </p>
+
             <table class="tm-table">
                 <thead>
                     <tr>
@@ -801,69 +883,157 @@
                 </thead>
                 <tbody>${rowsHtml}</tbody>
             </table>
-        `);
+        `;
+
+        document.getElementById('tm-manual-refresh-btn').addEventListener('click', () => {
+            processMarketSummary({ forceRefresh: true });
+        });
     }
 
-    /*************************************************************************
-     * 11) Main Workflow
-     *************************************************************************/
+    /**************************************************************************
+     * 10. Event Wiring
+     **************************************************************************/
 
-    async function processMarketSummary() {
+    function findItemMarketHeader() {
+        const moduleHeader = document.querySelector('.title___Cd3XN');
+        if (moduleHeader) return moduleHeader;
+
+        const candidates = document.querySelectorAll('div, span, h1, h2, h3');
+        for (const el of candidates) {
+            if (el.children.length === 0 && el.textContent.trim() === 'Your items on the Item Market') {
+                return el;
+            }
+        }
+
+        return null;
+    }
+
+    function ensureElementsExist() {
+        if (document.getElementById('tm-market-fixed-toggle')) return;
+
+        const headerEl = findItemMarketHeader();
+
+        const toggleWrap = document.createElement('div');
+        toggleWrap.id = 'tm-market-fixed-toggle';
+        toggleWrap.innerHTML = `
+            <label class="tm-switch">
+                <input type="checkbox" id="tm-toggle-checkbox">
+                <span class="tm-slider"></span>
+            </label>
+            <span>My Listings Summary</span>
+            <span class="tm-version">v${SCRIPT_VERSION}</span>
+        `;
+
+        if (headerEl) {
+            toggleWrap.classList.add('tm-inline-toggle');
+            headerEl.insertAdjacentElement('afterend', toggleWrap);
+        } else {
+            document.body.appendChild(toggleWrap);
+        }
+
+        const overlay = document.createElement('div');
+        overlay.id = 'tm-summary-overlay';
+        overlay.innerHTML = `
+            <div class="tm-header">
+                <div class="tm-header-title">
+                    <span>Item Market Portfolio</span>
+                    <span class="tm-header-version">v${SCRIPT_VERSION}</span>
+                </div>
+                <span class="tm-close" id="tm-close-overlay">×</span>
+            </div>
+            <div class="tm-body" id="tm-overlay-body">Initializing...</div>
+        `;
+        document.body.appendChild(overlay);
+
+        const checkbox = document.getElementById('tm-toggle-checkbox');
+        checkbox.addEventListener('change', function () {
+            const displayOverlay = document.getElementById('tm-summary-overlay');
+            const toggle = document.getElementById('tm-market-fixed-toggle');
+
+            if (this.checked) {
+                displayOverlay.style.display = 'flex';
+                toggle.style.display = 'none';
+                processMarketSummary({ forceRefresh: false });
+            } else {
+                displayOverlay.style.display = 'none';
+                toggle.style.display = 'inline-flex';
+            }
+        });
+
+        document.getElementById('tm-close-overlay').addEventListener('click', closeOverlay);
+    }
+
+    function closeOverlay() {
+        const checkbox = document.getElementById('tm-toggle-checkbox');
+        const overlay = document.getElementById('tm-summary-overlay');
+        const toggle = document.getElementById('tm-market-fixed-toggle');
+
+        if (checkbox) checkbox.checked = false;
+        if (overlay) overlay.style.display = 'none';
+        if (toggle && window.location.hash === TARGET_HASH) toggle.style.display = 'inline-flex';
+    }
+
+    function monitorViewAndRoute() {
+        if (window.location.hash === TARGET_HASH) {
+            ensureElementsExist();
+            const toggle = document.getElementById('tm-market-fixed-toggle');
+            const overlay = document.getElementById('tm-summary-overlay');
+            const isOpen = overlay && overlay.style.display === 'flex';
+            if (toggle) toggle.style.display = isOpen ? 'none' : 'inline-flex';
+        } else {
+            const toggle = document.getElementById('tm-market-fixed-toggle');
+            const overlay = document.getElementById('tm-summary-overlay');
+            const checkbox = document.getElementById('tm-toggle-checkbox');
+
+            if (toggle) toggle.style.display = 'none';
+            if (overlay) overlay.style.display = 'none';
+            if (checkbox) checkbox.checked = false;
+        }
+    }
+
+    /**************************************************************************
+     * 11. App Bootstrap
+     **************************************************************************/
+
+    async function processMarketSummary(options = {}) {
+        const forceRefresh = Boolean(options.forceRefresh);
+
         if (!isValidApiKey(apiKey)) {
             renderKeyConfigForm();
             return;
         }
 
-        setBodyHtml('<span style="color:#6b7280;">Pulling Torn v2 Item Market data...</span>');
-
-        const listingResult = await fetchAllListings(renderProgress);
-        if (listingResult.listings === null) {
-            renderApiError(
-                `v2 API Error: ${listingResult.warning || 'Access Denied'}`,
-                'Check that your Torn API key is valid and has the required access.'
-            );
+        if (isFetching) {
+            renderLoading('A refresh is already running. Please wait...');
             return;
         }
 
-        if (listingResult.listings.length === 0) {
-            setBodyHtml('<p style="padding:10px 0;">No active Item Market listings found.</p>');
+        const canUsePortfolioCache = !forceRefresh
+            && portfolioCache
+            && isFresh(portfolioCacheTime || portfolioCache.createdAt, TTL.PORTFOLIO_MS);
+
+        if (canUsePortfolioCache) {
+            renderPortfolio(portfolioCache, { fromCache: true });
             return;
         }
 
-        const firstResolvedId = resolveItemId(listingResult.listings[0]);
-        if (firstResolvedId === undefined) {
-            setBodyHtml(`
-                <div class="tm-warning-notice">Could not identify the item field on listings. Copy this raw sample and send it back.</div>
-                <pre style="background:#f8fafc;color:#374151;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;">${esc(JSON.stringify(listingResult.listings[0], null, 2))}</pre>
-            `);
-            return;
+        try {
+            isFetching = true;
+            renderLoading(forceRefresh ? 'Manual refresh started...' : 'Refreshing portfolio data...');
+
+            const portfolio = await buildFreshPortfolio((message) => {
+                renderLoading(message);
+            });
+
+            renderPortfolio(portfolio, { fromCache: false });
+        } catch (error) {
+            renderApiError(error.message || 'Unable to load Item Market Portfolio.', 'Check your API key and Torn API availability.');
+        } finally {
+            isFetching = false;
         }
-
-        const catalogResult = await loadItemCatalog();
-        const aggregation = aggregateListings(listingResult.listings, catalogResult.items);
-        renderSummary(aggregation, listingResult.listings, listingResult.pagesFetched, catalogResult, listingResult.warning);
-    }
-
-    /*************************************************************************
-     * 12) Route Handling & Boot
-     *************************************************************************/
-
-    function monitorViewAndRoute() {
-        if (window.location.hash === ROUTE.itemMarketHash) {
-            ensureElementsExist();
-            const overlayOpen = $('tm-summary-overlay') && $('tm-summary-overlay').style.display === 'flex';
-            setMainToggleVisible(!overlayOpen);
-            return;
-        }
-
-        const toggle = $('tm-market-fixed-toggle');
-        const overlay = $('tm-summary-overlay');
-        if (toggle) toggle.style.display = 'none';
-        if (overlay) overlay.style.display = 'none';
-        const checkbox = $('tm-toggle-checkbox');
-        if (checkbox) checkbox.checked = false;
     }
 
     window.addEventListener('hashchange', monitorViewAndRoute);
     monitorViewAndRoute();
+
 })();
