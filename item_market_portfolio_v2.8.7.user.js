@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.0
+// @version      2.9.1
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -36,7 +36,7 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.0';
+    const SCRIPT_VERSION = '2.9.1';
     const TARGET_HASH = '#/viewListing';
 
     const STORAGE = {
@@ -59,7 +59,10 @@
         BASE: 'https://api.torn.com/v2',
         PAGE_SIZE: 100,
         MAX_PAGES: 2000,
-        PAGE_DELAY_MS: 350
+        PAGE_DELAY_MS: 750,
+        MAX_RETRIES: 6,
+        BACKOFF_START_MS: 2000,
+        BACKOFF_MAX_MS: 30000
     };
 
     /**************************************************************************
@@ -455,6 +458,44 @@
         });
     }
 
+
+    function isRateLimitError(response) {
+        const message = String(response?.error?.error || '').toLowerCase();
+        const code = response?.error?.code;
+        return code === 5
+            || message.includes('too many requests')
+            || message.includes('rate limit')
+            || message.includes('too many');
+    }
+
+    async function apiGetWithBackoff(url, progressCallback, pageNumber) {
+        let attempt = 0;
+        let delay = API.BACKOFF_START_MS;
+
+        while (attempt <= API.MAX_RETRIES) {
+            const response = await apiGet(url);
+
+            if (!response.error || !isRateLimitError(response)) {
+                return response;
+            }
+
+            attempt += 1;
+
+            if (attempt > API.MAX_RETRIES) {
+                return response;
+            }
+
+            if (progressCallback) {
+                progressCallback(`Rate limited on page ${pageNumber}. Waiting ${Math.round(delay / 1000)} seconds before retry ${attempt}/${API.MAX_RETRIES}...`);
+            }
+
+            await sleep(delay);
+            delay = Math.min(delay * 2, API.BACKOFF_MAX_MS);
+        }
+
+        return { error: { error: 'Too many requests' } };
+    }
+
     /**************************************************************************
      * 06. Local Cache
      **************************************************************************/
@@ -523,7 +564,7 @@
             };
         }
 
-        const res = await apiGet(buildApiUrl('/torn/items'));
+        const res = await apiGetWithBackoff(buildApiUrl('/torn/items'), null, 'catalog');
 
         if (res.error) {
             if (itemsCache) {
@@ -592,10 +633,10 @@
             page++;
 
             if (progressCallback) {
-                progressCallback(`Fetching listings page ${page} — ${listings.length.toLocaleString()} listing rows loaded...`);
+                progressCallback(`Fetching listings page ${page} — ${listings.length.toLocaleString()} listing rows loaded. Current delay: ${API.PAGE_DELAY_MS} ms...`);
             }
 
-            const res = await apiGet(safeNextUrl);
+            const res = await apiGetWithBackoff(safeNextUrl, progressCallback, page);
 
             if (res.error) {
                 if (listings.length > 0) {
