@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.3
+// @version      2.9.4
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -38,7 +38,7 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.3';
+    const SCRIPT_VERSION = '2.9.4';
     const TARGET_HASH = '#/viewListing';
 
     const STORAGE = {
@@ -54,7 +54,7 @@
 
     const TTL = {
         ITEM_CATALOG_MS: 24 * 60 * 60 * 1000,
-        PORTFOLIO_MS: 10 * 60 * 1000
+        PORTFOLIO_MS: 24 * 60 * 60 * 1000
     };
 
     const API = {
