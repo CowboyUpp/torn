@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.4
+// @version      2.9.5
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -38,7 +38,7 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.4';
+    const SCRIPT_VERSION = '2.9.5';
     const TARGET_HASH = '#/viewListing';
 
     const STORAGE = {
@@ -987,8 +987,6 @@
             ? `Using cached portfolio data, last refresh: ${formatDateTime(portfolio.createdAt)} (${cacheAgeText(portfolio.createdAt)}).`
             : `Fresh portfolio data loaded, last refresh: ${formatDateTime(portfolio.createdAt)}.`;
 
-        const catalogText = `Using 24-hour cached item catalog, last update: ${formatDateTime(catalog.timestamp || itemsCacheTime)}.`;
-
         const warningHtml = debug.warning
             ? `<div class="tm-cache-line" style="border-color:#e4c27a;background:#fff7e5;color:#7a5700;">Warning: ${esc(debug.warning)}</div>`
             : '';
@@ -1003,7 +1001,6 @@
                 <button id="tm-manual-refresh-btn" class="tm-btn tm-btn-secondary">Refresh now</button>
             </div>
 
-            <div class="tm-cache-line">${esc(catalogText)}</div>
             ${warningHtml}
             ${catalogErrorHtml}
 
