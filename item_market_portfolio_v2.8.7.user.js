@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.2
+// @version      2.9.3
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -38,7 +38,7 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.2';
+    const SCRIPT_VERSION = '2.9.3';
     const TARGET_HASH = '#/viewListing';
 
     const STORAGE = {
@@ -212,6 +212,23 @@
             font-size: 11px;
             color: #888;
             font-weight: normal;
+        }
+
+        .tm-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .tm-gear {
+            cursor: pointer;
+            color: #777;
+            font-size: 16px;
+            line-height: 1;
+        }
+
+        .tm-gear:hover {
+            color: #2e78bf;
         }
 
         .tm-close {
@@ -394,6 +411,12 @@
         return /^[A-Za-z0-9]{16}$/.test(String(value || '').trim());
     }
 
+    function maskKey(value) {
+        const key = String(value || '');
+        if (key.length < 4) return 'Not set';
+        return '\u2022'.repeat(key.length - 4) + key.slice(-4);
+    }
+
     function formatMoney(value) {
         const num = Number(value) || 0;
         return '$' + Math.floor(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -531,6 +554,19 @@
         portfolioCacheTime = 0;
         GM_setValue(STORAGE.PORTFOLIO_DATA, null);
         GM_setValue(STORAGE.PORTFOLIO_TIME, 0);
+    }
+
+    function clearItemsCache() {
+        itemsCache = null;
+        itemsCacheTime = 0;
+        GM_setValue(STORAGE.ITEMS_DB, null);
+        GM_setValue(STORAGE.ITEMS_DB_TIME, 0);
+    }
+
+    function clearStoredApiKey() {
+        apiKey = '';
+        GM_setValue(STORAGE.API_KEY, '');
+        GM_setValue(STORAGE.LEGACY_API_KEY, '');
     }
 
     /**************************************************************************
@@ -859,6 +895,78 @@
         `;
     }
 
+    function renderSettingsView() {
+        const body = getBody();
+
+        body.innerHTML = `
+            <div class="tm-toolbar">
+                <strong>API Settings</strong>
+                <button id="tm-settings-back-btn" class="tm-btn tm-btn-secondary">&larr; Back</button>
+            </div>
+
+            <div class="tm-cache-line">
+                Current key: <strong>${esc(maskKey(apiKey))}</strong><br>
+                Item catalog cache: ${itemsCacheTime ? `${esc(formatDateTime(itemsCacheTime))} (${esc(cacheAgeText(itemsCacheTime))})` : 'not cached'}<br>
+                Portfolio cache: ${portfolioCacheTime ? `${esc(formatDateTime(portfolioCacheTime))} (${esc(cacheAgeText(portfolioCacheTime))})` : 'not cached'}
+            </div>
+
+            <div style="margin-bottom: 14px;">
+                <div style="display: flex; margin-bottom: 8px;">
+                    <input type="text" id="tm-settings-key-input" class="tm-input-field" placeholder="Paste new Full Access API key" maxlength="16">
+                    <button id="tm-settings-save-key-btn" class="tm-btn">Save New Key</button>
+                </div>
+                <p class="tm-muted">Saving a new key clears cached data and refreshes immediately.</p>
+            </div>
+
+            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                <button id="tm-settings-refresh-btn" class="tm-btn tm-btn-secondary">Force refresh now</button>
+                <button id="tm-settings-clear-catalog-btn" class="tm-btn tm-btn-secondary">Clear item catalog cache</button>
+                <button id="tm-settings-clear-portfolio-btn" class="tm-btn tm-btn-secondary">Clear portfolio cache</button>
+                <button id="tm-settings-remove-key-btn" class="tm-btn tm-btn-secondary" style="color:#b33;border-color:#e3b3b3;">Remove saved API key</button>
+            </div>
+        `;
+
+        document.getElementById('tm-settings-back-btn').addEventListener('click', () => {
+            processMarketSummary({ forceRefresh: false });
+        });
+
+        document.getElementById('tm-settings-save-key-btn').addEventListener('click', () => {
+            const value = document.getElementById('tm-settings-key-input').value.trim();
+
+            if (!isValidApiKey(value)) {
+                alert('Please enter a valid 16-character Torn API key.');
+                return;
+            }
+
+            saveApiKey(value);
+            clearItemsCache();
+            clearPortfolioCache();
+            processMarketSummary({ forceRefresh: true });
+        });
+
+        document.getElementById('tm-settings-refresh-btn').addEventListener('click', () => {
+            processMarketSummary({ forceRefresh: true });
+        });
+
+        document.getElementById('tm-settings-clear-catalog-btn').addEventListener('click', () => {
+            clearItemsCache();
+            renderSettingsView();
+        });
+
+        document.getElementById('tm-settings-clear-portfolio-btn').addEventListener('click', () => {
+            clearPortfolioCache();
+            renderSettingsView();
+        });
+
+        document.getElementById('tm-settings-remove-key-btn').addEventListener('click', () => {
+            if (!confirm('Remove the saved API key? You will need to re-enter it to use this panel again.')) return;
+            clearStoredApiKey();
+            clearItemsCache();
+            clearPortfolioCache();
+            renderKeyConfigForm();
+        });
+    }
+
     function renderPortfolio(portfolio, options = {}) {
         const body = getBody();
         const isCachedPortfolio = Boolean(options.fromCache);
@@ -1014,7 +1122,10 @@
                     <span>Item Market Portfolio</span>
                     <span class="tm-header-version">v${SCRIPT_VERSION}</span>
                 </div>
-                <span class="tm-close" id="tm-close-overlay">×</span>
+                <div class="tm-header-actions">
+                    <span class="tm-gear" id="tm-settings-btn" title="API settings">&#9881;</span>
+                    <span class="tm-close" id="tm-close-overlay">&times;</span>
+                </div>
             </div>
             <div class="tm-body" id="tm-overlay-body">Initializing...</div>
         `;
@@ -1036,6 +1147,7 @@
         });
 
         document.getElementById('tm-close-overlay').addEventListener('click', closeOverlay);
+        document.getElementById('tm-settings-btn').addEventListener('click', renderSettingsView);
     }
 
     function closeOverlay() {
