@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.1
+// @version      2.9.2
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -10,6 +10,8 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
+// @downloadURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.user.js
+// @updateURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.meta.js
 // ==/UserScript==
 
 (function () {
@@ -36,7 +38,7 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.1';
+    const SCRIPT_VERSION = '2.9.2';
     const TARGET_HASH = '#/viewListing';
 
     const STORAGE = {
@@ -949,10 +951,38 @@
         return null;
     }
 
+    function relocateToggleIntoHeader(toggleWrap) {
+        const headerEl = findItemMarketHeader();
+        if (!headerEl) return false;
+
+        toggleWrap.classList.add('tm-inline-toggle');
+        toggleWrap.style.display = '';
+        headerEl.insertAdjacentElement('afterend', toggleWrap);
+        return true;
+    }
+
+    function watchForHeaderAndRelocate(toggleWrap) {
+        // Torn's SPA may not have rendered the header yet at the moment this
+        // script runs. Rather than giving up after one look (which left the
+        // toggle stuck in the fixed bottom-right fallback position), keep
+        // watching the DOM until the header shows up, then move the toggle
+        // into place.
+        const observer = new MutationObserver(() => {
+            if (relocateToggleIntoHeader(toggleWrap)) {
+                observer.disconnect();
+                monitorViewAndRoute();
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // Safety timeout: stop watching after 15s so this doesn't run
+        // forever if the header never appears (e.g. Torn changed the page).
+        setTimeout(() => observer.disconnect(), 15000);
+    }
+
     function ensureElementsExist() {
         if (document.getElementById('tm-market-fixed-toggle')) return;
-
-        const headerEl = findItemMarketHeader();
 
         const toggleWrap = document.createElement('div');
         toggleWrap.id = 'tm-market-fixed-toggle';
@@ -965,11 +995,15 @@
             <span class="tm-version">v${SCRIPT_VERSION}</span>
         `;
 
+        const headerEl = findItemMarketHeader();
         if (headerEl) {
             toggleWrap.classList.add('tm-inline-toggle');
             headerEl.insertAdjacentElement('afterend', toggleWrap);
         } else {
+            // Fall back to fixed positioning for now, but keep watching for
+            // the header so the toggle can hop into place once it renders.
             document.body.appendChild(toggleWrap);
+            watchForHeaderAndRelocate(toggleWrap);
         }
 
         const overlay = document.createElement('div');
