@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.4
+// @version      4.6.5
 // @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -17,15 +17,32 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.6.4';
+    const VERSION = '4.6.5';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
     const STORAGE_KEY_LAST_EVENT = 'cct_last_event_v4';
+    const STORAGE_KEY_LAST_SEEN_VERSION = 'cct_last_seen_version';
     const STORAGE_KEY_CORRECTION_LOG = 'cct_correction_log_v4';
     const CORRECTION_LOG_MAX = 15;
     const CHAIN_CAP_DISPLAY = 100;
     const OUTCOME_DEDUPE_MS = 3500;
+
+    // Newest entry first. Keys must match VERSION exactly.
+    const CHANGELOG = {
+        '4.6.5': [
+            'Self-correction log now visible in Settings',
+            'Every auto-fix (native badge, counters, toast text, manual) is now logged with old → new value and timestamp',
+        ],
+        '4.6.4': [
+            'Thinner, clearer progress ring',
+            'Version number shown in Settings',
+            'One-time "what\'s new" popup after updates',
+        ],
+        '4.6.3': [
+            'Fixed a jail/bust edge case resetting the chain early',
+        ],
+    };
 
     let chain = clampChain(parseInt(safeGet(STORAGE_KEY_CHAIN, '0'), 10) || 0);
     let isDark = safeGet(STORAGE_KEY_THEME, 'dark') !== 'light';
@@ -140,6 +157,14 @@
 
     function saveTheme() {
         safeSet(STORAGE_KEY_THEME, isDark ? 'dark' : 'light');
+    }
+
+    function getLastSeenVersion() {
+        return safeGet(STORAGE_KEY_LAST_SEEN_VERSION, '');
+    }
+
+    function saveLastSeenVersion(version) {
+        safeSet(STORAGE_KEY_LAST_SEEN_VERSION, version);
     }
 
     function saveLastEvent(event) {
@@ -460,8 +485,8 @@
             #cct-widget {
                 display: inline-flex;
                 align-items: center;
-                gap: 7px;
-                padding: 3px 9px 3px 4px;
+                gap: 9px;
+                padding: 4px 10px 4px 5px;
                 border-radius: 20px;
                 cursor: default;
                 user-select: none;
@@ -476,10 +501,11 @@
             #cct-ring-bg,
             #cct-ring-arc {
                 fill: none;
-                stroke-width: 3;
+                stroke-width: 2;
             }
             #cct-ring-arc {
                 stroke-linecap: round;
+                opacity: 0.82;
                 transition: stroke-dashoffset 0.4s ease, stroke 0.4s ease;
             }
             #cct-ring-label {
@@ -634,6 +660,70 @@
                 cursor: pointer;
                 transition: background 0.15s;
             }
+            #cct-whats-new {
+                white-space: normal;
+                font-size: 11px;
+                line-height: 1.4;
+                opacity: 0.75;
+                border-top: 1px solid;
+                border-color: inherit;
+                padding-top: 8px;
+            }
+            #cct-whats-new-title {
+                font-size: 10px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.07em;
+                opacity: 0.7;
+                margin-bottom: 3px;
+            }
+            #cct-whats-new ul {
+                margin: 0;
+                padding-left: 14px;
+            }
+            #cct-version-footer {
+                white-space: normal;
+                font-size: 10px;
+                opacity: 0.4;
+                text-align: right;
+            }
+            #cct-update-overlay {
+                display: none;
+                position: fixed;
+                inset: 0;
+                z-index: 99999;
+                align-items: center;
+                justify-content: center;
+                background: rgba(0,0,0,0.5);
+            }
+            #cct-update-overlay.cct-open { display: flex; }
+            #cct-update-modal {
+                width: 280px;
+                padding: 16px 18px;
+                border-radius: 10px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                font-size: 13px;
+                line-height: 1.5;
+            }
+            #cct-update-modal h3 {
+                margin: 0 0 8px;
+                font-size: 14px;
+            }
+            #cct-update-modal ul {
+                margin: 0 0 14px;
+                padding-left: 16px;
+                font-size: 12px;
+                opacity: 0.85;
+            }
+            #cct-update-modal button {
+                width: 100%;
+                padding: 7px 0;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 600;
+                cursor: pointer;
+                border: none;
+            }
         `;
         document.head.appendChild(style);
     }
@@ -683,6 +773,22 @@
             btn.onmouseenter = () => { btn.style.opacity = th.gearHover; };
             btn.onmouseleave = () => { btn.style.opacity = th.gearOpacity; };
         });
+
+        const modal = document.querySelector('#cct-update-modal');
+        if (modal) {
+            modal.style.background = th.popoverBg;
+            modal.style.border = `1px solid ${th.popoverBorder}`;
+            modal.style.color = th.popoverColor;
+        }
+
+        const updateOk = document.querySelector('#cct-update-ok');
+        if (updateOk) {
+            updateOk.style.background = th.saveBg;
+            updateOk.style.border = `1px solid ${th.saveBorder}`;
+            updateOk.style.color = th.popoverColor;
+            updateOk.onmouseenter = () => { updateOk.style.background = th.saveBgHover; };
+            updateOk.onmouseleave = () => { updateOk.style.background = th.saveBg; };
+        }
 
         const toggle = document.querySelector('#cct-theme-toggle');
         if (toggle) toggle.innerHTML = isDark ? SUN_ICON : MOON_ICON;
@@ -739,6 +845,16 @@
                     <ul id="cct-log-list"></ul>
                     <button id="cct-log-clear" type="button">Clear log</button>
                 </details>
+                ${renderWhatsNew()}
+                <div id="cct-version-footer">Version ${VERSION}</div>
+            </div>
+            <div id="cct-update-overlay">
+                <div id="cct-update-modal">
+                    <h3>Crime Chain Tracker</h3>
+                    <div>Updated to ${VERSION}</div>
+                    <ul>${(CHANGELOG[VERSION] || []).map((item) => `<li>${escapeHTML(item)}</li>`).join('')}</ul>
+                    <button id="cct-update-ok" type="button">OK</button>
+                </div>
             </div>
         `;
 
@@ -752,8 +868,34 @@
         });
 
         wireSettings(el);
+        wireUpdateNotice(el);
         applyTheme();
         renderCorrectionLog();
+    }
+
+    // Shows the "what's new" modal once per update: only when a version was
+    // previously stored (so fresh installs stay silent) and it differs from
+    // the version currently running. Either way, the stored version is
+    // brought up to date immediately so this never re-fires on the same page.
+    function wireUpdateNotice(el) {
+        const overlay = el.querySelector('#cct-update-overlay');
+        const okBtn = el.querySelector('#cct-update-ok');
+        if (!overlay || !okBtn) return;
+
+        const lastSeen = getLastSeenVersion();
+        const shouldShow = lastSeen && lastSeen !== VERSION && (CHANGELOG[VERSION] || []).length;
+
+        if (shouldShow) overlay.classList.add('cct-open');
+        saveLastSeenVersion(VERSION);
+
+        okBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            overlay.classList.remove('cct-open');
+        });
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.classList.remove('cct-open');
+        });
     }
 
     let outsideClickWired = false;
@@ -772,6 +914,17 @@
             if (!root || !popover) return;
             if (!root.contains(e.target)) popover.classList.remove('cct-open');
         });
+    }
+
+    function renderWhatsNew() {
+        const items = CHANGELOG[VERSION] || [];
+        if (!items.length) return '';
+        return `
+            <div id="cct-whats-new">
+                <div id="cct-whats-new-title">What's new in ${VERSION}</div>
+                <ul>${items.map((item) => `<li>${escapeHTML(item)}</li>`).join('')}</ul>
+            </div>
+        `;
     }
 
     function wireSettings(el) {
