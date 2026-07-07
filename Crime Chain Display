@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.0
+// @version      4.6.3
 // @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -17,20 +17,20 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.6.0';
+    const VERSION = '4.6.3';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
     const STORAGE_KEY_LAST_EVENT = 'cct_last_event_v4';
-    const USE_API = true;
     const CHAIN_CAP_DISPLAY = 100;
     const OUTCOME_DEDUPE_MS = 3500;
 
-    let chain = clampChain(parseInt(GM_getValue(STORAGE_KEY_CHAIN, '0'), 10) || 0);
-    let isDark = GM_getValue(STORAGE_KEY_THEME, 'dark') !== 'light';
+    let chain = clampChain(parseInt(safeGet(STORAGE_KEY_CHAIN, '0'), 10) || 0);
+    let isDark = safeGet(STORAGE_KEY_THEME, 'dark') !== 'light';
     let observer = null;
     let lastEvent = readLastEvent();
     let syncTimer = null;
+    let lastResultCounts = null;
 
     const THEME = {
         dark: {
@@ -79,7 +79,7 @@
 
     const OUTCOME_RULES = [
         { type: 'critical', re: /\bcritical(?:ly)?\b|critical\s+failure|crit\s+fail/i },
-        { type: 'fail', re: /\bfail(?:ed|ure)?\b|\bbusted\b|\bbust\b|unsuccessful/i },
+        { type: 'fail', re: /\bfail(?:ed|ure)?\b|unsuccessful/i },
         { type: 'success', re: /\bsuccess(?:ful|fully)?\b|\bcompleted\b|you\s+managed\s+to/i },
     ];
 
@@ -177,6 +177,10 @@
         const clean = normalizeText(text);
         if (!clean) return null;
 
+        // Jail busts / busted messages are not Crime 2.0 chain outcomes.
+        // They must never halve or reset the crime chain.
+        if (/\b(?:jail\s*)?bust(?:ed|s|ing)?\b/i.test(clean)) return null;
+
         for (const rule of OUTCOME_RULES) {
             if (rule.re.test(clean)) return { type: rule.type, text: clean };
         }
@@ -193,6 +197,8 @@
         const outcome = classifyOutcome(text);
         if (!outcome || isDuplicateOutcome(outcome)) return;
 
+        const oldChain = chain;
+
         if (outcome.type === 'critical') {
             chain = 0;
         } else if (outcome.type === 'fail') {
@@ -202,6 +208,7 @@
         }
 
         chain = clampChain(chain);
+        if (chain !== oldChain) console.log(`[CCT v${VERSION}] text fallback: ${outcome.type} ${oldChain} -> ${chain}`, outcome.text);
         saveChain();
         saveLastEvent({
             signature: `${outcome.type}:${hashText(outcome.text)}`,
@@ -256,15 +263,21 @@
         // holds a short numeric text node (the chain count badge).
         let container = labelNode.parentElement;
         for (let i = 0; i < 5 && container; i++) {
-            const candidates = container.querySelectorAll('*');
-            for (const el of candidates) {
-                if (el.closest('#cct-root')) continue;
-                if (el.children.length > 0) continue; // want leaf nodes
-                const text = (el.textContent || '').trim();
-                if (/^\d{1,4}$/.test(text)) {
-                    return { element: el, value: parseInt(text, 10) };
-                }
+            const candidates = Array.from(container.querySelectorAll('*')).filter((el) => {
+                if (el.closest('#cct-root')) return false;
+                if (el.children.length > 0) return false; // want leaf nodes
+                return /^\d{1,4}$/.test((el.textContent || '').trim());
+            });
+
+            if (candidates.length) {
+                // Prefer a leaf whose own class hints it's the chain value
+                // itself, so a stray unrelated number (energy, level, an id)
+                // in the same container can't be picked up by mistake.
+                const hinted = candidates.find((el) => /chain|value|count|badge/i.test(el.className || ''));
+                const chosen = hinted || candidates[0];
+                return { element: chosen, value: parseInt(chosen.textContent.trim(), 10) };
             }
+
             container = container.parentElement;
         }
         return null;
@@ -274,10 +287,85 @@
         const badge = findNativeChainBadge();
         if (!badge) return false;
         if (badge.value !== chain) {
+            const oldChain = chain;
             chain = clampChain(badge.value);
+            console.log(`[CCT v${VERSION}] native badge: ${oldChain} -> ${chain}`);
             saveChain();
             render(true);
         }
+        return true;
+    }
+
+    function parseResultCount(value) {
+        const n = parseInt(String(value || '').replace(/,/g, ''), 10);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    function readResultCounts() {
+        const root = findCrimesApp();
+        if (!root) return null;
+
+        const countsRoot = root.querySelector('[class*="resultCounts" i]');
+        if (!countsRoot) return null;
+
+        const successEl = countsRoot.querySelector('[class*="successes" i] span, [class*="successes" i]');
+        const failEl = countsRoot.querySelector('[class*="fails" i] span, [class*="fails" i]');
+        const criticalEl = countsRoot.querySelector('[class*="criticalFails" i] span, [class*="criticalFails" i], [class*="critical-fails" i] span, [class*="critical-fails" i]');
+
+        const successes = parseResultCount(successEl && successEl.textContent);
+        const fails = parseResultCount(failEl && failEl.textContent);
+        const criticalFails = parseResultCount(criticalEl && criticalEl.textContent);
+
+        if (successes === null || fails === null || criticalFails === null) return null;
+        return { successes, fails, criticalFails };
+    }
+
+    function applyResultCountDeltaFallback() {
+        const current = readResultCounts();
+        if (!current) return false;
+
+        if (!lastResultCounts) {
+            lastResultCounts = current;
+            return true;
+        }
+
+        const dSuccess = current.successes - lastResultCounts.successes;
+        const dFail = current.fails - lastResultCounts.fails;
+        const dCritical = current.criticalFails - lastResultCounts.criticalFails;
+
+        lastResultCounts = current;
+
+        // Torn can rerender/reset visible counters during navigation or refresh.
+        // Negative deltas mean "reseed baseline", not "change the chain".
+        if (dSuccess < 0 || dFail < 0 || dCritical < 0) return true;
+        if (dSuccess === 0 && dFail === 0 && dCritical === 0) return true;
+
+        // Same chain math as Torn: success +1, fail halves and floors, critical resets.
+        // If a batched DOM update contains several deltas, use Kaeru's conservative order:
+        // critical first, then fails, then successes.
+        // NOTE: this is an approximation. If multiple deltas land in one batch, the true
+        // result depends on the exact order the events actually happened in (e.g. a fail
+        // between two successes gives a different final number than two successes then a
+        // fail). This path only runs as a fallback when Torn's own chain badge can't be
+        // found, so it should be rare; syncFromNativeBadge() is always preferred when available.
+        const oldChain = chain;
+
+        if (dCritical > 0) {
+            chain = 0;
+        } else {
+            if (dFail > 0) chain = Math.floor(chain / Math.pow(2, dFail));
+            if (dSuccess > 0) chain += dSuccess;
+        }
+
+        chain = clampChain(chain);
+        if (chain !== oldChain) console.log(`[CCT v${VERSION}] result counters: ${oldChain} -> ${chain}`, { dSuccess, dFail, dCritical, current });
+        saveChain();
+        saveLastEvent({
+            signature: `counts:${current.successes}:${current.fails}:${current.criticalFails}`,
+            time: Date.now(),
+            type: 'counts',
+        });
+        render(true);
         return true;
     }
 
@@ -508,7 +596,6 @@
                 </div>
             </div>
             <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? SUN_ICON : MOON_ICON}</button>
-            ${USE_API ? `
             <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">${GEAR_ICON}</button>
             <div id="cct-api-popover">
                 <label>Minimum Access API Key</label>
@@ -522,8 +609,8 @@
                     <input id="cct-chain-input" type="number" min="0" step="1" value="${chain}">
                     <button id="cct-chain-save" type="button">Set Chain</button>
                 </div>
-                <span id="cct-api-hint">${key ? 'API key saved' : 'Offline session tracking'}</span>
-            </div>` : ''}
+                <span id="cct-api-hint">${key ? 'Key saved (used only to validate against Torn, not to sync the chain)' : 'Offline session tracking'}</span>
+            </div>
         `;
 
         anchor.appendChild(el);
@@ -535,8 +622,26 @@
             applyTheme();
         });
 
-        if (USE_API) wireSettings(el);
+        wireSettings(el);
         applyTheme();
+    }
+
+    let outsideClickWired = false;
+
+    function wireOutsideClickOnce() {
+        if (outsideClickWired) return;
+        outsideClickWired = true;
+
+        // Single delegated listener for the lifetime of the page. Looks up the
+        // *current* #cct-root and #cct-api-popover at click time instead of
+        // closing over a specific widget instance, so rebuilding the widget
+        // after SPA navigation never accumulates extra document listeners.
+        document.addEventListener('click', (e) => {
+            const root = document.querySelector('#cct-root');
+            const popover = document.querySelector('#cct-api-popover');
+            if (!root || !popover) return;
+            if (!root.contains(e.target)) popover.classList.remove('cct-open');
+        });
     }
 
     function wireSettings(el) {
@@ -548,9 +653,7 @@
             popover.classList.toggle('cct-open');
         });
 
-        document.addEventListener('click', (e) => {
-            if (!el.contains(e.target)) popover.classList.remove('cct-open');
-        });
+        wireOutsideClickOnce();
 
         el.querySelector('#cct-api-save').addEventListener('click', async () => {
             const input = el.querySelector('#cct-api-input');
@@ -573,8 +676,10 @@
 
         el.querySelector('#cct-chain-save').addEventListener('click', () => {
             const input = el.querySelector('#cct-chain-input');
+            const oldChain = chain;
             chain = clampChain(input.value);
             input.value = chain;
+            console.log(`[CCT v${VERSION}] manual correction: ${oldChain} -> ${chain}`);
             saveChain();
             render(true);
         });
@@ -648,7 +753,7 @@
 
             const synced = syncFromNativeBadge();
 
-            if (!synced) {
+            if (!synced && !applyResultCountDeltaFallback()) {
                 for (const mutation of mutations) {
                     for (const node of mutation.addedNodes) inspectPossibleOutcomeNode(node);
                     if (mutation.type === 'characterData') inspectPossibleOutcomeNode(mutation.target);
@@ -659,6 +764,9 @@
         observer.observe(root, { childList: true, characterData: true, subtree: true });
     }
 
+    // Validation-only: confirms the key works against Torn's API. The chain itself is
+    // always tracked from the DOM (native badge / result-count deltas), never from this
+    // response, so nothing here needs to parse or store the returned crimes data.
     async function verifyPublicAPI(key) {
         const url = `https://api.torn.com/user/?selections=crimes&key=${encodeURIComponent(key)}`;
         const res = await fetch(url);
@@ -672,7 +780,7 @@
         syncTimer = setTimeout(() => {
             renderWidget();
             startDOMObserver();
-            syncFromNativeBadge();
+            if (!syncFromNativeBadge()) applyResultCountDeltaFallback();
             render(false);
         }, 100);
     }
