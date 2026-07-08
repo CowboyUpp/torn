@@ -609,6 +609,56 @@
                 font-size: 10px;
                 opacity: 0.55;
             }
+            .cct-manual-label-row {
+                display: flex;
+                align-items: center;
+            }
+            .cct-info-icon {
+                position: relative;
+                display: inline-block;
+                margin-left: 3px;
+                font-size: 10px;
+                font-weight: 400;
+                text-transform: none;
+                letter-spacing: normal;
+                cursor: help;
+                outline: none;
+            }
+            .cct-info-glyph {
+                opacity: 0.55;
+            }
+            .cct-info-icon:hover .cct-info-glyph,
+            .cct-info-icon:focus .cct-info-glyph {
+                opacity: 1;
+            }
+            .cct-info-icon .cct-tooltip {
+                display: none;
+                position: absolute;
+                bottom: calc(100% + 7px);
+                left: 50%;
+                transform: translateX(-50%);
+                z-index: 10001;
+                width: 190px;
+                padding: 8px 10px;
+                /* Fixed, fully-opaque surface deliberately independent of the
+                   dark/light theme vars — guarantees readable contrast either way
+                   instead of inheriting a color that can wash out against the
+                   popover background. */
+                background-color: #0a0a0a;
+                opacity: 1;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 500;
+                line-height: 1.45;
+                white-space: normal;
+                text-transform: none;
+                letter-spacing: normal;
+                border-radius: 5px;
+            }
+            .cct-info-icon:hover .cct-tooltip,
+            .cct-info-icon:focus .cct-tooltip {
+                display: block;
+            }
             #cct-log-details {
                 margin-top: 2px;
                 border-top: 1px solid rgba(128,128,128,0.25);
@@ -834,7 +884,7 @@
                         value="${escapeHTML(key)}" spellcheck="false" autocomplete="off">
                     <button id="cct-api-save" type="button">Save Key</button>
                 </div>
-                <label>Manual correction</label>
+                <div class="cct-manual-label-row"><label>Manual correction</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Best to sync with torn.report at startup.</span></span></div>
                 <div id="cct-manual-row">
                     <input id="cct-chain-input" type="number" min="0" step="1" value="${chain}">
                     <button id="cct-chain-save" type="button">Set Chain</button>
