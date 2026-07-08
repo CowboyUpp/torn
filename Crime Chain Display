@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.6
+// @version      4.6.7
 // @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -17,7 +17,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.6.6';
+    const VERSION = '4.6.7';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -30,6 +30,10 @@
 
     // Newest entry first. Keys must match VERSION exactly.
     const CHANGELOG = {
+        '4.6.7': [
+            'Critical-fail chain resets from the result-counter fallback now require confirmation from two consecutive readings',
+            'Fixes a single noisy DOM read (e.g. during a race-crash hospitalization interrupt) being able to wrongly zero the chain',
+        ],
         '4.6.6': [
             'Fixed a bug where using an item (e.g. nerve refill) or any brief page reload could falsely reset the chain to 0',
         ],
@@ -53,6 +57,14 @@
     let lastEvent = readLastEvent();
     let syncTimer = null;
     let lastResultCounts = null;
+    // Set the cycle a critical-fail delta is first spotted by the counts fallback.
+    // Not applied to the chain until a second consecutive reading confirms it —
+    // see applyResultCountDeltaFallback().
+    let pendingCriticalConfirm = null;
+    // The criticalFails count already "priced in" to the current chain value.
+    // Tracked separately from lastResultCounts so that merely seeing a suspicious
+    // reading doesn't itself shift the baseline used to detect it.
+    let confirmedCriticalFails = null;
 
     const THEME = {
         dark: {
@@ -387,6 +399,7 @@
     function syncFromNativeBadge() {
         const badge = findNativeChainBadge();
         if (!badge) return false;
+        pendingCriticalConfirm = null;
         if (badge.value !== chain) {
             const oldChain = chain;
             chain = clampChain(badge.value);
@@ -427,6 +440,7 @@
 
         if (!lastResultCounts) {
             lastResultCounts = current;
+            confirmedCriticalFails = current.criticalFails;
             return true;
         }
 
@@ -445,41 +459,61 @@
 
         const dSuccess = current.successes - lastResultCounts.successes;
         const dFail = current.fails - lastResultCounts.fails;
-        const dCritical = current.criticalFails - lastResultCounts.criticalFails;
-
         lastResultCounts = current;
 
-        // Torn can rerender/reset visible counters during navigation or refresh.
-        // Negative deltas mean "reseed baseline", not "change the chain".
-        if (dSuccess < 0 || dFail < 0 || dCritical < 0) return true;
-        if (dSuccess === 0 && dFail === 0 && dCritical === 0) return true;
+        // Critical-fail confirmation is tracked against its own baseline
+        // (confirmedCriticalFails), independent from lastResultCounts, so that the
+        // act of merely *seeing* a suspicious reading doesn't itself shift the
+        // goalposts used to detect it again on the next cycle.
+        const criticalDelta = current.criticalFails - confirmedCriticalFails;
 
-        // Same chain math as Torn: success +1, fail halves and floors, critical resets.
-        // If a batched DOM update contains several deltas, use Kaeru's conservative order:
-        // critical first, then fails, then successes.
-        // NOTE: this is an approximation. If multiple deltas land in one batch, the true
-        // result depends on the exact order the events actually happened in (e.g. a fail
-        // between two successes gives a different final number than two successes then a
-        // fail). This path only runs as a fallback when Torn's own chain badge can't be
-        // found, so it should be rare; syncFromNativeBadge() is always preferred when available.
         const oldChain = chain;
 
-        if (dCritical > 0) {
-            chain = 0;
+        if (criticalDelta < 0) {
+            // Counter went backwards (page reload/reseed) — trust the new lower
+            // number as the fresh baseline, don't touch the chain.
+            confirmedCriticalFails = current.criticalFails;
+            pendingCriticalConfirm = null;
+        } else if (criticalDelta > 0) {
+            // A critical fail wipes the whole chain — the one irreversible action this
+            // script can take — so a single noisy reading isn't enough to trust it. This
+            // was seen firsthand: a race-crash hospitalization interrupt on the crimes
+            // page produced one garbled reading that looked like an extra critical fail
+            // and wiped a legitimate 61-chain. Require the *next* reading to still show
+            // criticalFails at this same elevated value before actually applying the
+            // reset; a transient/corrupted render won't usually repeat itself twice in a row.
+            if (pendingCriticalConfirm && pendingCriticalConfirm.criticalFails === current.criticalFails) {
+                chain = 0;
+                confirmedCriticalFails = current.criticalFails;
+                pendingCriticalConfirm = null;
+            } else {
+                pendingCriticalConfirm = { detectedAt: Date.now(), criticalFails: current.criticalFails };
+                // Fall through — success/fail movement this cycle still applies below.
+                // Only the critical-fail reset itself is deferred pending confirmation.
+            }
         } else {
+            pendingCriticalConfirm = null;
+        }
+
+        // Negative success/fail deltas mean a reseed (same rendering-glitch cause as
+        // the blank-frame case above, just partial) — don't apply chain math for them,
+        // but a confirmed critical reset above still stands.
+        if (dSuccess >= 0 && dFail >= 0) {
             if (dFail > 0) chain = Math.floor(chain / Math.pow(2, dFail));
             if (dSuccess > 0) chain += dSuccess;
         }
 
         chain = clampChain(chain);
-        if (chain !== oldChain) logCorrection('counts', oldChain, chain, { dSuccess, dFail, dCritical, current });
-        saveChain();
-        saveLastEvent({
-            signature: `counts:${current.successes}:${current.fails}:${current.criticalFails}`,
-            time: Date.now(),
-            type: 'counts',
-        });
-        render(true);
+        if (chain !== oldChain) {
+            logCorrection('counts', oldChain, chain, { dSuccess, dFail, criticalDelta, current });
+            saveChain();
+            saveLastEvent({
+                signature: `counts:${current.successes}:${current.fails}:${current.criticalFails}`,
+                time: Date.now(),
+                type: 'counts',
+            });
+            render(true);
+        }
         return true;
     }
 
