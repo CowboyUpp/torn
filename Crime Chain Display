@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.5
+// @version      4.6.6
 // @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -17,7 +17,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.6.5';
+    const VERSION = '4.6.6';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -30,6 +30,9 @@
 
     // Newest entry first. Keys must match VERSION exactly.
     const CHANGELOG = {
+        '4.6.6': [
+            'Fixed a bug where using an item (e.g. nerve refill) or any brief page reload could falsely reset the chain to 0',
+        ],
         '4.6.5': [
             'Self-correction log now visible in Settings',
             'Every auto-fix (native badge, counters, toast text, manual) is now logged with old → new value and timestamp',
@@ -426,6 +429,19 @@
             lastResultCounts = current;
             return true;
         }
+
+        // Torn's crime panel can render a blank 0/0/0 frame for a moment while it
+        // reloads — this happens after using an item (e.g. a nerve refill), navigating,
+        // or a plain refresh, not just chain-relevant events. If we let that zero
+        // become the new baseline, the *next* real reading (which is often unchanged
+        // from before the reload) looks like a huge jump up from zero — including in
+        // criticalFails — and gets misread as a fresh critical failure, wrongly
+        // resetting the chain. So: if we were previously tracking real counts and this
+        // reading is all-zero, treat it as a render artifact and keep the old baseline
+        // rather than reseeding to zero.
+        const wasTrackingRealCounts = lastResultCounts.successes > 0 || lastResultCounts.fails > 0 || lastResultCounts.criticalFails > 0;
+        const isBlankFrame = current.successes === 0 && current.fails === 0 && current.criticalFails === 0;
+        if (wasTrackingRealCounts && isBlankFrame) return true;
 
         const dSuccess = current.successes - lastResultCounts.successes;
         const dFail = current.fails - lastResultCounts.fails;
