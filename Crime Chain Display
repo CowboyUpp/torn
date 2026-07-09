@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.7
+// @version      4.6.14
 // @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -17,39 +17,29 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.6.7';
+    const VERSION = '4.6.14';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
-    const STORAGE_KEY_APIKEY = 'cct_apikey_v4';
+    const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
     const STORAGE_KEY_LAST_EVENT = 'cct_last_event_v4';
-    const STORAGE_KEY_LAST_SEEN_VERSION = 'cct_last_seen_version';
     const STORAGE_KEY_CORRECTION_LOG = 'cct_correction_log_v4';
+    const STORAGE_KEY_DIAGNOSTICS = 'cct_diagnostics_v4';
     const CORRECTION_LOG_MAX = 15;
+    const DIAGNOSTIC_LOG_MAX = 10;
     const CHAIN_CAP_DISPLAY = 100;
     const OUTCOME_DEDUPE_MS = 3500;
+    const MAX_REASONABLE_COUNTER_DELTA = 10;
 
-    // Newest entry first. Keys must match VERSION exactly.
-    const CHANGELOG = {
-        '4.6.7': [
-            'Critical-fail chain resets from the result-counter fallback now require confirmation from two consecutive readings',
-            'Fixes a single noisy DOM read (e.g. during a race-crash hospitalization interrupt) being able to wrongly zero the chain',
-        ],
-        '4.6.6': [
-            'Fixed a bug where using an item (e.g. nerve refill) or any brief page reload could falsely reset the chain to 0',
-        ],
-        '4.6.5': [
-            'Self-correction log now visible in Settings',
-            'Every auto-fix (native badge, counters, toast text, manual) is now logged with old → new value and timestamp',
-        ],
-        '4.6.4': [
-            'Thinner, clearer progress ring',
-            'Version number shown in Settings',
-            'One-time "what\'s new" popup after updates',
-        ],
-        '4.6.3': [
-            'Fixed a jail/bust edge case resetting the chain early',
-        ],
-    };
+    // Verified against real API responses, not assumed. See torn/logtypes:
+    // 9010 = Crime success, 9150 = Crime fail (new). Critical fails fragment across
+    // several IDs depending on side effect — a jail-outcome crit logs ONLY as 9155,
+    // NOT the generic 9154, confirmed by cross-checking a real critical fail against
+    // Torn's own in-game log page down to the exact second. Querying just 9154 alone
+    // silently misses these and produces a chain that reads too high.
+    const LOG_ID_SUCCESS = 9010;
+    const LOG_ID_FAIL = 9150;
+    const LOG_IDS_CRITICAL = [9154, 9155, 9158, 9160, 9163, 9165, 9190, 9191];
+    const LOG_IDS_ALL = [LOG_ID_SUCCESS, LOG_ID_FAIL, ...LOG_IDS_CRITICAL];
 
     let chain = clampChain(parseInt(safeGet(STORAGE_KEY_CHAIN, '0'), 10) || 0);
     let isDark = safeGet(STORAGE_KEY_THEME, 'dark') !== 'light';
@@ -160,26 +150,18 @@
         safeSet(STORAGE_KEY_CHAIN, String(chain));
     }
 
-    function getApiKey() {
-        return safeGet(STORAGE_KEY_APIKEY, '');
+    function getLogApiKey() {
+        return safeGet(STORAGE_KEY_LOG_APIKEY, '');
     }
 
-    function saveApiKey(key) {
+    function saveLogApiKey(key) {
         const sanitized = String(key || '').replace(/\s+/g, '');
-        safeSet(STORAGE_KEY_APIKEY, sanitized);
+        safeSet(STORAGE_KEY_LOG_APIKEY, sanitized);
         return sanitized;
     }
 
     function saveTheme() {
         safeSet(STORAGE_KEY_THEME, isDark ? 'dark' : 'light');
-    }
-
-    function getLastSeenVersion() {
-        return safeGet(STORAGE_KEY_LAST_SEEN_VERSION, '');
-    }
-
-    function saveLastSeenVersion(version) {
-        safeSet(STORAGE_KEY_LAST_SEEN_VERSION, version);
     }
 
     function saveLastEvent(event) {
@@ -192,6 +174,7 @@
         counts: 'Result counter delta',
         text: 'Toast text fallback',
         manual: 'Manual correction',
+        log: 'Log-based sync',
     };
 
     function readCorrectionLog() {
@@ -207,11 +190,45 @@
         safeSet(STORAGE_KEY_CORRECTION_LOG, JSON.stringify(entries));
     }
 
+    function readDiagnostics() {
+        try {
+            const parsed = JSON.parse(safeGet(STORAGE_KEY_DIAGNOSTICS, '[]'));
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
+    function saveDiagnostics(entries) {
+        safeSet(STORAGE_KEY_DIAGNOSTICS, JSON.stringify(entries));
+        try {
+            localStorage.setItem(STORAGE_KEY_DIAGNOSTICS, JSON.stringify(entries));
+        } catch (_) {
+            // Best-effort console-readable mirror; GM storage above is canonical.
+        }
+    }
+
+    function logDiagnostic(type, detail) {
+        const entry = {
+            time: Date.now(),
+            type,
+            url: location.href,
+            visibilityState: document.visibilityState,
+            readyState: document.readyState,
+            detail,
+        };
+        const entries = readDiagnostics();
+        entries.unshift(entry);
+        while (entries.length > DIAGNOSTIC_LOG_MAX) entries.pop();
+        saveDiagnostics(entries);
+        console.log(`[CCT v${VERSION}] diagnostic: ${type}`, entry);
+    }
+
     // Central place every self-correcting code path funnels through: it writes
     // the console line (kept for debugging) AND persists a small ring buffer
     // that the settings popover reads to show a human-readable audit trail.
-    function logCorrection(source, oldChain, newChain, detail) {
-        console.log(`[CCT v${VERSION}] ${source}: ${oldChain} -> ${newChain}`, detail || '');
+    function logCorrection(source, oldChain, newChain, detail, reason) {
+        console.log(`[CCT v${VERSION}] ${source}: ${oldChain} -> ${newChain}`, reason || '', detail || '');
 
         const entries = readCorrectionLog();
         entries.unshift({
@@ -219,6 +236,7 @@
             source,
             oldChain,
             newChain,
+            reason: reason || '',
         });
         while (entries.length > CORRECTION_LOG_MAX) entries.pop();
         saveCorrectionLog(entries);
@@ -250,9 +268,10 @@
         list.innerHTML = entries.map((entry) => {
             const label = CORRECTION_SOURCE_LABELS[entry.source] || entry.source;
             const arrow = entry.newChain > entry.oldChain ? '📈' : entry.newChain < entry.oldChain ? '📉' : '↔️';
+            const reasonLine = entry.reason ? `<div class="cct-log-reason">${escapeHTML(entry.reason)}</div>` : '';
             return `<li>
                 <span class="cct-log-arrow">${arrow}</span>
-                <span class="cct-log-detail">${escapeHTML(label)}: <strong>${entry.oldChain} → ${entry.newChain}</strong></span>
+                <span class="cct-log-detail">${escapeHTML(label)}: <strong>${entry.oldChain} → ${entry.newChain}</strong>${reasonLine}</span>
                 <span class="cct-log-time">${relativeTime(entry.time)}</span>
             </li>`;
         }).join('');
@@ -321,7 +340,13 @@
         }
 
         chain = clampChain(chain);
-        if (chain !== oldChain) logCorrection('text', oldChain, chain, outcome.text);
+        if (chain !== oldChain) {
+            const reasonMap = { critical: 'Detected critical fail message', fail: 'Detected fail message', success: 'Detected success message' };
+            logCorrection('text', oldChain, chain, outcome.text, reasonMap[outcome.type] || 'Detected outcome message');
+            lastResultCounts = null;
+            confirmedCriticalFails = null;
+            pendingCriticalConfirm = null;
+        }
         saveChain();
         saveLastEvent({
             signature: `${outcome.type}:${hashText(outcome.text)}`,
@@ -365,6 +390,7 @@
         let node;
         while ((node = walker.nextNode())) {
             const txt = node.nodeValue;
+            if (node.parentElement && node.parentElement.closest('#cct-root')) continue;
             if (txt && /crime\s*chain/i.test(txt)) {
                 labelNode = node;
                 break;
@@ -403,7 +429,7 @@
         if (badge.value !== chain) {
             const oldChain = chain;
             chain = clampChain(badge.value);
-            logCorrection('native', oldChain, chain);
+            logCorrection('native', oldChain, chain, null, `Torn's own chain badge read ${badge.value}`);
             saveChain();
             render(true);
         }
@@ -413,6 +439,48 @@
     function parseResultCount(value) {
         const n = parseInt(String(value || '').replace(/,/g, ''), 10);
         return Number.isFinite(n) ? n : null;
+    }
+
+    function describeElement(el) {
+        if (!el) return null;
+        const parts = [];
+        let current = el;
+        for (let i = 0; i < 4 && current && current.nodeType === Node.ELEMENT_NODE; i++) {
+            let part = current.tagName.toLowerCase();
+            if (current.id) part += `#${current.id}`;
+            if (current.className && typeof current.className === 'string') {
+                part += `.${current.className.trim().replace(/\s+/g, '.').slice(0, 120)}`;
+            }
+            parts.unshift(part);
+            current = current.parentElement;
+        }
+        return {
+            path: parts.join(' > '),
+            text: normalizeText(el.textContent).slice(0, 250),
+            className: String(el.className || '').slice(0, 250),
+        };
+    }
+
+    function summarizeMutations(mutations) {
+        if (!mutations) return null;
+        const summary = {
+            count: mutations.length,
+            childList: 0,
+            characterData: 0,
+            attributes: 0,
+            addedNodes: [],
+            targets: [],
+        };
+        for (const mutation of mutations) {
+            summary[mutation.type] = (summary[mutation.type] || 0) + 1;
+            if (summary.targets.length < 6) summary.targets.push(describeElement(mutation.target));
+            for (const node of Array.from(mutation.addedNodes || [])) {
+                if (summary.addedNodes.length >= 6) break;
+                const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+                summary.addedNodes.push(describeElement(el));
+            }
+        }
+        return summary;
     }
 
     function readResultCounts() {
@@ -431,10 +499,29 @@
         const criticalFails = parseResultCount(criticalEl && criticalEl.textContent);
 
         if (successes === null || fails === null || criticalFails === null) return null;
-        return { successes, fails, criticalFails };
+        return {
+            successes,
+            fails,
+            criticalFails,
+            debug: {
+                countsRoot: describeElement(countsRoot),
+                successEl: describeElement(successEl),
+                failEl: describeElement(failEl),
+                criticalEl: describeElement(criticalEl),
+            },
+        };
     }
 
-    function applyResultCountDeltaFallback() {
+    function buildCountsReason({ dSuccess, dFail, criticalConfirmedReset }) {
+        if (criticalConfirmedReset) return 'Critical fail confirmed (2 consecutive reads)';
+
+        const parts = [];
+        if (dSuccess > 0) parts.push(`+${dSuccess} success${dSuccess === 1 ? '' : 'es'}`);
+        if (dFail > 0) parts.push(`${dFail} fail${dFail === 1 ? '' : 's'}`);
+        return parts.length ? parts.join(', ') : 'Counter change';
+    }
+
+    function applyResultCountDeltaFallback(context = {}) {
         const current = readResultCounts();
         if (!current) return false;
 
@@ -459,6 +546,32 @@
 
         const dSuccess = current.successes - lastResultCounts.successes;
         const dFail = current.fails - lastResultCounts.fails;
+
+        // If Torn rehydrates the crimes panel, these visible counters can jump from
+        // the short-lived session counts we were tracking to larger cumulative totals.
+        // Treat impossible positive jumps as a fresh baseline, not thousands of new
+        // crimes. Real-time DOM fallback should only ever see small bursts.
+        const isImplausiblePositiveJump =
+            dSuccess > MAX_REASONABLE_COUNTER_DELTA ||
+            dFail > MAX_REASONABLE_COUNTER_DELTA;
+
+        if (isImplausiblePositiveJump) {
+            logDiagnostic('implausible-counter-jump', {
+                context: {
+                    source: context.source || 'unknown',
+                    mutations: summarizeMutations(context.mutations),
+                },
+                previous: lastResultCounts,
+                current,
+                dSuccess,
+                dFail,
+            });
+            lastResultCounts = current;
+            confirmedCriticalFails = current.criticalFails;
+            pendingCriticalConfirm = null;
+            return true;
+        }
+
         lastResultCounts = current;
 
         // Critical-fail confirmation is tracked against its own baseline
@@ -468,6 +581,7 @@
         const criticalDelta = current.criticalFails - confirmedCriticalFails;
 
         const oldChain = chain;
+        let criticalConfirmedReset = false;
 
         if (criticalDelta < 0) {
             // Counter went backwards (page reload/reseed) — trust the new lower
@@ -484,6 +598,7 @@
             // reset; a transient/corrupted render won't usually repeat itself twice in a row.
             if (pendingCriticalConfirm && pendingCriticalConfirm.criticalFails === current.criticalFails) {
                 chain = 0;
+                criticalConfirmedReset = true;
                 confirmedCriticalFails = current.criticalFails;
                 pendingCriticalConfirm = null;
             } else {
@@ -505,7 +620,8 @@
 
         chain = clampChain(chain);
         if (chain !== oldChain) {
-            logCorrection('counts', oldChain, chain, { dSuccess, dFail, criticalDelta, current });
+            const reason = buildCountsReason({ dSuccess, dFail, criticalConfirmedReset });
+            logCorrection('counts', oldChain, chain, { dSuccess, dFail, criticalDelta, current }, reason);
             saveChain();
             saveLastEvent({
                 signature: `counts:${current.successes}:${current.fails}:${current.criticalFails}`,
@@ -608,7 +724,7 @@
                 justify-content: center;
             }
             .cct-icon-btn svg { display: block; }
-            #cct-api-popover {
+            #cct-settings-popover {
                 display: none;
                 position: absolute;
                 top: calc(100% + 6px);
@@ -622,8 +738,8 @@
                 gap: 8px;
                 font-size: 12px;
             }
-            #cct-api-popover.cct-open { display: flex; }
-            #cct-api-popover label {
+            #cct-settings-popover.cct-open { display: flex; }
+            #cct-settings-popover label {
                 font-size: 10px;
                 font-weight: 600;
                 text-transform: uppercase;
@@ -631,22 +747,18 @@
                 opacity: 0.5;
                 color: inherit;
             }
-            #cct-api-row,
             #cct-manual-row {
                 display: flex;
                 align-items: center;
                 gap: 6px;
             }
-            #cct-api-input,
             #cct-chain-input {
                 padding: 4px 7px;
                 font-size: 12px;
                 border-radius: 5px;
                 outline: none;
             }
-            #cct-api-input { width: 170px; }
             #cct-chain-input { width: 54px; }
-            #cct-api-save,
             #cct-chain-save {
                 padding: 4px 9px;
                 font-size: 11px;
@@ -655,9 +767,51 @@
                 transition: background 0.15s;
                 white-space: nowrap;
             }
-            #cct-api-hint {
+            #cct-sync-row {
+                margin-top: 2px;
+            }
+            #cct-sync-row label {
+                display: block;
+                margin-bottom: 6px;
+            }
+            #cct-log-key-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            #cct-log-key-input {
+                width: 170px;
+                padding: 4px 7px;
+                font-size: 12px;
+                border-radius: 5px;
+                outline: none;
+            }
+            #cct-log-key-save,
+            #cct-log-sync-now,
+            #cct-create-log-key-btn {
+                padding: 4px 9px;
+                font-size: 11px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: background 0.15s;
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                white-space: nowrap;
+            }
+            #cct-log-sync-btn-row {
+                display: flex;
+                gap: 6px;
+                flex-wrap: wrap;
+            }
+            #cct-log-sync-hint {
+                display: block;
+                margin-top: 6px;
                 font-size: 10px;
                 opacity: 0.55;
+                white-space: normal;
+                line-height: 1.4;
             }
             .cct-manual-label-row {
                 display: flex;
@@ -747,6 +901,11 @@
                 font-style: italic;
             }
             .cct-log-detail { flex: 1; }
+            .cct-log-reason {
+                font-size: 10px;
+                opacity: 0.6;
+                margin-top: 1px;
+            }
             .cct-log-time {
                 font-size: 10px;
                 opacity: 0.5;
@@ -760,69 +919,11 @@
                 cursor: pointer;
                 transition: background 0.15s;
             }
-            #cct-whats-new {
-                white-space: normal;
-                font-size: 11px;
-                line-height: 1.4;
-                opacity: 0.75;
-                border-top: 1px solid;
-                border-color: inherit;
-                padding-top: 8px;
-            }
-            #cct-whats-new-title {
-                font-size: 10px;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.07em;
-                opacity: 0.7;
-                margin-bottom: 3px;
-            }
-            #cct-whats-new ul {
-                margin: 0;
-                padding-left: 14px;
-            }
             #cct-version-footer {
                 white-space: normal;
                 font-size: 10px;
                 opacity: 0.4;
                 text-align: right;
-            }
-            #cct-update-overlay {
-                display: none;
-                position: fixed;
-                inset: 0;
-                z-index: 99999;
-                align-items: center;
-                justify-content: center;
-                background: rgba(0,0,0,0.5);
-            }
-            #cct-update-overlay.cct-open { display: flex; }
-            #cct-update-modal {
-                width: 280px;
-                padding: 16px 18px;
-                border-radius: 10px;
-                box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-                font-size: 13px;
-                line-height: 1.5;
-            }
-            #cct-update-modal h3 {
-                margin: 0 0 8px;
-                font-size: 14px;
-            }
-            #cct-update-modal ul {
-                margin: 0 0 14px;
-                padding-left: 16px;
-                font-size: 12px;
-                opacity: 0.85;
-            }
-            #cct-update-modal button {
-                width: 100%;
-                padding: 7px 0;
-                border-radius: 6px;
-                font-size: 12px;
-                font-weight: 600;
-                cursor: pointer;
-                border: none;
             }
         `;
         document.head.appendChild(style);
@@ -845,14 +946,14 @@
         const status = document.querySelector('#cct-status');
         if (status) status.style.opacity = th.statusOpacity;
 
-        const popover = document.querySelector('#cct-api-popover');
+        const popover = document.querySelector('#cct-settings-popover');
         if (popover) {
             popover.style.background = th.popoverBg;
             popover.style.border = `1px solid ${th.popoverBorder}`;
             popover.style.color = th.popoverColor;
         }
 
-        document.querySelectorAll('#cct-api-input,#cct-chain-input').forEach((input) => {
+        document.querySelectorAll('#cct-chain-input,#cct-log-key-input').forEach((input) => {
             input.style.background = th.inputBg;
             input.style.border = `1px solid ${th.inputBorder}`;
             input.style.color = th.popoverColor;
@@ -860,7 +961,7 @@
             input.onblur = () => { input.style.borderColor = th.inputBorder; };
         });
 
-        document.querySelectorAll('#cct-api-save,#cct-chain-save,#cct-log-clear').forEach((btn) => {
+        document.querySelectorAll('#cct-chain-save,#cct-log-clear,#cct-log-key-save,#cct-log-sync-now,#cct-create-log-key-btn').forEach((btn) => {
             btn.style.background = th.saveBg;
             btn.style.border = `1px solid ${th.saveBorder}`;
             btn.style.color = th.popoverColor;
@@ -873,22 +974,6 @@
             btn.onmouseenter = () => { btn.style.opacity = th.gearHover; };
             btn.onmouseleave = () => { btn.style.opacity = th.gearOpacity; };
         });
-
-        const modal = document.querySelector('#cct-update-modal');
-        if (modal) {
-            modal.style.background = th.popoverBg;
-            modal.style.border = `1px solid ${th.popoverBorder}`;
-            modal.style.color = th.popoverColor;
-        }
-
-        const updateOk = document.querySelector('#cct-update-ok');
-        if (updateOk) {
-            updateOk.style.background = th.saveBg;
-            updateOk.style.border = `1px solid ${th.saveBorder}`;
-            updateOk.style.color = th.popoverColor;
-            updateOk.onmouseenter = () => { updateOk.style.background = th.saveBgHover; };
-            updateOk.onmouseleave = () => { updateOk.style.background = th.saveBg; };
-        }
 
         const toggle = document.querySelector('#cct-theme-toggle');
         if (toggle) toggle.innerHTML = isDark ? SUN_ICON : MOON_ICON;
@@ -905,7 +990,7 @@
         const anchor = findWidgetAnchor(root);
         if (!anchor) return;
 
-        const key = getApiKey();
+        const logKey = getLogApiKey();
         const el = document.createElement('span');
         el.id = 'cct-root';
         el.innerHTML = `
@@ -927,34 +1012,31 @@
             </div>
             <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? SUN_ICON : MOON_ICON}</button>
             <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">${GEAR_ICON}</button>
-            <div id="cct-api-popover">
-                <label>Minimum Access API Key</label>
-                <div id="cct-api-row">
-                    <input id="cct-api-input" type="password" placeholder="your public key"
-                        value="${escapeHTML(key)}" spellcheck="false" autocomplete="off">
-                    <button id="cct-api-save" type="button">Save Key</button>
-                </div>
-                <div class="cct-manual-label-row"><label>Manual correction</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Best to sync with torn.report at startup.</span></span></div>
+            <div id="cct-settings-popover">
+                <div class="cct-manual-label-row"><label>Manual correction</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Auto-sync is temporarily disabled (see below) — use this to correct the chain manually if needed.</span></span></div>
                 <div id="cct-manual-row">
                     <input id="cct-chain-input" type="number" min="0" step="1" value="${chain}">
                     <button id="cct-chain-save" type="button">Set Chain</button>
                 </div>
-                <span id="cct-api-hint">${key ? 'Key saved (used only to validate against Torn, not to sync the chain)' : 'Offline session tracking'}</span>
+                <div id="cct-sync-row">
+                    <label>Sync from crime logs</label>
+                    <div id="cct-log-key-row">
+                        <input id="cct-log-key-input" type="password" placeholder="log-only key"
+                            value="${escapeHTML(logKey)}" spellcheck="false" autocomplete="off">
+                        <button id="cct-log-key-save" type="button">Save</button>
+                    </div>
+                    <div id="cct-log-sync-btn-row">
+                        <button id="cct-log-sync-now" type="button">Sync from Logs</button>
+                        <a id="cct-create-log-key-btn" href="https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=CrimeChainLogs&user=log" target="_blank" rel="noopener">Create Log Key</a>
+                    </div>
+                    <span id="cct-log-sync-hint">Needs a separate Custom key with the 'log' selection — reconstructs your chain from crime logs since your last critical fail</span>
+                </div>
                 <details id="cct-log-details">
                     <summary>🛠️ Self-correction log</summary>
                     <ul id="cct-log-list"></ul>
                     <button id="cct-log-clear" type="button">Clear log</button>
                 </details>
-                ${renderWhatsNew()}
                 <div id="cct-version-footer">Version ${VERSION}</div>
-            </div>
-            <div id="cct-update-overlay">
-                <div id="cct-update-modal">
-                    <h3>Crime Chain Tracker</h3>
-                    <div>Updated to ${VERSION}</div>
-                    <ul>${(CHANGELOG[VERSION] || []).map((item) => `<li>${escapeHTML(item)}</li>`).join('')}</ul>
-                    <button id="cct-update-ok" type="button">OK</button>
-                </div>
             </div>
         `;
 
@@ -968,34 +1050,8 @@
         });
 
         wireSettings(el);
-        wireUpdateNotice(el);
         applyTheme();
         renderCorrectionLog();
-    }
-
-    // Shows the "what's new" modal once per update: only when a version was
-    // previously stored (so fresh installs stay silent) and it differs from
-    // the version currently running. Either way, the stored version is
-    // brought up to date immediately so this never re-fires on the same page.
-    function wireUpdateNotice(el) {
-        const overlay = el.querySelector('#cct-update-overlay');
-        const okBtn = el.querySelector('#cct-update-ok');
-        if (!overlay || !okBtn) return;
-
-        const lastSeen = getLastSeenVersion();
-        const shouldShow = lastSeen && lastSeen !== VERSION && (CHANGELOG[VERSION] || []).length;
-
-        if (shouldShow) overlay.classList.add('cct-open');
-        saveLastSeenVersion(VERSION);
-
-        okBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            overlay.classList.remove('cct-open');
-        });
-
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) overlay.classList.remove('cct-open');
-        });
     }
 
     let outsideClickWired = false;
@@ -1005,31 +1061,20 @@
         outsideClickWired = true;
 
         // Single delegated listener for the lifetime of the page. Looks up the
-        // *current* #cct-root and #cct-api-popover at click time instead of
+        // *current* #cct-root and #cct-settings-popover at click time instead of
         // closing over a specific widget instance, so rebuilding the widget
         // after SPA navigation never accumulates extra document listeners.
         document.addEventListener('click', (e) => {
             const root = document.querySelector('#cct-root');
-            const popover = document.querySelector('#cct-api-popover');
+            const popover = document.querySelector('#cct-settings-popover');
             if (!root || !popover) return;
             if (!root.contains(e.target)) popover.classList.remove('cct-open');
         });
     }
 
-    function renderWhatsNew() {
-        const items = CHANGELOG[VERSION] || [];
-        if (!items.length) return '';
-        return `
-            <div id="cct-whats-new">
-                <div id="cct-whats-new-title">What's new in ${VERSION}</div>
-                <ul>${items.map((item) => `<li>${escapeHTML(item)}</li>`).join('')}</ul>
-            </div>
-        `;
-    }
-
     function wireSettings(el) {
         const gear = el.querySelector('#cct-gear');
-        const popover = el.querySelector('#cct-api-popover');
+        const popover = el.querySelector('#cct-settings-popover');
 
         gear.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1039,31 +1084,12 @@
 
         wireOutsideClickOnce();
 
-        el.querySelector('#cct-api-save').addEventListener('click', async () => {
-            const input = el.querySelector('#cct-api-input');
-            const hint = el.querySelector('#cct-api-hint');
-            const cleanKey = saveApiKey(input.value);
-
-            if (!cleanKey) {
-                hint.textContent = 'Offline session tracking';
-                return;
-            }
-
-            hint.textContent = 'Verifying with Torn...';
-            try {
-                await verifyPublicAPI(cleanKey);
-                hint.textContent = 'API key saved';
-            } catch (e) {
-                hint.textContent = 'API check failed; offline tracking continues';
-            }
-        });
-
         el.querySelector('#cct-chain-save').addEventListener('click', () => {
             const input = el.querySelector('#cct-chain-input');
             const oldChain = chain;
             chain = clampChain(input.value);
             input.value = chain;
-            if (chain !== oldChain) logCorrection('manual', oldChain, chain);
+            if (chain !== oldChain) logCorrection('manual', oldChain, chain, null, 'Set manually in Settings');
             saveChain();
             render(true);
         });
@@ -1071,6 +1097,36 @@
         el.querySelector('#cct-log-clear').addEventListener('click', () => {
             saveCorrectionLog([]);
             renderCorrectionLog();
+        });
+
+        el.querySelector('#cct-log-key-save').addEventListener('click', () => {
+            const input = el.querySelector('#cct-log-key-input');
+            const hint = el.querySelector('#cct-log-sync-hint');
+            const cleanKey = saveLogApiKey(input.value);
+            logSyncPageBefore = null; // fresh key, don't carry over old pagination state
+            hint.textContent = cleanKey ? 'Log key saved' : 'Needs a separate Custom key with the \'log\' selection';
+        });
+
+        el.querySelector('#cct-log-sync-now').addEventListener('click', async () => {
+            const hint = el.querySelector('#cct-log-sync-hint');
+            const key = getLogApiKey();
+            if (!key) {
+                hint.textContent = 'Save a log key above first';
+                return;
+            }
+            hint.textContent = 'Syncing from logs...';
+            const result = await syncFromLogs('manual');
+            if (result.ok) {
+                hint.textContent = `Synced — chain is ${result.chain}`;
+            } else if (result.reason === 'no-reset-found') {
+                hint.textContent = 'No critical fail found yet in your recent logs — click Sync again to search further back';
+            } else if (result.error && result.error.code === 16) {
+                hint.textContent = `Key needs the 'log' selection — use the button above to create one`;
+            } else if (result.reason === 'empty') {
+                hint.textContent = 'No crime log entries found for this key';
+            } else {
+                hint.textContent = `Sync failed: ${result.error ? result.error.message : 'unknown error'}`;
+            }
         });
     }
 
@@ -1142,7 +1198,7 @@
 
             const synced = syncFromNativeBadge();
 
-            if (!synced && !applyResultCountDeltaFallback()) {
+            if (!synced && !applyResultCountDeltaFallback({ source: 'mutation-observer', mutations })) {
                 for (const mutation of mutations) {
                     for (const node of mutation.addedNodes) inspectPossibleOutcomeNode(node);
                     if (mutation.type === 'characterData') inspectPossibleOutcomeNode(mutation.target);
@@ -1153,15 +1209,90 @@
         observer.observe(root, { childList: true, characterData: true, subtree: true });
     }
 
-    // Validation-only: confirms the key works against Torn's API. The chain itself is
-    // always tracked from the DOM (native badge / result-count deltas), never from this
-    // response, so nothing here needs to parse or store the returned crimes data.
-    async function verifyPublicAPI(key) {
-        const url = `https://api.torn.com/user/?selections=crimes&key=${encodeURIComponent(key)}`;
+    // Fetches one page (up to 100 entries) of crime-outcome log entries. Verified
+    // against real API responses — log IDs confirmed via torn/logtypes and
+    // cross-checked against the in-game log page down to the exact second:
+    //   9010 = Crime success, 9150 = Crime fail (new)
+    //   9154/9155/9158/9160/9163/9165 = Crime critical fail (fragmented by side effect —
+    //   a jail-outcome crit logs ONLY as 9155, not the generic 9154)
+    // Optional `to` pages further back in time (unix seconds) per Torn's documented
+    // log pagination. Paginated (to/from) queries are cached ~30s by Torn's API.
+    async function fetchCrimeLogPage(key, to) {
+        const idsParam = LOG_IDS_ALL.join(',');
+        let url = `https://api.torn.com/user/?selections=log&log=${idsParam}&key=${encodeURIComponent(key)}`;
+        if (to) url += `&to=${to}`;
         const res = await fetch(url);
         const data = await res.json();
-        if (data.error) throw new Error(data.error.error || 'Torn API error');
-        return data;
+        if (data.error) {
+            const err = new Error(data.error.error || 'Torn API error');
+            err.code = data.error.code;
+            throw err;
+        }
+        const raw = data.log || {};
+        return Object.values(raw).map((e) => ({ log: e.log, timestamp: e.timestamp }));
+    }
+
+    // Replays success (+1) / fail (halve, floored) from just after the most recent
+    // critical fail (reset to 0) found in the given entries. Returns null if no
+    // critical fail appears in this batch at all — caller should page further back.
+    function replayChainFromEntries(entries) {
+        const sorted = entries.slice().sort((a, b) => a.timestamp - b.timestamp);
+        let lastCritIndex = -1;
+        sorted.forEach((e, i) => { if (LOG_IDS_CRITICAL.includes(e.log)) lastCritIndex = i; });
+        if (lastCritIndex === -1) return null;
+
+        let result = 0;
+        let successCount = 0;
+        let failCount = 0;
+        for (let i = lastCritIndex + 1; i < sorted.length; i++) {
+            const e = sorted[i];
+            if (e.log === LOG_ID_SUCCESS) { result += 1; successCount++; }
+            else if (e.log === LOG_ID_FAIL) { result = Math.floor(result / 2); failCount++; }
+        }
+        return { chain: result, successCount, failCount, resetTimestamp: sorted[lastCritIndex].timestamp, oldestTimestamp: sorted[0].timestamp };
+    }
+
+    // Remembers where to page backward to if the last attempt found no critical fail
+    // in its batch — cleared on any successful reconstruction.
+    let logSyncPageBefore = null;
+
+    async function syncFromLogs(trigger) {
+        const key = getLogApiKey();
+        if (!key) return { ok: false, reason: 'no-key' };
+
+        try {
+            const entries = await fetchCrimeLogPage(key, logSyncPageBefore);
+            if (!entries.length) return { ok: false, reason: 'empty' };
+
+            const result = replayChainFromEntries(entries);
+            if (!result) {
+                // No critical fail in this batch — remember to page further back on
+                // the next attempt rather than auto-chaining calls (30s cache on
+                // paginated queries would just return the same data back-to-back).
+                const oldest = entries.slice().sort((a, b) => a.timestamp - b.timestamp)[0].timestamp;
+                logSyncPageBefore = oldest - 1;
+                return { ok: false, reason: 'no-reset-found' };
+            }
+
+            logSyncPageBefore = null;
+            const oldChain = chain;
+            chain = clampChain(result.chain);
+
+            pendingCriticalConfirm = null;
+            lastResultCounts = null;
+            confirmedCriticalFails = null;
+
+            if (chain !== oldChain) {
+                const reason = `${result.successCount} success${result.successCount === 1 ? '' : 'es'}, ${result.failCount} fail${result.failCount === 1 ? '' : 's'} since last reset${trigger ? ` (${trigger})` : ''}`;
+                logCorrection('log', oldChain, chain, result, reason);
+                saveChain();
+                render(true);
+            }
+            return { ok: true, chain };
+        } catch (e) {
+            console.log(`[CCT v${VERSION}] log sync failed:`, e.message, e.code || '');
+            return { ok: false, reason: 'error', error: e };
+        }
     }
 
     function runSyncLoop() {
@@ -1169,7 +1300,7 @@
         syncTimer = setTimeout(() => {
             renderWidget();
             startDOMObserver();
-            if (!syncFromNativeBadge()) applyResultCountDeltaFallback();
+            if (!syncFromNativeBadge()) applyResultCountDeltaFallback({ source: 'sync-loop' });
             render(false);
         }, 100);
     }
