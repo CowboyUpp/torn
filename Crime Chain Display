@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.14
+// @version      4.6.15
 // @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -9,7 +9,6 @@
 // @license      MIT; https://opensource.org/licenses/MIT
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @connect      api.torn.com
 // @downloadURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.user.js
 // @updateURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.meta.js
 // ==/UserScript==
@@ -17,7 +16,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.6.14';
+    const VERSION = '4.6.15';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -47,6 +46,8 @@
     let lastEvent = readLastEvent();
     let syncTimer = null;
     let lastResultCounts = null;
+    let pendingResultCountReseed = null;
+    let cachedNativeChainValueEl = null;
     // Set the cycle a critical-fail delta is first spotted by the counts fallback.
     // Not applied to the chain until a second consecutive reading confirms it —
     // see applyResultCountDeltaFallback().
@@ -108,13 +109,17 @@
     ];
 
     const OUTCOME_CONTAINER_SELECTOR = [
-        '[class*="result" i]',
-        '[class*="outcome" i]',
-        '[class*="message" i]',
-        '[class*="notification" i]',
-        '[class*="toast" i]',
+        '[class*="crime" i][class*="result" i]',
+        '[class*="crime" i][class*="outcome" i]',
+        '[class*="crime" i][class*="message" i]',
+        '[class*="crime" i][class*="notification" i]',
+        '[class*="crime" i][class*="toast" i]',
         '[class*="crime" i][class*="success" i]',
         '[class*="crime" i][class*="fail" i]',
+        '[class*="result" i][class*="success" i]',
+        '[class*="result" i][class*="fail" i]',
+        '[class*="outcome" i][class*="success" i]',
+        '[class*="outcome" i][class*="fail" i]',
     ].join(',');
 
     const RADIUS = 10;
@@ -224,9 +229,9 @@
         console.log(`[CCT v${VERSION}] diagnostic: ${type}`, entry);
     }
 
-    // Central place every self-correcting code path funnels through: it writes
-    // the console line (kept for debugging) AND persists a small ring buffer
-    // that the settings popover reads to show a human-readable audit trail.
+    // Central place every chain-update path funnels through: it writes the
+    // console line (kept for debugging) AND persists a small ring buffer that
+    // the settings popover reads to show a human-readable audit trail.
     function logCorrection(source, oldChain, newChain, detail, reason) {
         console.log(`[CCT v${VERSION}] ${source}: ${oldChain} -> ${newChain}`, reason || '', detail || '');
 
@@ -346,6 +351,7 @@
             lastResultCounts = null;
             confirmedCriticalFails = null;
             pendingCriticalConfirm = null;
+            pendingResultCountReseed = null;
         }
         saveChain();
         saveLastEvent({
@@ -383,6 +389,12 @@
     }
 
     function findNativeChainBadge() {
+        if (cachedNativeChainValueEl && cachedNativeChainValueEl.isConnected && !cachedNativeChainValueEl.closest('#cct-root')) {
+            const text = (cachedNativeChainValueEl.textContent || '').trim();
+            if (/^\d{1,4}$/.test(text)) return { element: cachedNativeChainValueEl, value: parseInt(text, 10) };
+        }
+        cachedNativeChainValueEl = null;
+
         // Locate the native "CRIME CHAIN" label, then find the numeric
         // value displayed alongside it (Torn's own chain counter).
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -414,6 +426,7 @@
                 // in the same container can't be picked up by mistake.
                 const hinted = candidates.find((el) => /chain|value|count|badge/i.test(el.className || ''));
                 const chosen = hinted || candidates[0];
+                cachedNativeChainValueEl = chosen;
                 return { element: chosen, value: parseInt(chosen.textContent.trim(), 10) };
             }
 
@@ -426,6 +439,7 @@
         const badge = findNativeChainBadge();
         if (!badge) return false;
         pendingCriticalConfirm = null;
+        pendingResultCountReseed = null;
         if (badge.value !== chain) {
             const oldChain = chain;
             chain = clampChain(badge.value);
@@ -514,6 +528,7 @@
 
     function buildCountsReason({ dSuccess, dFail, criticalConfirmedReset }) {
         if (criticalConfirmedReset) return 'Critical fail confirmed (2 consecutive reads)';
+        if (dSuccess === 1 && dFail === 0) return '';
 
         const parts = [];
         if (dSuccess > 0) parts.push(`+${dSuccess} success${dSuccess === 1 ? '' : 'es'}`);
@@ -528,6 +543,7 @@
         if (!lastResultCounts) {
             lastResultCounts = current;
             confirmedCriticalFails = current.criticalFails;
+            pendingResultCountReseed = null;
             return true;
         }
 
@@ -546,6 +562,7 @@
 
         const dSuccess = current.successes - lastResultCounts.successes;
         const dFail = current.fails - lastResultCounts.fails;
+        const criticalDelta = current.criticalFails - confirmedCriticalFails;
 
         // If Torn rehydrates the crimes panel, these visible counters can jump from
         // the short-lived session counts we were tracking to larger cumulative totals.
@@ -569,17 +586,42 @@
             lastResultCounts = current;
             confirmedCriticalFails = current.criticalFails;
             pendingCriticalConfirm = null;
+            pendingResultCountReseed = null;
             return true;
         }
 
-        lastResultCounts = current;
+        if ((dSuccess < 0 || dFail < 0) && criticalDelta <= 0) {
+            const sameReseedCandidate = pendingResultCountReseed &&
+                pendingResultCountReseed.successes === current.successes &&
+                pendingResultCountReseed.fails === current.fails &&
+                pendingResultCountReseed.criticalFails === current.criticalFails;
+
+            if (sameReseedCandidate) {
+                lastResultCounts = current;
+                confirmedCriticalFails = current.criticalFails;
+                pendingCriticalConfirm = null;
+                pendingResultCountReseed = null;
+            } else {
+                pendingResultCountReseed = {
+                    successes: current.successes,
+                    fails: current.fails,
+                    criticalFails: current.criticalFails,
+                    detectedAt: Date.now(),
+                };
+            }
+            return true;
+        }
+
+        const canApplyResultDeltas = dSuccess >= 0 && dFail >= 0;
+        if (canApplyResultDeltas) {
+            lastResultCounts = current;
+            pendingResultCountReseed = null;
+        }
 
         // Critical-fail confirmation is tracked against its own baseline
         // (confirmedCriticalFails), independent from lastResultCounts, so that the
         // act of merely *seeing* a suspicious reading doesn't itself shift the
         // goalposts used to detect it again on the next cycle.
-        const criticalDelta = current.criticalFails - confirmedCriticalFails;
-
         const oldChain = chain;
         let criticalConfirmedReset = false;
 
@@ -588,6 +630,7 @@
             // number as the fresh baseline, don't touch the chain.
             confirmedCriticalFails = current.criticalFails;
             pendingCriticalConfirm = null;
+            pendingResultCountReseed = null;
         } else if (criticalDelta > 0) {
             // A critical fail wipes the whole chain — the one irreversible action this
             // script can take — so a single noisy reading isn't enough to trust it. This
@@ -599,8 +642,10 @@
             if (pendingCriticalConfirm && pendingCriticalConfirm.criticalFails === current.criticalFails) {
                 chain = 0;
                 criticalConfirmedReset = true;
+                lastResultCounts = current;
                 confirmedCriticalFails = current.criticalFails;
                 pendingCriticalConfirm = null;
+                pendingResultCountReseed = null;
             } else {
                 pendingCriticalConfirm = { detectedAt: Date.now(), criticalFails: current.criticalFails };
                 // Fall through — success/fail movement this cycle still applies below.
@@ -610,10 +655,7 @@
             pendingCriticalConfirm = null;
         }
 
-        // Negative success/fail deltas mean a reseed (same rendering-glitch cause as
-        // the blank-frame case above, just partial) — don't apply chain math for them,
-        // but a confirmed critical reset above still stands.
-        if (dSuccess >= 0 && dFail >= 0) {
+        if (canApplyResultDeltas) {
             if (dFail > 0) chain = Math.floor(chain / Math.pow(2, dFail));
             if (dSuccess > 0) chain += dSuccess;
         }
@@ -1013,26 +1055,26 @@
             <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? SUN_ICON : MOON_ICON}</button>
             <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">${GEAR_ICON}</button>
             <div id="cct-settings-popover">
-                <div class="cct-manual-label-row"><label>Manual correction</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Auto-sync is temporarily disabled (see below) — use this to correct the chain manually if needed.</span></span></div>
+                <div class="cct-manual-label-row"><label>Manual correction</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Use this only if the displayed chain is wrong.</span></span></div>
                 <div id="cct-manual-row">
                     <input id="cct-chain-input" type="number" min="0" step="1" value="${chain}">
                     <button id="cct-chain-save" type="button">Set Chain</button>
                 </div>
                 <div id="cct-sync-row">
-                    <label>Sync from crime logs</label>
+                    <label>Log verification</label>
                     <div id="cct-log-key-row">
-                        <input id="cct-log-key-input" type="password" placeholder="log-only key"
+                        <input id="cct-log-key-input" type="password" placeholder="log key"
                             value="${escapeHTML(logKey)}" spellcheck="false" autocomplete="off">
                         <button id="cct-log-key-save" type="button">Save</button>
                     </div>
                     <div id="cct-log-sync-btn-row">
-                        <button id="cct-log-sync-now" type="button">Sync from Logs</button>
+                        <button id="cct-log-sync-now" type="button">Verify from Logs</button>
                         <a id="cct-create-log-key-btn" href="https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=CrimeChainLogs&user=log" target="_blank" rel="noopener">Create Log Key</a>
                     </div>
-                    <span id="cct-log-sync-hint">Needs a separate Custom key with the 'log' selection — reconstructs your chain from crime logs since your last critical fail</span>
+                    <span id="cct-log-sync-hint">Uses crime logs to verify and repair the tracker when page data is unreliable.</span>
                 </div>
                 <details id="cct-log-details">
-                    <summary>🛠️ Self-correction log</summary>
+                    <summary>🛠️ Chain update log</summary>
                     <ul id="cct-log-list"></ul>
                     <button id="cct-log-clear" type="button">Clear log</button>
                 </details>
@@ -1104,22 +1146,22 @@
             const hint = el.querySelector('#cct-log-sync-hint');
             const cleanKey = saveLogApiKey(input.value);
             logSyncPageBefore = null; // fresh key, don't carry over old pagination state
-            hint.textContent = cleanKey ? 'Log key saved' : 'Needs a separate Custom key with the \'log\' selection';
+            hint.textContent = cleanKey ? 'Log key saved — verification available' : 'Save a log key first';
         });
 
         el.querySelector('#cct-log-sync-now').addEventListener('click', async () => {
             const hint = el.querySelector('#cct-log-sync-hint');
             const key = getLogApiKey();
             if (!key) {
-                hint.textContent = 'Save a log key above first';
+                hint.textContent = 'Save a log key first';
                 return;
             }
-            hint.textContent = 'Syncing from logs...';
+            hint.textContent = 'Verifying from logs...';
             const result = await syncFromLogs('manual');
             if (result.ok) {
-                hint.textContent = `Synced — chain is ${result.chain}`;
+                hint.textContent = `Verified from logs — chain is ${result.chain}`;
             } else if (result.reason === 'no-reset-found') {
-                hint.textContent = 'No critical fail found yet in your recent logs — click Sync again to search further back';
+                hint.textContent = 'Need older logs — click again to search further back';
             } else if (result.error && result.error.code === 16) {
                 hint.textContent = `Key needs the 'log' selection — use the button above to create one`;
             } else if (result.reason === 'empty') {
@@ -1281,6 +1323,7 @@
             pendingCriticalConfirm = null;
             lastResultCounts = null;
             confirmedCriticalFails = null;
+            pendingResultCountReseed = null;
 
             if (chain !== oldChain) {
                 const reason = `${result.successCount} success${result.successCount === 1 ? '' : 'es'}, ${result.failCount} fail${result.failCount === 1 ? '' : 's'} since last reset${trigger ? ` (${trigger})` : ''}`;
