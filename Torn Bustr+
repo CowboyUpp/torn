@@ -1,0 +1,990 @@
+// ==UserScript==
+// @name         Bustr+
+// @namespace    https://local.codex/bustr-plus-safe
+// @version      0.1.0
+// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
+// @author       cowboyup
+// @match        https://www.torn.com/*
+// @run-at       document-end
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_openInTab
+// @connect      api.torn.com
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SCRIPT = 'Bustr+';
+  const VERSION = '0.1.0';
+  const STORAGE_PREFIX = 'bustrPlusSafe.';
+  const API_KEY_TITLE = 'BUSTRPlusLogs';
+  const API_KEY_PERMISSION = 'User / Log';
+  const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlusLogs&user=log';
+  const BUST_LOG_ID = 5360;
+
+  const DEFAULT_SETTINGS = {
+    refreshSeconds: 60,
+    freshBustScore: 128,
+    decayDivisorHours: 10,
+    decayWindowHours: 72,
+    customPenaltyThreshold: 0,
+    hardnessLimit: 460,
+    hideHardTargets: true,
+    sortByHardness: true,
+    showHardness: true,
+    skipBustConfirm: true,
+    theme: 'dark',
+    redLimit: 0,
+    greenLimit: 3,
+  };
+
+  let state = {
+    settings: { ...DEFAULT_SETTINGS },
+    apiKey: '',
+    timestamps: [],
+    penaltyScore: 0,
+    penaltyThreshold: 0,
+    availableBusts: null,
+    lastFetchMs: 0,
+    lastLocalBustMs: 0,
+    lastBustActionClickMs: 0,
+    hardnessRendering: false,
+    hardnessRenderTimer: null,
+    refreshTimerId: null,
+    observerStarted: false,
+    hardnessObserverStarted: false,
+    bustConfirmSkipperStarted: false,
+  };
+
+  const store = {
+    get(key, fallback) {
+      const fullKey = STORAGE_PREFIX + key;
+      try {
+        if (typeof GM_getValue === 'function') return GM_getValue(fullKey, fallback);
+      } catch (err) {}
+      try {
+        const raw = localStorage.getItem(fullKey);
+        return raw == null ? fallback : JSON.parse(raw);
+      } catch (err) {
+        return fallback;
+      }
+    },
+    set(key, value) {
+      const fullKey = STORAGE_PREFIX + key;
+      try {
+        if (typeof GM_setValue === 'function') {
+          GM_setValue(fullKey, value);
+          return;
+        }
+      } catch (err) {}
+      localStorage.setItem(fullKey, JSON.stringify(value));
+    },
+    del(key) {
+      const fullKey = STORAGE_PREFIX + key;
+      try {
+        if (typeof GM_deleteValue === 'function') GM_deleteValue(fullKey);
+      } catch (err) {}
+      localStorage.removeItem(fullKey);
+    },
+  };
+
+  function loadState() {
+    state.settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
+    state.apiKey = store.get('apiKey', '');
+    const savedStats = store.get('stats', {});
+    state = { ...state, ...savedStats, settings: state.settings, apiKey: state.apiKey };
+  }
+
+  function saveSettings() {
+    store.set('settings', state.settings);
+  }
+
+  function saveStats() {
+    store.set('stats', {
+      timestamps: state.timestamps,
+      penaltyScore: state.penaltyScore,
+      penaltyThreshold: state.penaltyThreshold,
+      availableBusts: state.availableBusts,
+      lastFetchMs: state.lastFetchMs,
+    });
+  }
+
+  function setApiKey(apiKey) {
+    state.apiKey = apiKey.trim();
+    store.set('apiKey', state.apiKey);
+  }
+
+  function deleteApiKey() {
+    state.apiKey = '';
+    store.del('apiKey');
+  }
+
+  function injectStyles() {
+    if (document.getElementById('bustr-plus-style')) return;
+    const style = document.createElement('style');
+    style.id = 'bustr-plus-style';
+    style.textContent = `
+      body.bustr-plus-green { --bustr-plus-color: #85b200; }
+      body.bustr-plus-orange { --bustr-plus-color: #d08000; }
+      body.bustr-plus-red { --bustr-plus-color: #e64d1a; }
+      #nav-jail .bustr-plus-nav {
+        display: inline-flex;
+        position: relative;
+        top: 3px;
+        align-items: center;
+        justify-content: center;
+        min-width: 16px;
+        margin-left: 4px;
+        color: var(--bustr-plus-color, inherit);
+        font-weight: 700;
+        line-height: 1;
+        text-align: center;
+        vertical-align: middle;
+      }
+      #nav-jail .bustr-plus-pill { position: absolute; top: 2px; right: 4px; min-width: 14px; text-align: center; color: var(--bustr-plus-color, #85b200); font-size: 11px; font-weight: 700; pointer-events: none; }
+      #bustr-plus-panel {
+        --bustr-bg: #202020;
+        --bustr-fg: #ddd;
+        --bustr-border: #444;
+        --bustr-header-border: #3a3a3a;
+        --bustr-input-bg: #111;
+        --bustr-button-bg: #303030;
+        --bustr-toggle-off: #555;
+        --bustr-danger-bg: #5b2520;
+        --bustr-danger-border: #a94b3f;
+        --bustr-danger-fg: #fff;
+        --bustr-muted: #aaa;
+        position: fixed; z-index: 99999; right: 14px; top: 62px; width: min(420px, calc(100vw - 28px));
+        max-height: min(680px, calc(100vh - 92px));
+        overflow: hidden;
+        background: var(--bustr-bg); color: var(--bustr-fg); border: 1px solid var(--bustr-border); border-radius: 8px;
+        box-shadow: 0 10px 30px rgba(0,0,0,.55); font: 12px/1.4 Arial, sans-serif;
+      }
+      #bustr-plus-panel.bustr-plus-light {
+        --bustr-bg: #f7f7f7;
+        --bustr-fg: #242424;
+        --bustr-border: #c9c9c9;
+        --bustr-header-border: #d8d8d8;
+        --bustr-input-bg: #fff;
+        --bustr-button-bg: #ececec;
+        --bustr-toggle-off: #d0d0d0;
+        --bustr-danger-bg: #fff1f0;
+        --bustr-danger-border: #c75146;
+        --bustr-danger-fg: #8d1f17;
+        --bustr-muted: #666;
+      }
+      #bustr-plus-panel[hidden] { display: none; }
+      #bustr-plus-panel header { display: flex; align-items: center; justify-content: space-between; padding: 9px 11px; border-bottom: 1px solid var(--bustr-header-border); font-weight: 700; }
+      #bustr-plus-panel .header-actions { display: flex; align-items: center; gap: 6px; }
+      #bustr-plus-panel button, #bustr-plus-panel input, #bustr-plus-panel select {
+        font: inherit; border-radius: 5px; border: 1px solid var(--bustr-border); background: var(--bustr-input-bg); color: var(--bustr-fg); min-height: 23px;
+      }
+      #bustr-plus-panel button { cursor: pointer; padding: 2px 8px; background: var(--bustr-button-bg); }
+      #bustr-plus-panel button.primary { background: #3769a8; border-color: #5489c9; color: #fff; }
+      #bustr-plus-panel button.danger { background: var(--bustr-danger-bg); border-color: var(--bustr-danger-border); color: var(--bustr-danger-fg); }
+      #bustr-plus-panel input { box-sizing: border-box; width: 100%; padding: 3px 7px; }
+      #bustr-plus-panel .body { padding: 9px 11px 10px; display: grid; gap: 7px; max-height: calc(min(680px, calc(100vh - 92px)) - 47px); overflow-y: auto; }
+      #bustr-plus-panel .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+      #bustr-plus-panel .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+      #bustr-plus-panel .toggles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+      #bustr-plus-panel .toggles label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+      #bustr-plus-panel .toggles span { margin: 0; line-height: 1.15; }
+      #bustr-plus-panel .toggles input[type="checkbox"] {
+        appearance: none;
+        -webkit-appearance: none;
+        position: relative;
+        width: 34px;
+        min-width: 34px;
+        height: 18px;
+        min-height: 18px;
+        margin: 0;
+        border: 1px solid var(--bustr-border);
+        border-radius: 999px;
+        background: var(--bustr-toggle-off);
+        cursor: pointer;
+        transition: background .16s ease, border-color .16s ease;
+      }
+      #bustr-plus-panel .toggles input[type="checkbox"]::after {
+        content: "";
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        left: 1px;
+        top: 1px;
+        border-radius: 50%;
+        background: var(--bustr-bg);
+        box-shadow: 0 1px 3px rgba(0,0,0,.35);
+        transition: transform .16s ease, background .16s ease;
+      }
+      #bustr-plus-panel .toggles input[type="checkbox"]:checked {
+        border-color: #5489c9;
+        background: #4278bd;
+      }
+      #bustr-plus-panel .toggles input[type="checkbox"]:checked::after {
+        transform: translateX(16px);
+        background: #fff;
+      }
+      #bustr-plus-panel .actions { position: sticky; bottom: -10px; padding-top: 6px; background: var(--bustr-bg); }
+      #bustr-plus-panel label span { display: block; color: var(--bustr-muted); margin-bottom: 1px; }
+      #bustr-plus-panel .hint { color: var(--bustr-muted); font-size: 11px; }
+      #bustr-plus-panel .status { color: var(--bustr-plus-color, #85b200); font-weight: 700; }
+      #bustr-plus-panel .version { color: var(--bustr-muted); font-size: 10px; text-align: right; }
+      #bustr-plus-panel .icon-btn { width: 28px; min-width: 28px; padding: 0; display: inline-grid; place-items: center; }
+      #bustr-plus-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 99998;
+        height: 28px;
+        min-height: 28px;
+        margin: 0 4px;
+        border-radius: 4px;
+        border: 0;
+        background: transparent;
+        color: #eee;
+        padding: 0 8px;
+        font: 700 12px Arial, sans-serif;
+        line-height: 1;
+        cursor: pointer;
+        vertical-align: middle;
+        text-shadow: 0 1px 2px rgba(0,0,0,.8);
+      }
+      #bustr-plus-toggle:hover {
+        color: #fff;
+        background: rgba(255,255,255,.08);
+      }
+      #bustr-plus-toggle.bustr-plus-floating {
+        position: absolute;
+        right: 18px;
+        top: 12px;
+      }
+      #body .users-list-title {
+        display: flex;
+        justify-content: start;
+        align-items: center;
+      }
+      #body .users-list-title .title { width: 269px; }
+      #body .users-list-title .time { width: 50px; }
+      #body .users-list-title .level { width: 53px; }
+      #body .users-list-title .reason { width: 205px; }
+      #body .users-list-title .hardness {
+        display: block;
+        width: 79px;
+        text-align: center;
+      }
+      #body .user-info-list-wrap {
+        display: flex;
+        flex-direction: column;
+        justify-content: start;
+        align-items: center;
+      }
+      #body .user-info-list-wrap > li {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: start;
+        align-items: center;
+      }
+      #body .user-info-list-wrap > li .info-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: start;
+        align-items: center;
+      }
+      #body .user-info-list-wrap > li .info-wrap .time { width: 54px; }
+      #body .user-info-list-wrap > li .info-wrap .level { width: 57px; }
+      #body .user-info-list-wrap > li .info-wrap .reason { width: 193px; }
+      #body .user-info-list-wrap > li .info-wrap .hardness {
+        display: block;
+        width: 50px;
+        text-align: center;
+      }
+      #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
+      .bustr-plus-hardness { display: inline-block; width: 46px; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
+      .bustr-plus-hard-row { opacity: .32; }
+      .bustr-plus-hidden-hard { display: none !important; }
+      @media screen and (max-width: 784px) {
+        #body .users-list-title .hardness { display: none; }
+        #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: block; }
+        #body .user-info-list-wrap > li .info-wrap .reason {
+          width: 164px;
+          border-right: 1px solid rgb(34, 34, 34);
+        }
+        #body .user-info-list-wrap > li .info-wrap .hardness { width: 64px; }
+      }
+      @media screen and (max-width: 386px) {
+        #body .user-info-list-wrap > li .info-wrap .time {
+          width: 98px;
+          height: 37px;
+        }
+        #body .user-info-list-wrap > li .info-wrap .level {
+          width: 91px;
+          height: 37px;
+        }
+        #body .user-info-list-wrap > li .info-wrap .reason {
+          width: 171px;
+          height: 24px;
+          border-right: 1px solid rgb(34, 34, 34);
+        }
+        #body .user-info-list-wrap > li .info-wrap .hardness { width: 107px; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function getViewportType() {
+    return (window.visualViewport ? visualViewport.width : window.innerWidth) > 1000 ? 'desktop' : 'mobile';
+  }
+
+  function ensureToggleButton() {
+    const existing = document.getElementById('bustr-plus-toggle');
+    if (existing) {
+      mountToggleButton(existing);
+      return;
+    }
+    const button = document.createElement('button');
+    button.id = 'bustr-plus-toggle';
+    button.type = 'button';
+    button.textContent = 'BUSTR+';
+    button.title = 'Open BUSTR+ settings';
+    button.addEventListener('click', () => renderPanel(false));
+    mountToggleButton(button);
+    setTimeout(() => mountToggleButton(button), 1000);
+    setTimeout(() => mountToggleButton(button), 3000);
+  }
+
+  function mountToggleButton(button) {
+    button.classList.add('bustr-plus-floating');
+    document.body.appendChild(button);
+  }
+
+  function renderPanel(forceOpen) {
+    let panel = document.getElementById('bustr-plus-panel');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'bustr-plus-panel';
+      panel.hidden = true;
+      document.body.appendChild(panel);
+    }
+    if (!forceOpen && !panel.hidden) {
+      panel.hidden = true;
+      return;
+    }
+
+    const s = state.settings;
+    panel.classList.toggle('bustr-plus-light', s.theme === 'light');
+    panel.innerHTML = `
+      <header>
+        <span>${SCRIPT}</span>
+        <span class="header-actions">
+          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '☀' : '☾'}</button>
+          <button type="button" data-action="close">Close</button>
+        </span>
+      </header>
+      <div class="body">
+        <div class="status">Busts left: ${formatAvailable()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
+        <div class="hint">Custom key: ${API_KEY_PERMISSION} only. Uses user/log ${BUST_LOG_ID}.</div>
+        <label>
+          <span>Custom API key</span>
+          <input id="bustr-plus-key" type="password" autocomplete="off" value="${escapeAttr(state.apiKey)}" placeholder="Paste 16 character Torn custom key">
+        </label>
+        <div class="row">
+          <button type="button" data-action="open-api">Generate User / Log key</button>
+          <button type="button" class="primary" data-action="save-key">Save and test</button>
+        </div>
+        <div class="grid">
+          ${numberField('hardnessLimit', 'Hardness ceiling', s.hardnessLimit)}
+          ${numberField('customPenaltyThreshold', 'Manual penalty cap', s.customPenaltyThreshold)}
+          ${numberField('refreshSeconds', 'Refresh seconds', s.refreshSeconds)}
+          ${numberField('decayDivisorHours', 'Decay divisor hours', s.decayDivisorHours)}
+          ${numberField('decayWindowHours', 'Decay window hours', s.decayWindowHours)}
+          ${numberField('greenLimit', 'Green at busts', s.greenLimit)}
+        </div>
+        <div class="toggles">
+          <label><span>Hide hard</span><input id="bustr-plus-hideHardTargets" type="checkbox" ${s.hideHardTargets ? 'checked' : ''}></label>
+          <label><span>Sort easiest</span><input id="bustr-plus-sortByHardness" type="checkbox" ${s.sortByHardness ? 'checked' : ''}></label>
+          <label><span>Skip confirm</span><input id="bustr-plus-skipBustConfirm" type="checkbox" ${s.skipBustConfirm ? 'checked' : ''}></label>
+        </div>
+        <div class="row actions">
+          <button type="button" class="danger" data-action="forget-key">Forget key</button>
+          <button type="button" class="primary" data-action="save-settings">Save settings</button>
+        </div>
+        <div class="hint">Hardness: level x (hours + 3). Penalty: ${s.freshBustScore} / (1 + ageHours / ${s.decayDivisorHours}).</div>
+        <div class="version">Version ${VERSION}</div>
+      </div>
+    `;
+    panel.hidden = false;
+    wirePanel(panel);
+  }
+
+  function numberField(name, label, value) {
+    return `<label><span>${label}</span><input id="bustr-plus-${name}" type="number" step="1" min="0" value="${escapeAttr(value)}"></label>`;
+  }
+
+  function wirePanel(panel) {
+    panel.querySelector('[data-action="close"]').addEventListener('click', () => {
+      panel.hidden = true;
+    });
+    panel.querySelector('[data-action="theme"]').addEventListener('click', () => {
+      state.settings.theme = state.settings.theme === 'light' ? 'dark' : 'light';
+      saveSettings();
+      renderPanel(true);
+      renderApiKeyGenerator(true);
+    });
+    panel.querySelector('[data-action="open-api"]').addEventListener('click', () => {
+      openUrl(API_KEY_URL);
+    });
+    panel.querySelector('[data-action="save-key"]').addEventListener('click', async () => {
+      const key = panel.querySelector('#bustr-plus-key').value.trim();
+      if (!/^[A-Za-z0-9]{16}$/.test(key)) {
+        showPanelHint(panel, 'That does not look like a 16 character Torn API key.');
+        return;
+      }
+      setApiKey(key);
+      showPanelHint(panel, 'Testing key...');
+      const ok = await loadBustData(true);
+      if (!ok) return;
+      renderAll();
+      renderPanel(true);
+    });
+    panel.querySelector('[data-action="forget-key"]').addEventListener('click', () => {
+      deleteApiKey();
+      state.timestamps = [];
+      state.availableBusts = null;
+      saveStats();
+      renderAll();
+      renderPanel(true);
+    });
+    panel.querySelector('[data-action="save-settings"]').addEventListener('click', () => {
+      readSettingsFromPanel(panel);
+      saveSettings();
+      recalcStats();
+      saveStats();
+      renderAll();
+      startRefreshTimer();
+      renderPanel(true);
+    });
+  }
+
+  function showPanelHint(panel, message) {
+    const hint = panel.querySelector('.hint');
+    if (hint) hint.textContent = message;
+  }
+
+  function readSettingsFromPanel(panel) {
+    for (const key of ['hardnessLimit', 'customPenaltyThreshold', 'refreshSeconds', 'decayDivisorHours', 'decayWindowHours', 'greenLimit']) {
+      const el = panel.querySelector(`#bustr-plus-${key}`);
+      const value = Number(el.value);
+      if (Number.isFinite(value)) state.settings[key] = value;
+    }
+    state.settings.hideHardTargets = panel.querySelector('#bustr-plus-hideHardTargets').checked;
+    state.settings.sortByHardness = panel.querySelector('#bustr-plus-sortByHardness').checked;
+    state.settings.skipBustConfirm = panel.querySelector('#bustr-plus-skipBustConfirm').checked;
+  }
+
+  function openUrl(url) {
+    try {
+      if (typeof GM_openInTab === 'function') {
+        GM_openInTab(url, { active: true, insert: true });
+        return;
+      }
+    } catch (err) {}
+    window.open(url, '_blank', 'noopener');
+  }
+
+  function renderApiKeyGenerator(forceRefresh) {
+    if (window.location.pathname !== '/preferences.php') return;
+    if (!window.location.hash.includes('tab=api') || !window.location.hash.includes('title=BUSTRPlusLogs')) return;
+    const existing = document.getElementById('bustr-plus-keygen');
+    if (existing && !forceRefresh) return;
+    if (existing) existing.remove();
+
+    const panel = document.createElement('section');
+    panel.id = 'bustr-plus-keygen';
+    const light = state.settings.theme === 'light';
+    panel.style.cssText = [
+      'position:fixed',
+      'z-index:100000',
+      'right:14px',
+      'top:96px',
+      'width:min(430px,calc(100vw - 28px))',
+      `background:${light ? '#f7f7f7' : '#202020'}`,
+      `color:${light ? '#242424' : '#ddd'}`,
+      `border:1px solid ${light ? '#5489c9' : '#5489c9'}`,
+      'border-radius:8px',
+      'box-shadow:0 10px 30px rgba(0,0,0,.55)',
+      'font:12px/1.4 Arial,sans-serif',
+      'padding:11px',
+    ].join(';');
+    panel.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+        <strong>BUSTR+ Custom Key</strong>
+        <button type="button" data-close style="border:1px solid ${light ? '#c9c9c9' : '#555'};background:${light ? '#ececec' : '#303030'};color:${light ? '#242424' : '#eee'};border-radius:5px;min-height:25px;padding:3px 8px;cursor:pointer;">Close</button>
+      </div>
+      <div style="display:grid;gap:7px;">
+        <div>Create a <strong>Custom</strong> Torn API key with this exact setup:</div>
+        <label>Title
+          <input readonly value="${escapeAttr(API_KEY_TITLE)}" style="box-sizing:border-box;width:100%;margin-top:2px;padding:4px 7px;border:1px solid ${light ? '#c9c9c9' : '#555'};border-radius:5px;background:${light ? '#fff' : '#111'};color:${light ? '#242424' : '#eee'};">
+        </label>
+        <label>Permission
+          <input readonly value="${escapeAttr(API_KEY_PERMISSION)} only" style="box-sizing:border-box;width:100%;margin-top:2px;padding:4px 7px;border:1px solid ${light ? '#c9c9c9' : '#555'};border-radius:5px;background:${light ? '#fff' : '#111'};color:${light ? '#242424' : '#eee'};">
+        </label>
+        <div style="color:${light ? '#666' : '#aaa'};font-size:11px;">BUSTR+ tries to prefill matching fields. If Torn changes the form, use these values manually: Custom key, User / Log only.</div>
+        <div style="display:flex;gap:7px;justify-content:flex-end;">
+          <button type="button" data-copy style="border:1px solid ${light ? '#c9c9c9' : '#555'};background:${light ? '#ececec' : '#303030'};color:${light ? '#242424' : '#eee'};border-radius:5px;min-height:25px;padding:3px 8px;cursor:pointer;">Copy title</button>
+          <button type="button" data-autofill style="border:1px solid #5489c9;background:#3769a8;color:#fff;border-radius:5px;min-height:25px;padding:3px 8px;cursor:pointer;">Prefill form</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+    panel.querySelector('[data-close]').addEventListener('click', () => panel.remove());
+    panel.querySelector('[data-copy]').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(API_KEY_TITLE);
+      } catch (err) {}
+    });
+    panel.querySelector('[data-autofill]').addEventListener('click', prefillTornApiKeyForm);
+    setTimeout(prefillTornApiKeyForm, 800);
+    setTimeout(prefillTornApiKeyForm, 2000);
+  }
+
+  function prefillTornApiKeyForm() {
+    const inputs = [...document.querySelectorAll('input, textarea')];
+    const titleInput = inputs.find((input) => {
+      const label = getNearbyText(input).toLowerCase();
+      return /title|name|label/.test(label) && !/key/.test(label);
+    }) || inputs.find((input) => input.type === 'text' && !input.value);
+    if (titleInput && !titleInput.value) {
+      titleInput.value = API_KEY_TITLE;
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+      titleInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    for (const control of document.querySelectorAll('input[type="radio"], input[type="checkbox"], option')) {
+      const text = getNearbyText(control).toLowerCase();
+      const wantsCustom = /\bcustom\b/.test(text);
+      const wantsLog = /\blog\b/.test(text) && /\buser\b/.test(text);
+      const rejectsBroad = /\bfull\b|\ball\b|\bfaction\b|\bcompany\b|\bforum\b|\bmessage\b|\bbazaar\b|\bnetworth\b/.test(text);
+      if ((wantsCustom || wantsLog) && !rejectsBroad) {
+        if (control.tagName === 'OPTION') {
+          control.selected = true;
+          control.parentElement?.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (!control.checked) {
+          control.click();
+        }
+      }
+      if (rejectsBroad && control.checked && control.type === 'checkbox') {
+        control.click();
+      }
+    }
+  }
+
+  function getNearbyText(el) {
+    const labelledBy = el.getAttribute('aria-labelledby');
+    const ariaText = labelledBy
+      ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent || '').join(' ')
+      : '';
+    const escapedId = el.id && window.CSS && typeof CSS.escape === 'function' ? CSS.escape(el.id) : '';
+    const labelText = escapedId
+      ? [...document.querySelectorAll(`label[for="${escapedId}"]`)].map((label) => label.textContent || '').join(' ')
+      : '';
+    const parentText = el.closest('label, li, tr, div')?.textContent || '';
+    return `${ariaText} ${labelText} ${parentText}`;
+  }
+
+  function escapeAttr(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[char]);
+  }
+
+  function formatAvailable() {
+    return state.availableBusts == null ? '?' : state.availableBusts;
+  }
+
+  async function loadBustData(force) {
+    if (!state.apiKey) return;
+    const ageMs = Date.now() - state.lastFetchMs;
+    if (!force && ageMs < state.settings.refreshSeconds * 1000) return;
+
+    const url = `https://api.torn.com/user/?selections=log&log=${BUST_LOG_ID}&key=${encodeURIComponent(state.apiKey)}`;
+    try {
+      const response = await fetch(url, { credentials: 'omit' });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error.error || 'Torn API error');
+      state.timestamps = extractBustTimestamps(data);
+      state.lastFetchMs = Date.now();
+      recalcStats();
+      saveStats();
+      return true;
+    } catch (err) {
+      console.error(`${SCRIPT}:`, err);
+      renderPanel(true);
+      const panel = document.getElementById('bustr-plus-panel');
+      if (panel) showPanelHint(panel, `API error: ${err.message}`);
+      return false;
+    }
+  }
+
+  function extractBustTimestamps(data) {
+    if (!data || !data.log) return [];
+    return Object.values(data.log)
+      .map((entry) => Number(entry.timestamp))
+      .filter((timestamp) => Number.isFinite(timestamp))
+      .sort((a, b) => b - a);
+  }
+
+  function recalcStats() {
+    state.penaltyScore = calcPenaltyScore(state.timestamps);
+    state.penaltyThreshold = calcPenaltyThreshold(state.timestamps);
+    state.availableBusts = state.penaltyThreshold > 0
+      ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
+      : null;
+  }
+
+  function calcPenaltyScore(timestamps) {
+    const nowSeconds = Date.now() / 1000;
+    const maxAge = state.settings.decayWindowHours;
+    return Math.floor(timestamps.reduce((score, timestamp) => {
+      const ageHours = (nowSeconds - timestamp) / 3600;
+      if (ageHours < 0 || ageHours > maxAge) return score;
+      return score + decayedBustScore(ageHours);
+    }, 0));
+  }
+
+  function calcPenaltyThreshold(timestamps) {
+    if (state.settings.customPenaltyThreshold > 0) return state.settings.customPenaltyThreshold;
+    if (!timestamps.length) return 0;
+
+    const sorted = [...timestamps].sort((a, b) => b - a);
+    const windowSeconds = state.settings.decayWindowHours * 3600;
+    let maxScore = 0;
+
+    for (let i = 0; i < sorted.length; i++) {
+      const anchor = sorted[i];
+      let score = 0;
+      for (let j = i; j < sorted.length; j++) {
+        const ageSeconds = anchor - sorted[j];
+        if (ageSeconds > windowSeconds) break;
+        score += decayedBustScore(ageSeconds / 3600);
+      }
+      maxScore = Math.max(maxScore, score);
+    }
+
+    return Math.floor(maxScore);
+  }
+
+  function decayedBustScore(ageHours) {
+    return state.settings.freshBustScore / (1 + ageHours / state.settings.decayDivisorHours);
+  }
+
+  function renderAll() {
+    renderNavStats();
+    renderColorClass();
+    if (state.settings.showHardness) renderHardnessView();
+  }
+
+  async function waitFor(selector, timeoutMs) {
+    const existing = document.querySelector(selector);
+    if (existing) return existing;
+    return new Promise((resolve, reject) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const el = document.querySelector(selector);
+        if (el) {
+          clearInterval(timer);
+          resolve(el);
+        } else if (Date.now() - started > timeoutMs) {
+          clearInterval(timer);
+          reject(new Error(`Missing ${selector}`));
+        }
+      }, 50);
+    });
+  }
+
+  async function renderNavStats() {
+    try {
+      const jailNav = await waitFor('#nav-jail', 5000);
+      const anchor = jailNav.querySelector('a') || jailNav;
+      if (getViewportType() === 'desktop') {
+        let stats = anchor.querySelector('.bustr-plus-nav');
+        if (!stats) {
+          stats = document.createElement('span');
+          stats.className = 'bustr-plus-nav';
+          anchor.appendChild(stats);
+        }
+        stats.textContent = formatAvailable();
+        stats.title = `BUSTR+ ${state.penaltyScore}/${state.penaltyThreshold || '?'}:${formatAvailable()}`;
+      } else {
+        let pill = jailNav.querySelector('.bustr-plus-pill');
+        if (!pill) {
+          pill = document.createElement('span');
+          pill.className = 'bustr-plus-pill';
+          jailNav.appendChild(pill);
+        }
+        pill.textContent = formatAvailable();
+      }
+    } catch (err) {}
+  }
+
+  function renderColorClass() {
+    document.body.classList.remove('bustr-plus-green', 'bustr-plus-orange', 'bustr-plus-red');
+    if (state.availableBusts == null) return;
+    if (state.availableBusts <= state.settings.redLimit) {
+      document.body.classList.add('bustr-plus-red');
+    } else if (state.availableBusts >= state.settings.greenLimit) {
+      document.body.classList.add('bustr-plus-green');
+    } else {
+      document.body.classList.add('bustr-plus-orange');
+    }
+  }
+
+  function renderHardnessView() {
+    if (window.location.pathname !== '/jailview.php') return;
+    if (state.hardnessRendering) return;
+    const list = document.querySelector('ul.user-info-list-wrap');
+    if (!list) return;
+    state.hardnessRendering = true;
+    try {
+      renderHardnessHeader();
+      const rows = [...list.querySelectorAll(':scope > li')];
+      for (const row of rows) {
+        if (!isLikelyJailPlayerRow(row)) continue;
+        const info = row.querySelector('.info-wrap') || row;
+
+        const parsed = parseRowLevelAndDuration(row);
+        if (!parsed) {
+          renderHardnessScore(info, null);
+          resetHardnessTreatment(row);
+          continue;
+        }
+        const score = calcHardnessScore(parsed.level, parsed.hours);
+        renderHardnessScore(info, score);
+        applyHardnessTreatment(row, score);
+      }
+    } finally {
+      setTimeout(() => {
+        state.hardnessRendering = false;
+      }, 0);
+    }
+  }
+
+  function parseRowLevelAndDuration(row) {
+    const info = row.querySelector('.info-wrap') || row;
+    const cells = [...info.children].filter((child) => !child.classList.contains('bustr-plus-hardness-wrap'));
+    const levelText = row.querySelector('.level')?.textContent || cells.find((cell) => /\blevel\b/i.test(cell.className || ''))?.textContent || cells[1]?.textContent || '';
+    const timeText = row.querySelector('.time')?.textContent || cells.find((cell) => /\btime\b/i.test(cell.className || ''))?.textContent || cells[0]?.textContent || '';
+    let level = Number((levelText.match(/\d+/) || [])[0]);
+    let rawTimeText = timeText;
+
+    if (!Number.isFinite(level) || !rawTimeText.trim()) {
+      const rowText = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+      const fallback = rowText.match(/((?:\d+\s*(?:d|day|h|hour|m|min)\s*){1,3})\s+(\d{1,4})\b/i);
+      if (fallback) {
+        rawTimeText = rawTimeText.trim() ? rawTimeText : fallback[1];
+        if (!Number.isFinite(level)) level = Number(fallback[2]);
+      }
+    }
+
+    if (!Number.isFinite(level)) return null;
+
+    const days = Number((rawTimeText.match(/(\d+)\s*(?:d|day)/i) || [0, 0])[1]);
+    const hours = Number((rawTimeText.match(/(\d+)\s*(?:h|hour)/i) || [0, 0])[1]);
+    const mins = Number((rawTimeText.match(/(\d+)\s*(?:m|min)/i) || [0, 0])[1]);
+    return { level, hours: days * 24 + hours + mins / 60 };
+  }
+
+  function isLikelyJailPlayerRow(row) {
+    if (!row || row.nodeType !== Node.ELEMENT_NODE) return false;
+    if (row.querySelector('.time') && row.querySelector('.level')) return true;
+    const text = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+    return /\d+\s*(?:d|day|h|hour|m|min)\b/i.test(text) && /\b\d{1,4}\b/.test(text);
+  }
+
+  function calcHardnessScore(level, hours) {
+    return Math.floor(level * (hours + 3));
+  }
+
+  function renderHardnessHeader() {
+    const title = document.querySelector('.users-list-title');
+    if (!title || title.querySelector('.bustr-plus-hardness-col')) return;
+    const header = document.createElement('span');
+    header.className = 'hardness bustr-plus-hardness-col title-divider divider-spiky';
+    header.textContent = 'Score';
+    const anchor = findJailColumnAnchor(title, 3);
+    if (anchor) anchor.insertAdjacentElement('afterend', header);
+    else title.appendChild(header);
+  }
+
+  function renderHardnessScore(info, score) {
+    let wrap = info.querySelector('.bustr-plus-hardness-wrap');
+    for (const extra of [...info.querySelectorAll('.bustr-plus-hardness-wrap')].slice(1)) extra.remove();
+    if (!wrap) {
+      wrap = document.createElement('span');
+      wrap.className = 'hardness reason bustr-plus-hardness-wrap';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span>';
+      const reason = findJailColumnAnchor(info, 2);
+      if (reason) reason.insertAdjacentElement('afterend', wrap);
+      else info.appendChild(wrap);
+    }
+    let value = wrap.querySelector('.bustr-plus-hardness');
+    if (!value) {
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span>';
+      value = wrap.querySelector('.bustr-plus-hardness');
+    }
+    const nextText = Number.isFinite(score) ? String(score) : '-';
+    if (value.textContent !== nextText) value.textContent = nextText;
+    const nextColor = !Number.isFinite(score) ? '#999' : score > state.settings.hardnessLimit ? '#e64d1a' : '#85b200';
+    if (value.style.getPropertyValue('--bustr-plus-hardness-color') !== nextColor) {
+      value.style.setProperty('--bustr-plus-hardness-color', nextColor);
+    }
+  }
+
+  function findJailColumnAnchor(container, fallbackIndex) {
+    const directChildren = [...container.children];
+    return directChildren.find((child) => child.classList.contains('reason') && !child.classList.contains('bustr-plus-hardness-wrap'))
+      || directChildren[fallbackIndex]
+      || directChildren[directChildren.length - 1]
+      || null;
+  }
+
+  function applyHardnessTreatment(row, score) {
+    row.classList.toggle('bustr-plus-hard-row', score > state.settings.hardnessLimit && !state.settings.hideHardTargets);
+    row.classList.toggle('bustr-plus-hidden-hard', score > state.settings.hardnessLimit && state.settings.hideHardTargets);
+    const nextOrder = state.settings.sortByHardness ? String(score) : '';
+    if (row.style.order !== nextOrder) row.style.order = nextOrder;
+  }
+
+  function resetHardnessTreatment(row) {
+    row.classList.remove('bustr-plus-hard-row', 'bustr-plus-hidden-hard');
+    if (row.style.order) row.style.order = '';
+  }
+
+  function startBustConfirmSkipper() {
+    if (state.bustConfirmSkipperStarted) return;
+    state.bustConfirmSkipperStarted = true;
+    document.addEventListener('click', (event) => {
+      if (!state.settings.skipBustConfirm || window.location.pathname !== '/jailview.php') return;
+      const action = event.target.closest('a, button, input[type="button"], input[type="submit"]');
+      if (!action || !action.closest('ul.user-info-list-wrap > li')) return;
+      state.lastBustActionClickMs = Date.now();
+      setTimeout(scanAndConfirmBustDialog, 80);
+      setTimeout(scanAndConfirmBustDialog, 250);
+      setTimeout(scanAndConfirmBustDialog, 650);
+    }, true);
+  }
+
+  function scanAndConfirmBustDialog() {
+    if (!state.settings.skipBustConfirm) return;
+    if (Date.now() - state.lastBustActionClickMs > 4000) return;
+
+    for (const dialog of findVisibleDialogCandidates()) {
+      const text = normalizeDialogText(dialog.textContent);
+      if (!/\bbust(?:ing|s|ed)?\b/i.test(text)) continue;
+      if (/\bbail\b/i.test(text)) continue;
+
+      const confirm = findConfirmButton(dialog);
+      if (!confirm || confirm.dataset.bustrPlusClicked === '1') continue;
+      confirm.dataset.bustrPlusClicked = '1';
+      confirm.click();
+      state.lastBustActionClickMs = 0;
+      return;
+    }
+  }
+
+  function findVisibleDialogCandidates() {
+    return [...document.querySelectorAll('[role="dialog"], [class*="modal" i], [class*="confirm" i], [class*="dialog" i], [class*="popup" i]')]
+      .filter((el) => el && !el.closest('#bustr-plus-panel') && isVisible(el));
+  }
+
+  function findConfirmButton(dialog) {
+    const controls = [...dialog.querySelectorAll('button, a, input[type="button"], input[type="submit"]')].filter(isVisible);
+    return controls.find((control) => /^(yes|confirm|okay|ok|bust)$/i.test(getControlText(control)))
+      || controls.find((control) => /\b(yes|confirm|bust)\b/i.test(getControlText(control)));
+  }
+
+  function getControlText(control) {
+    return normalizeDialogText(control.value || control.textContent || control.getAttribute('title') || control.getAttribute('aria-label') || '');
+  }
+
+  function normalizeDialogText(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isVisible(el) {
+    if (!el || el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+    const style = window.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && Boolean(el.offsetParent || el.getClientRects().length);
+  }
+
+  function scheduleHardnessRender() {
+    if (state.hardnessRendering || window.location.pathname !== '/jailview.php') return;
+    clearTimeout(state.hardnessRenderTimer);
+    state.hardnessRenderTimer = setTimeout(renderHardnessView, 150);
+  }
+
+  function startObservers() {
+    if (!state.observerStarted) {
+      state.observerStarted = true;
+      const target = document.querySelector('#mainContainer') || document.body;
+      new MutationObserver((mutations) => {
+        const success = mutations.some((mutation) => /You busted /i.test(mutation.target?.textContent || ''));
+        if (!success) return;
+        if (Date.now() - state.lastLocalBustMs < 5000) return;
+        state.lastLocalBustMs = Date.now();
+        state.penaltyScore += state.settings.freshBustScore;
+        state.availableBusts = state.penaltyThreshold > 0
+          ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
+          : null;
+        saveStats();
+        renderAll();
+      }).observe(target, { childList: true, subtree: true });
+    }
+
+    if (!state.hardnessObserverStarted) {
+      state.hardnessObserverStarted = true;
+      const target = document.querySelector('#mainContainer') || document.body;
+      new MutationObserver((mutations) => {
+        if (mutations.every((mutation) => {
+          const targetEl = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
+          return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel, #bustr-plus-toggle');
+        })) return;
+        scheduleHardnessRender();
+      }).observe(target, { childList: true, subtree: true });
+    }
+  }
+
+  function startRefreshTimer() {
+    if (state.refreshTimerId) clearInterval(state.refreshTimerId);
+    state.refreshTimerId = setInterval(async () => {
+      await loadBustData(false);
+      renderAll();
+    }, Math.max(15, state.settings.refreshSeconds) * 1000);
+  }
+
+  async function init() {
+    loadState();
+    injectStyles();
+    ensureToggleButton();
+    renderApiKeyGenerator();
+    await loadBustData(false);
+    renderAll();
+    if (!state.apiKey && window.location.hash.includes('bustrPlus=openSettings')) renderPanel(true);
+    startBustConfirmSkipper();
+    startObservers();
+    startRefreshTimer();
+    window.addEventListener('resize', renderAll, { passive: true });
+    window.addEventListener('hashchange', renderApiKeyGenerator, { passive: true });
+  }
+
+  const ready = document.readyState === 'complete'
+    ? Promise.resolve()
+    : new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
+
+  ready.then(init).catch((err) => console.error(`${SCRIPT}:`, err));
+})();
