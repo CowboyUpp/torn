@@ -4,6 +4,7 @@
 // @version      0.1.0
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
 // @author       cowboyup
+// @license      MIT
 // @match        https://www.torn.com/*
 // @run-at       document-end
 // @grant        GM_getValue
@@ -686,6 +687,7 @@
   function renderAll() {
     renderNavStats();
     renderColorClass();
+    applyQuickBustLinks();
     if (state.settings.showHardness) renderHardnessView();
   }
 
@@ -865,18 +867,69 @@
     if (row.style.order) row.style.order = '';
   }
 
+  function applyQuickBustLinks() {
+    if (window.location.pathname !== '/jailview.php') return;
+    const links = [...document.querySelectorAll("ul.user-info-list-wrap > li a[href*='breakout']")];
+    for (const link of links) {
+      if (state.settings.skipBustConfirm) markQuickBustLink(link);
+      else unmarkQuickBustLink(link);
+    }
+  }
+
+  function markQuickBustLink(link) {
+    const href = link.getAttribute('href') || '';
+    if (!href) return;
+    if (!link.dataset.bustrPlusOriginalHref) link.dataset.bustrPlusOriginalHref = href;
+    if (href === `${link.dataset.bustrPlusOriginalHref}1`) return;
+    link.setAttribute('href', `${href}1`);
+  }
+
+  function unmarkQuickBustLink(link) {
+    if (!link.dataset.bustrPlusOriginalHref) return;
+    link.setAttribute('href', link.dataset.bustrPlusOriginalHref);
+    delete link.dataset.bustrPlusOriginalHref;
+  }
+
   function startBustConfirmSkipper() {
     if (state.bustConfirmSkipperStarted) return;
     state.bustConfirmSkipperStarted = true;
     document.addEventListener('click', (event) => {
       if (!state.settings.skipBustConfirm || window.location.pathname !== '/jailview.php') return;
-      const action = event.target.closest('a, button, input[type="button"], input[type="submit"]');
-      if (!action || !action.closest('ul.user-info-list-wrap > li')) return;
+      const row = event.target.closest('ul.user-info-list-wrap > li');
+      if (!row || !isLikelyJailPlayerRow(row)) return;
+      const action = event.target.closest('a, button, input[type="button"], input[type="submit"], [role="button"], [class*="bust" i], [class*="jail" i]');
+      if (!isLikelyBustAction(action || event.target, row)) return;
+      if (Date.now() - state.lastBustActionClickMs < 1500) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       state.lastBustActionClickMs = Date.now();
-      setTimeout(scanAndConfirmBustDialog, 80);
-      setTimeout(scanAndConfirmBustDialog, 250);
-      setTimeout(scanAndConfirmBustDialog, 650);
+      [50, 120, 250, 500, 900, 1400].forEach((delay) => setTimeout(scanAndConfirmBustDialog, delay));
     }, true);
+  }
+
+  function isLikelyBustAction(action, row) {
+    const text = normalizeDialogText([
+      action?.textContent,
+      action?.value,
+      action?.title,
+      action?.getAttribute?.('aria-label'),
+      action?.getAttribute?.('href'),
+      action?.className,
+      action?.dataset ? Object.values(action.dataset).join(' ') : '',
+    ].filter(Boolean).join(' '));
+    if (/\bbail\b/i.test(text)) return false;
+    if (/\bbust|jailbust|jail-bust|break\s*out\b/i.test(text)) return true;
+
+    const actionControls = [...row.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]')];
+    const visibleControls = actionControls.filter(isVisible);
+    const index = visibleControls.findIndex((control) => control === action || control.contains(action));
+    if (index === -1) return false;
+
+    const actionLabel = getControlText(visibleControls[index]);
+    if (/\bbail\b/i.test(actionLabel)) return false;
+    return index === 0 || /\bbust\b/i.test(actionLabel);
   }
 
   function scanAndConfirmBustDialog() {
@@ -885,8 +938,8 @@
 
     for (const dialog of findVisibleDialogCandidates()) {
       const text = normalizeDialogText(dialog.textContent);
-      if (!/\bbust(?:ing|s|ed)?\b/i.test(text)) continue;
-      if (/\bbail\b/i.test(text)) continue;
+      if (dialog !== document.body && /\bbail\b/i.test(text)) continue;
+      if (!/\bbust(?:ing|s|ed)?\b|confirm|sure|jail/i.test(text) && dialog !== document.body) continue;
 
       const confirm = findConfirmButton(dialog);
       if (!confirm || confirm.dataset.bustrPlusClicked === '1') continue;
@@ -898,14 +951,31 @@
   }
 
   function findVisibleDialogCandidates() {
-    return [...document.querySelectorAll('[role="dialog"], [class*="modal" i], [class*="confirm" i], [class*="dialog" i], [class*="popup" i]')]
-      .filter((el) => el && !el.closest('#bustr-plus-panel') && isVisible(el));
+    const candidates = [...document.querySelectorAll([
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '[class*="modal" i]',
+      '[class*="confirm" i]',
+      '[class*="dialog" i]',
+      '[class*="popup" i]',
+      '[class*="overlay" i]',
+      '[class*="tooltip" i]',
+    ].join(','))].filter((el) => el && !el.closest('#bustr-plus-panel') && isVisible(el));
+
+    candidates.push(document.body);
+    return [...new Set(candidates)];
   }
 
   function findConfirmButton(dialog) {
     const controls = [...dialog.querySelectorAll('button, a, input[type="button"], input[type="submit"]')].filter(isVisible);
-    return controls.find((control) => /^(yes|confirm|okay|ok|bust)$/i.test(getControlText(control)))
-      || controls.find((control) => /\b(yes|confirm|bust)\b/i.test(getControlText(control)));
+    return controls.find((control) => {
+      if (control.closest('#bustr-plus-panel')) return false;
+      const text = getControlText(control);
+      if (/\b(no|cancel|close|bail)\b/i.test(text)) return false;
+      return /^(yes|confirm|okay|ok|bust|do it)$/i.test(text)
+        || /\b(yes|confirm|okay|ok|bust)\b/i.test(text)
+        || /\b(confirm|yes|okay|ok)\b/i.test(control.className || '');
+    });
   }
 
   function getControlText(control) {
@@ -925,7 +995,10 @@
   function scheduleHardnessRender() {
     if (state.hardnessRendering || window.location.pathname !== '/jailview.php') return;
     clearTimeout(state.hardnessRenderTimer);
-    state.hardnessRenderTimer = setTimeout(renderHardnessView, 150);
+    state.hardnessRenderTimer = setTimeout(() => {
+      applyQuickBustLinks();
+      if (state.settings.showHardness) renderHardnessView();
+    }, 150);
   }
 
   function startObservers() {
