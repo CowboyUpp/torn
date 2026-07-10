@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Bustr+
-// @namespace    https://local.codex/bustr-plus-safe
+// @namespace    https://greasyfork.org/users/cowboyup
 // @version      0.1.0
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
 // @author       cowboyup
