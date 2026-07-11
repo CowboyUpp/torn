@@ -48,6 +48,7 @@
     let lastResultCounts = null;
     let pendingResultCountReseed = null;
     let cachedNativeChainValueEl = null;
+    let lastCrimesRoute = null;
     // Set the cycle a critical-fail delta is first spotted by the counts fallback.
     // Not applied to the chain until a second consecutive reading confirms it —
     // see applyResultCountDeltaFallback().
@@ -172,6 +173,17 @@
     function saveLastEvent(event) {
         lastEvent = event;
         safeSet(STORAGE_KEY_LAST_EVENT, JSON.stringify(event));
+    }
+
+    function currentCrimesRoute() {
+        return `${location.pathname}${location.search}${location.hash}`;
+    }
+
+    function resetResultCounterTracking() {
+        lastResultCounts = null;
+        confirmedCriticalFails = null;
+        pendingCriticalConfirm = null;
+        pendingResultCountReseed = null;
     }
 
     const CORRECTION_SOURCE_LABELS = {
@@ -348,10 +360,7 @@
         if (chain !== oldChain) {
             const reasonMap = { critical: 'Detected critical fail message', fail: 'Detected fail message', success: 'Detected success message' };
             logCorrection('text', oldChain, chain, outcome.text, reasonMap[outcome.type] || 'Detected outcome message');
-            lastResultCounts = null;
-            confirmedCriticalFails = null;
-            pendingCriticalConfirm = null;
-            pendingResultCountReseed = null;
+            resetResultCounterTracking();
         }
         saveChain();
         saveLastEvent({
@@ -642,12 +651,34 @@
             if (pendingCriticalConfirm && pendingCriticalConfirm.criticalFails === current.criticalFails) {
                 chain = 0;
                 criticalConfirmedReset = true;
+                logDiagnostic('critical-counter-reset-confirmed', {
+                    context: {
+                        source: context.source || 'unknown',
+                        route: currentCrimesRoute(),
+                        mutations: summarizeMutations(context.mutations),
+                    },
+                    previous: lastResultCounts,
+                    current,
+                    criticalDelta,
+                    pendingCriticalConfirm,
+                });
                 lastResultCounts = current;
                 confirmedCriticalFails = current.criticalFails;
                 pendingCriticalConfirm = null;
                 pendingResultCountReseed = null;
             } else {
                 pendingCriticalConfirm = { detectedAt: Date.now(), criticalFails: current.criticalFails };
+                logDiagnostic('critical-counter-reset-pending', {
+                    context: {
+                        source: context.source || 'unknown',
+                        route: currentCrimesRoute(),
+                        mutations: summarizeMutations(context.mutations),
+                    },
+                    previous: lastResultCounts,
+                    current,
+                    criticalDelta,
+                    pendingCriticalConfirm,
+                });
                 // Fall through — success/fail movement this cycle still applies below.
                 // Only the critical-fail reset itself is deferred pending confirmation.
             }
@@ -1321,9 +1352,7 @@
             chain = clampChain(result.chain);
 
             pendingCriticalConfirm = null;
-            lastResultCounts = null;
-            confirmedCriticalFails = null;
-            pendingResultCountReseed = null;
+            resetResultCounterTracking();
 
             if (chain !== oldChain) {
                 const reason = `${result.successCount} success${result.successCount === 1 ? '' : 'es'}, ${result.failCount} fail${result.failCount === 1 ? '' : 's'} since last reset${trigger ? ` (${trigger})` : ''}`;
@@ -1341,6 +1370,12 @@
     function runSyncLoop() {
         clearTimeout(syncTimer);
         syncTimer = setTimeout(() => {
+            const route = currentCrimesRoute();
+            if (route !== lastCrimesRoute) {
+                lastCrimesRoute = route;
+                cachedNativeChainValueEl = null;
+                resetResultCounterTracking();
+            }
             renderWidget();
             startDOMObserver();
             if (!syncFromNativeBadge()) applyResultCountDeltaFallback({ source: 'sync-loop' });
