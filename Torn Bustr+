@@ -897,99 +897,38 @@
       if (!state.settings.skipBustConfirm || window.location.pathname !== '/jailview.php') return;
       const row = event.target.closest('ul.user-info-list-wrap > li');
       if (!row || !isLikelyJailPlayerRow(row)) return;
-      const action = event.target.closest('a, button, input[type="button"], input[type="submit"], [role="button"], [class*="bust" i], [class*="jail" i]');
-      if (!isLikelyBustAction(action || event.target, row)) return;
+      const bustLink = event.target.closest("a[href*='breakout']");
+      if (!bustLink) return;
       if (Date.now() - state.lastBustActionClickMs < 1500) {
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
       }
       state.lastBustActionClickMs = Date.now();
-      [50, 120, 250, 500, 900, 1400].forEach((delay) => setTimeout(scanAndConfirmBustDialog, delay));
+      sessionStorage.setItem('bustrReturnToJailUntil', String(Date.now() + 8000));
+      sessionStorage.setItem('bustrLastQuickBustHref', bustLink.href || bustLink.getAttribute('href') || '');
+      debugLog('allowing Torn quick bust navigation', bustLink.href || bustLink.getAttribute('href'));
     }, true);
   }
 
-  function isLikelyBustAction(action, row) {
-    const text = normalizeDialogText([
-      action?.textContent,
-      action?.value,
-      action?.title,
-      action?.getAttribute?.('aria-label'),
-      action?.getAttribute?.('href'),
-      action?.className,
-      action?.dataset ? Object.values(action.dataset).join(' ') : '',
-    ].filter(Boolean).join(' '));
-    if (/\bbail\b/i.test(text)) return false;
-    if (/\bbust|jailbust|jail-bust|break\s*out\b/i.test(text)) return true;
-
-    const actionControls = [...row.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]')];
-    const visibleControls = actionControls.filter(isVisible);
-    const index = visibleControls.findIndex((control) => control === action || control.contains(action));
-    if (index === -1) return false;
-
-    const actionLabel = getControlText(visibleControls[index]);
-    if (/\bbail\b/i.test(actionLabel)) return false;
-    return index === 0 || /\bbust\b/i.test(actionLabel);
+  function debugLog(...args) {
+    if (sessionStorage.getItem('bustrDebug') === '1') console.log(`[${SCRIPT} debug]`, ...args);
   }
 
-  function scanAndConfirmBustDialog() {
-    if (!state.settings.skipBustConfirm) return;
-    if (Date.now() - state.lastBustActionClickMs > 4000) return;
-
-    for (const dialog of findVisibleDialogCandidates()) {
-      const text = normalizeDialogText(dialog.textContent);
-      if (dialog !== document.body && /\bbail\b/i.test(text)) continue;
-      if (!/\bbust(?:ing|s|ed)?\b|confirm|sure|jail/i.test(text) && dialog !== document.body) continue;
-
-      const confirm = findConfirmButton(dialog);
-      if (!confirm || confirm.dataset.bustrPlusClicked === '1') continue;
-      confirm.dataset.bustrPlusClicked = '1';
-      confirm.click();
-      state.lastBustActionClickMs = 0;
-      return;
+  function returnToJailAfterQuickBustRedirect() {
+    const until = Number(sessionStorage.getItem('bustrReturnToJailUntil') || 0);
+    if (!until || Date.now() > until) {
+      sessionStorage.removeItem('bustrReturnToJailUntil');
+      return false;
     }
-  }
-
-  function findVisibleDialogCandidates() {
-    const candidates = [...document.querySelectorAll([
-      '[role="dialog"]',
-      '[aria-modal="true"]',
-      '[class*="modal" i]',
-      '[class*="confirm" i]',
-      '[class*="dialog" i]',
-      '[class*="popup" i]',
-      '[class*="overlay" i]',
-      '[class*="tooltip" i]',
-    ].join(','))].filter((el) => el && !el.closest('#bustr-plus-panel') && isVisible(el));
-
-    candidates.push(document.body);
-    return [...new Set(candidates)];
-  }
-
-  function findConfirmButton(dialog) {
-    const controls = [...dialog.querySelectorAll('button, a, input[type="button"], input[type="submit"]')].filter(isVisible);
-    return controls.find((control) => {
-      if (control.closest('#bustr-plus-panel')) return false;
-      const text = getControlText(control);
-      if (/\b(no|cancel|close|bail)\b/i.test(text)) return false;
-      return /^(yes|confirm|okay|ok|bust|do it)$/i.test(text)
-        || /\b(yes|confirm|okay|ok|bust)\b/i.test(text)
-        || /\b(confirm|yes|okay|ok)\b/i.test(control.className || '');
+    if (window.location.pathname === '/jailview.php') return false;
+    debugLog('returning to jail after Torn quick bust redirect', {
+      current: window.location.href,
+      bust: sessionStorage.getItem('bustrLastQuickBustHref'),
     });
-  }
-
-  function getControlText(control) {
-    return normalizeDialogText(control.value || control.textContent || control.getAttribute('title') || control.getAttribute('aria-label') || '');
-  }
-
-  function normalizeDialogText(text) {
-    return String(text || '').replace(/\s+/g, ' ').trim();
-  }
-
-  function isVisible(el) {
-    if (!el || el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
-    const style = window.getComputedStyle(el);
-    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && Boolean(el.offsetParent || el.getClientRects().length);
+    sessionStorage.removeItem('bustrReturnToJailUntil');
+    window.location.replace('/jailview.php');
+    return true;
   }
 
   function scheduleHardnessRender() {
@@ -1042,6 +981,7 @@
 
   async function init() {
     loadState();
+    if (returnToJailAfterQuickBustRedirect()) return;
     injectStyles();
     ensureToggleButton();
     renderApiKeyGenerator();
