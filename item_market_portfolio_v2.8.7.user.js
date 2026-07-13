@@ -10,6 +10,7 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
+// @license      MIT; https://opensource.org/licenses/MIT
 // @downloadURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.user.js
 // @updateURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.meta.js
 // ==/UserScript==
