@@ -51,9 +51,12 @@
     lastFetchMs: 0,
     lastLocalBustMs: 0,
     lastBustActionClickMs: 0,
+    lastBustActionHref: '',
+    loadBustDataPromise: null,
     hardnessRendering: false,
     hardnessRenderTimer: null,
     refreshTimerId: null,
+    returnToJailTimerId: null,
     observerStarted: false,
     hardnessObserverStarted: false,
     bustConfirmSkipperStarted: false,
@@ -229,6 +232,40 @@
       }
       #bustr-plus-panel .actions { position: sticky; bottom: -10px; padding-top: 6px; background: var(--bustr-bg); }
       #bustr-plus-panel label span { display: block; color: var(--bustr-muted); margin-bottom: 1px; }
+      #bustr-plus-panel .label-line { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+      #bustr-plus-panel .help-dot {
+        display: inline-grid;
+        place-items: center;
+        width: 14px;
+        height: 14px;
+        color: #5489c9;
+        font-size: 12px;
+        line-height: 1;
+        cursor: help;
+        outline: none;
+      }
+      #bustr-plus-help-tip {
+        position: fixed;
+        width: min(270px, calc(100vw - 24px));
+        padding: 8px 10px;
+        border-radius: 6px;
+        background: rgba(18, 18, 18, .95);
+        color: #f4f4f4;
+        box-shadow: 0 8px 22px rgba(0,0,0,.28);
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1.35;
+        text-align: left;
+        white-space: normal;
+        opacity: 1;
+        pointer-events: none;
+        z-index: 100001;
+      }
+      #bustr-plus-help-tip.bustr-plus-light {
+        background: rgba(255, 255, 255, .98);
+        color: #222;
+        box-shadow: 0 8px 24px rgba(0,0,0,.18);
+      }
       #bustr-plus-panel .hint { color: var(--bustr-muted); font-size: 11px; }
       #bustr-plus-panel .status { color: var(--bustr-plus-color, #85b200); font-weight: 700; }
       #bustr-plus-panel .version { color: var(--bustr-muted); font-size: 10px; text-align: right; }
@@ -384,7 +421,7 @@
         </span>
       </header>
       <div class="body">
-        <div class="status">Busts left: ${formatAvailable()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
+        <div class="status">Estimated busts left: ${formatAvailable()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
         <div class="hint">Custom key: ${API_KEY_PERMISSION} only. Uses user/log ${BUST_LOG_ID}.</div>
         <label>
           <span>Custom API key</span>
@@ -411,7 +448,7 @@
           <button type="button" class="danger" data-action="forget-key">Forget key</button>
           <button type="button" class="primary" data-action="save-settings">Save settings</button>
         </div>
-        <div class="hint">Hardness: level x (hours + 3). Penalty: ${s.freshBustScore} / (1 + ageHours / ${s.decayDivisorHours}).</div>
+        <div class="hint">Hardness: level x (hours + 3). Bust budget is an estimate from recent user/log entries, not an official Torn value.</div>
         <div class="version">Version ${VERSION}</div>
       </div>
     `;
@@ -420,14 +457,27 @@
   }
 
   function numberField(name, label, value) {
-    return `<label><span>${label}</span><input id="bustr-plus-${name}" type="number" step="1" min="0" value="${escapeAttr(value)}"></label>`;
+    const help = {
+      hardnessLimit: 'Maximum jail target score you want shown as safe. Lower is stricter. Your current 460-ish setting hides or dims people who are probably too expensive in nerve.',
+      customPenaltyThreshold: 'Optional manual cap for your bust budget score. Leave 0 to let Bustr+ estimate from your recent bust history. Set this only if you have your own tested limit.',
+      refreshSeconds: 'How often Bustr+ checks your Torn user/log for new busts. 60 seconds is calm and API-friendly; lower feels snappier but creates more requests.',
+      decayDivisorHours: 'How quickly old busts cool off in the estimate. Smaller means the script forgives old busts faster. Larger means old busts keep weighing on the counter longer.',
+      decayWindowHours: 'How far back Bustr+ looks when estimating bust fatigue. 72 hours is conservative. Shorter windows react faster; longer windows play safer.',
+      greenLimit: 'When the jail menu counter turns green. This is just a comfort color threshold, not a Torn rule.',
+    }[name];
+    const info = help
+      ? `<span class="help-dot" tabindex="0" role="note" aria-label="${escapeAttr(help)}" data-tip="${escapeAttr(help)}">ⓘ</span>`
+      : '';
+    return `<label><span class="label-line"><span>${label}</span>${info}</span><input id="bustr-plus-${name}" type="number" step="1" min="0" value="${escapeAttr(value)}"></label>`;
   }
 
   function wirePanel(panel) {
     panel.querySelector('[data-action="close"]').addEventListener('click', () => {
+      hideHelpTip();
       panel.hidden = true;
     });
     panel.querySelector('[data-action="theme"]').addEventListener('click', () => {
+      hideHelpTip();
       state.settings.theme = state.settings.theme === 'light' ? 'dark' : 'light';
       saveSettings();
       renderPanel(true);
@@ -466,6 +516,48 @@
       startRefreshTimer();
       renderPanel(true);
     });
+    wireHelpTips(panel);
+  }
+
+  function wireHelpTips(panel) {
+    for (const dot of panel.querySelectorAll('.help-dot')) {
+      dot.addEventListener('mouseenter', () => showHelpTip(dot));
+      dot.addEventListener('focus', () => showHelpTip(dot));
+      dot.addEventListener('mouseleave', hideHelpTip);
+      dot.addEventListener('blur', hideHelpTip);
+    }
+  }
+
+  function showHelpTip(anchor) {
+    const text = anchor.dataset.tip;
+    if (!text) return;
+    let tip = document.getElementById('bustr-plus-help-tip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'bustr-plus-help-tip';
+      document.body.appendChild(tip);
+    }
+    tip.textContent = text;
+    tip.classList.toggle('bustr-plus-light', state.settings.theme === 'light');
+    tip.style.left = '0px';
+    tip.style.top = '0px';
+
+    const anchorRect = anchor.getBoundingClientRect();
+    const tipRect = tip.getBoundingClientRect();
+    const margin = 8;
+    let left = anchorRect.left + anchorRect.width / 2 - tipRect.width / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+
+    let top = anchorRect.top - tipRect.height - margin;
+    if (top < margin) top = anchorRect.bottom + margin;
+    top = Math.max(margin, Math.min(top, window.innerHeight - tipRect.height - margin));
+
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+  }
+
+  function hideHelpTip() {
+    document.getElementById('bustr-plus-help-tip')?.remove();
   }
 
   function showPanelHint(panel, message) {
@@ -474,10 +566,18 @@
   }
 
   function readSettingsFromPanel(panel) {
-    for (const key of ['hardnessLimit', 'customPenaltyThreshold', 'refreshSeconds', 'decayDivisorHours', 'decayWindowHours', 'greenLimit']) {
+    const numberRules = {
+      hardnessLimit: { min: 0 },
+      customPenaltyThreshold: { min: 0 },
+      refreshSeconds: { min: 15 },
+      decayDivisorHours: { min: 1 },
+      decayWindowHours: { min: 1 },
+      greenLimit: { min: 0 },
+    };
+    for (const [key, rule] of Object.entries(numberRules)) {
       const el = panel.querySelector(`#bustr-plus-${key}`);
-      const value = Number(el.value);
-      if (Number.isFinite(value)) state.settings[key] = value;
+      const value = Math.floor(Number(el.value));
+      if (Number.isFinite(value)) state.settings[key] = Math.max(rule.min, value);
     }
     state.settings.hideHardTargets = panel.querySelector('#bustr-plus-hideHardTargets').checked;
     state.settings.sortByHardness = panel.querySelector('#bustr-plus-sortByHardness').checked;
@@ -605,16 +705,17 @@
   }
 
   function formatAvailable() {
-    return state.availableBusts == null ? '?' : state.availableBusts;
+    return state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
   }
 
   async function loadBustData(force) {
     if (!state.apiKey) return;
     const ageMs = Date.now() - state.lastFetchMs;
     if (!force && ageMs < state.settings.refreshSeconds * 1000) return;
+    if (state.loadBustDataPromise) return state.loadBustDataPromise;
 
     const url = `https://api.torn.com/user/?selections=log&log=${BUST_LOG_ID}&key=${encodeURIComponent(state.apiKey)}`;
-    try {
+    state.loadBustDataPromise = (async () => {
       const response = await fetch(url, { credentials: 'omit' });
       const data = await response.json();
       if (data.error) throw new Error(data.error.error || 'Torn API error');
@@ -623,12 +724,18 @@
       recalcStats();
       saveStats();
       return true;
+    })();
+
+    try {
+      return await state.loadBustDataPromise;
     } catch (err) {
       console.error(`${SCRIPT}:`, err);
       renderPanel(true);
       const panel = document.getElementById('bustr-plus-panel');
       if (panel) showPanelHint(panel, `API error: ${err.message}`);
       return false;
+    } finally {
+      state.loadBustDataPromise = null;
     }
   }
 
@@ -803,6 +910,7 @@
 
   function isLikelyJailPlayerRow(row) {
     if (!row || row.nodeType !== Node.ELEMENT_NODE) return false;
+    if (!row.querySelector("a[href*='XID='], a[href*='/profiles.php?XID='], a.user.name")) return false;
     if (row.querySelector('.time') && row.querySelector('.level')) return true;
     const text = String(row.textContent || '').replace(/\s+/g, ' ').trim();
     return /\d+\s*(?:d|day|h|hour|m|min)\b/i.test(text) && /\b\d{1,4}\b/.test(text);
@@ -899,15 +1007,19 @@
       if (!row || !isLikelyJailPlayerRow(row)) return;
       const bustLink = event.target.closest("a[href*='breakout']");
       if (!bustLink) return;
-      if (Date.now() - state.lastBustActionClickMs < 1500) {
+      const bustHref = bustLink.href || bustLink.getAttribute('href') || '';
+      if (bustHref === state.lastBustActionHref && Date.now() - state.lastBustActionClickMs < 1200) {
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
       }
       state.lastBustActionClickMs = Date.now();
+      state.lastBustActionHref = bustHref;
       sessionStorage.setItem('bustrReturnToJailUntil', String(Date.now() + 8000));
-      sessionStorage.setItem('bustrLastQuickBustHref', bustLink.href || bustLink.getAttribute('href') || '');
-      debugLog('allowing Torn quick bust navigation', bustLink.href || bustLink.getAttribute('href'));
+      sessionStorage.setItem('bustrReturnToJailArmedAt', String(Date.now()));
+      sessionStorage.setItem('bustrLastQuickBustHref', bustHref);
+      armReturnToJailWatcher();
+      debugLog('allowing Torn quick bust navigation', bustHref);
     }, true);
   }
 
@@ -918,17 +1030,40 @@
   function returnToJailAfterQuickBustRedirect() {
     const until = Number(sessionStorage.getItem('bustrReturnToJailUntil') || 0);
     if (!until || Date.now() > until) {
-      sessionStorage.removeItem('bustrReturnToJailUntil');
+      clearReturnToJailWatcher();
       return false;
     }
-    if (window.location.pathname === '/jailview.php') return false;
+    if (window.location.pathname === '/jailview.php') {
+      const armedAt = Number(sessionStorage.getItem('bustrReturnToJailArmedAt') || 0);
+      if (armedAt && Date.now() - armedAt > 2500) clearReturnToJailWatcher();
+      return false;
+    }
     debugLog('returning to jail after Torn quick bust redirect', {
       current: window.location.href,
       bust: sessionStorage.getItem('bustrLastQuickBustHref'),
     });
-    sessionStorage.removeItem('bustrReturnToJailUntil');
+    clearReturnToJailWatcher();
     window.location.replace('/jailview.php');
     return true;
+  }
+
+  function armReturnToJailWatcher() {
+    if (state.returnToJailTimerId) clearInterval(state.returnToJailTimerId);
+    state.returnToJailTimerId = setInterval(() => {
+      const until = Number(sessionStorage.getItem('bustrReturnToJailUntil') || 0);
+      if (!until || Date.now() > until) {
+        clearReturnToJailWatcher();
+        return;
+      }
+      returnToJailAfterQuickBustRedirect();
+    }, 100);
+  }
+
+  function clearReturnToJailWatcher() {
+    if (state.returnToJailTimerId) clearInterval(state.returnToJailTimerId);
+    state.returnToJailTimerId = null;
+    sessionStorage.removeItem('bustrReturnToJailUntil');
+    sessionStorage.removeItem('bustrReturnToJailArmedAt');
   }
 
   function scheduleHardnessRender() {
@@ -981,6 +1116,7 @@
 
   async function init() {
     loadState();
+    armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
     injectStyles();
     ensureToggleButton();
@@ -993,6 +1129,10 @@
     startRefreshTimer();
     window.addEventListener('resize', renderAll, { passive: true });
     window.addEventListener('hashchange', renderApiKeyGenerator, { passive: true });
+    window.addEventListener('pageshow', () => {
+      armReturnToJailWatcher();
+      returnToJailAfterQuickBustRedirect();
+    }, { passive: true });
   }
 
   const ready = document.readyState === 'complete'
