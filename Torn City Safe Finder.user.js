@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.1.1
+// @version      1.1.3
 // @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -13,19 +13,23 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.torn.com
-// @downloadURL  https://update.greasyfork.org/scripts/583629/Torn%20City%20Safe%20Finder.user.js
-// @updateURL    https://update.greasyfork.org/scripts/583629/Torn%20City%20Safe%20Finder.meta.js
+// @downloadURL none
+// @updateURL   none
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.1.1';
+    const VERSION = '1.1.3';
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
     const PICKUP_ZOOM = 6;
     const METADATA_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+    const METADATA_RETRY_MS = 5 * 60 * 1000;
+    const HISTORY_SAVE_INTERVAL_MS = 30 * 1000;
+    const EMPTY_SCAN_CONFIRMATIONS = 2;
+    const DRAG_THRESHOLD_PX = 7;
 
     const DEFAULT_SETTINGS = {
         fabX: null,
@@ -57,9 +61,22 @@
             return fallback;
         },
         set(key, value) {
+            let storedPrivately = false;
             try {
-                if (typeof GM_setValue === 'function') GM_setValue(STORE_PREFIX + key, value);
+                if (typeof GM_setValue === 'function') {
+                    GM_setValue(STORE_PREFIX + key, value);
+                    storedPrivately = true;
+                }
             } catch (_) {}
+
+            if (storedPrivately) {
+                // Migrate away from the old page-accessible fallback. This is
+                // especially important for settings because they may contain an API key.
+                try {
+                    localStorage.removeItem(STORE_PREFIX + key);
+                } catch (_) {}
+                return;
+            }
 
             try {
                 localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value));
@@ -78,6 +95,11 @@
     let syncTimer = null;
     let revealTimer = null;
     let busyMeta = false;
+    let nextMetadataAttemptAt = 0;
+    let lastHistorySaveAt = 0;
+    let consecutiveEmptyScans = 0;
+    let lastRenderedItemSignature = '';
+    let markerMap = null;
 
     let fab = null;
     let badge = null;
@@ -99,6 +121,7 @@
     function saveHistory() {
         trimHistory();
         STORE.set('history', historyMap);
+        lastHistorySaveAt = Date.now();
     }
 
     function pageWindow() {
@@ -313,10 +336,11 @@
         };
     }
 
-    function updateHistory(items) {
+    function updateHistory(items, allowGoneTransitions) {
         const now = Date.now();
         const activeKeys = new Set(items.map((item) => item.key));
-        let changed = false;
+        let dirty = false;
+        let persistImmediately = false;
 
         items.forEach((item) => {
             const enriched = enrichItem(item);
@@ -324,7 +348,8 @@
 
             if (!existing) {
                 historyMap[item.key] = makeRecord(item, now);
-                changed = true;
+                dirty = true;
+                persistImmediately = true;
                 return;
             }
 
@@ -345,19 +370,34 @@
             }
 
             historyMap[item.key] = next;
-            changed = true;
-        });
-
-        Object.keys(historyMap).forEach((key) => {
-            const record = historyMap[key];
-            if (record.status === 'active' && !activeKeys.has(key)) {
-                record.status = 'gone';
-                record.goneAt = now;
-                changed = true;
+            dirty = true;
+            if (existing.status !== next.status ||
+                existing.rowId !== next.rowId ||
+                existing.itemId !== next.itemId ||
+                existing.title !== next.title ||
+                existing.category !== next.category ||
+                existing.value !== next.value ||
+                existing.x !== next.x ||
+                existing.y !== next.y) {
+                persistImmediately = true;
             }
         });
 
-        if (changed) saveHistory();
+        if (allowGoneTransitions) {
+            Object.keys(historyMap).forEach((key) => {
+                const record = historyMap[key];
+                if (record.status === 'active' && !activeKeys.has(key)) {
+                    record.status = 'gone';
+                    record.goneAt = now;
+                    dirty = true;
+                    persistImmediately = true;
+                }
+            });
+        }
+
+        if (dirty && (persistImmediately || now - lastHistorySaveAt >= HISTORY_SAVE_INTERVAL_MS)) {
+            saveHistory();
+        }
     }
 
     function trimHistory() {
@@ -374,6 +414,17 @@
         return activeItems.filter((item) => {
             const record = historyMap[item.key];
             return !record || record.status !== 'picked';
+        });
+    }
+
+    function markerSignature() {
+        return JSON.stringify({
+            selectedKey,
+            showImages: settings.showImages,
+            items: activeItems.map((item) => {
+                const record = historyMap[item.key];
+                return [item.key, item.itemId, item.title, item.x, item.y, record ? record.status : 'active'];
+            })
         });
     }
 
@@ -395,89 +446,163 @@
         if (document.getElementById('tcfs-styles')) return;
 
         const css = `
-            #tcfs-fab{
-                position:fixed;
-                z-index:2147483000;
-
-                display:flex;
-                align-items:center;
-                gap:8px;
-
-                height:42px;
-                padding:0 14px;
-
-                border-radius:10px;
-
-                border:1px solid #555;
-
-                background:
-                    linear-gradient(#5a5a5a 0%, #434343 8%, #2f2f2f 50%, #232323 100%);
-
+            #tcfs-fab {
+                position: fixed;
+                z-index: 2147483000;
+                width: 46px;
+                height: 46px;
+                display: flex;
+                align-items: center;
+                gap: 0;
+                padding: 0 13px;
+                overflow: visible;
+                border: 1px solid #505050;
+                border-radius: 12px;
+                background: linear-gradient(180deg, #3a3a3a 0%, #303030 48%, #272727 100%);
+                color: #d7d7d7;
                 box-shadow:
-                    inset 0 1px rgba(255,255,255,.18),
-                    inset 0 -1px rgba(0,0,0,.45),
-                    0 2px 5px rgba(0,0,0,.45);
-
-                cursor:pointer;
-                user-select:none;
-                touch-action:none;
-
-                font-family:Arial,sans-serif;
-
-                transition:background .15s ease,
-                           transform .1s ease,
-                           box-shadow .15s ease;
+                    inset 0 1px rgba(255,255,255,.09),
+                    inset 0 -1px rgba(0,0,0,.4),
+                    0 5px 16px rgba(0,0,0,.42);
+                cursor: pointer;
+                user-select: none;
+                touch-action: none;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+                transition: width .2s ease, background .15s ease, border-color .15s ease,
+                            transform .1s ease, box-shadow .18s ease;
             }
 
-            #tcfs-fab:hover{
-                background:
-                    linear-gradient(#666 0%, #4b4b4b 8%, #383838 50%, #2d2d2d 100%);
+            #tcfs-fab::before {
+                content: "";
+                position: absolute;
+                left: -1px;
+                top: 9px;
+                width: 3px;
+                height: 26px;
+                border-radius: 0 3px 3px 0;
+                background: #c84a4a;
+                opacity: 0;
+                transform: scaleY(.55);
+                transition: opacity .15s ease, transform .18s ease;
             }
 
-            #tcfs-fab:active{
-                transform:translateY(1px);
+            #tcfs-fab:hover,
+            #tcfs-fab:focus-visible,
+            #tcfs-fab.tcfs-open {
+                width: 132px;
+                gap: 9px;
+                border-color: #606060;
+                background: linear-gradient(180deg, #424242 0%, #363636 48%, #2c2c2c 100%);
             }
 
-            #tcfs-fab .cfc-icon{
-                display:flex;
-                align-items:center;
-                justify-content:center;
-                opacity:.9;
+            #tcfs-fab.tcfs-expand-left {
+                flex-direction: row-reverse;
             }
 
-            #tcfs-fab .cfc-label{
-                color:#f2f2f2;
-                font-size:14px;
-                font-weight:700;
-                letter-spacing:.2px;
-                text-transform:uppercase;
-                text-shadow:0 1px 1px #000;
+            #tcfs-fab.tcfs-expand-left:hover,
+            #tcfs-fab.tcfs-expand-left:focus-visible,
+            #tcfs-fab.tcfs-expand-left.tcfs-open {
+                transform: translateX(-86px);
             }
 
-            #tcfs-fab .tcfs-badge{
-                width:22px;
-                height:22px;
+            #tcfs-fab.tcfs-open::before,
+            #tcfs-fab.tcfs-has-items::before {
+                opacity: 1;
+                transform: scaleY(1);
+            }
 
-                display:none;
-                align-items:center;
-                justify-content:center;
-
-                background:#1d1d1d;
-
-                border:1px solid #3d3d3d;
-
-                border-radius:4px;
-
-                color:#9dcc2d;
-
-                font-size:12px;
-                font-weight:700;
-
-                padding:0;
-
+            #tcfs-fab.tcfs-has-items {
+                border-color: rgba(200,74,74,.8);
                 box-shadow:
-                    inset 0 1px rgba(255,255,255,.08),
-                    inset 0 -1px rgba(0,0,0,.35);
+                    inset 0 1px rgba(255,255,255,.09),
+                    inset 0 -1px rgba(0,0,0,.4),
+                    0 5px 16px rgba(0,0,0,.42),
+                    0 0 0 1px rgba(200,74,74,.16),
+                    0 0 14px rgba(200,74,74,.18);
+            }
+
+            #tcfs-fab:active,
+            #tcfs-fab.tcfs-dragging {
+                transform: translateY(1px);
+            }
+
+            #tcfs-fab.tcfs-dragging {
+                cursor: grabbing;
+                transition: none;
+            }
+
+            #tcfs-fab.tcfs-expand-left:hover:active,
+            #tcfs-fab.tcfs-expand-left.tcfs-dragging {
+                transform: translate(-86px, 1px);
+            }
+
+            #tcfs-fab .cfc-icon {
+                width: 20px;
+                height: 20px;
+                flex: 0 0 20px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: #e2e2e2;
+            }
+
+            #tcfs-fab .cfc-icon svg {
+                width: 20px;
+                height: 20px;
+                display: block;
+            }
+
+            #tcfs-fab .cfc-label {
+                width: 0;
+                overflow: hidden;
+                opacity: 0;
+                white-space: nowrap;
+                color: #ededed;
+                font-size: 13px;
+                font-weight: 700;
+                letter-spacing: .1px;
+                text-align: left;
+                transition: width .2s ease, opacity .12s ease .03s;
+            }
+
+            #tcfs-fab:hover .cfc-label,
+            #tcfs-fab:focus-visible .cfc-label,
+            #tcfs-fab.tcfs-open .cfc-label {
+                width: 72px;
+                opacity: 1;
+            }
+
+            #tcfs-fab.tcfs-dragging,
+            #tcfs-fab.tcfs-expand-left.tcfs-dragging {
+                width: 46px;
+                gap: 0;
+                transform: translateY(1px);
+            }
+
+            #tcfs-fab.tcfs-dragging .cfc-label {
+                width: 0;
+                opacity: 0;
+            }
+
+            #tcfs-fab .tcfs-badge {
+                position: absolute;
+                top: -6px;
+                right: -6px;
+                min-width: 19px;
+                height: 19px;
+                box-sizing: border-box;
+                display: none;
+                align-items: center;
+                justify-content: center;
+                padding: 0 5px;
+                border: 2px solid #272727;
+                border-radius: 999px;
+                background: #c84a4a;
+                color: #fff;
+                box-shadow: 0 2px 7px rgba(0,0,0,.45);
+                font-size: 11px;
+                font-weight: 800;
+                line-height: 1;
             }
             #tcfs-panel {
                 position: fixed;
@@ -870,6 +995,24 @@
                 font: 700 12px/1.35 Arial, sans-serif;
             }
             #tcfs-toast.tcfs-show { opacity: 1; }
+            @media (hover: none) {
+                #tcfs-fab:hover:not(.tcfs-open) {
+                    width: 46px;
+                    gap: 0;
+                    transform: none;
+                }
+                #tcfs-fab:hover:not(.tcfs-open) .cfc-label {
+                    width: 0;
+                    opacity: 0;
+                }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                #tcfs-fab,
+                #tcfs-fab::before,
+                #tcfs-fab .cfc-label {
+                    transition: none;
+                }
+            }
             @media (max-width: 520px) {
                 #tcfs-panel {
                     width: calc(100vw - 20px);
@@ -898,24 +1041,28 @@
         fab = document.createElement('button');
         fab.id = 'tcfs-fab';
         fab.type = 'button';
-        fab.title = 'City items';
+        fab.title = 'City Finds';
+        fab.setAttribute('aria-label', 'Open City Finds');
+        fab.setAttribute('aria-controls', 'tcfs-panel');
+        fab.setAttribute('aria-expanded', 'false');
         
-        // Formatted Option 1 inner element setup (incorporating standard map loot abstract inline vectors)
         fab.innerHTML = `
             <div class="cfc-icon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d1c7bd" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M2 22 18 6M16 4l4 4M19 3l1.5 1.5M14 2l8 8" />
-                    <path d="M12 11a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" fill="rgba(0,0,0,0.3)" />
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M18 10c0 4.7-6 10.5-6 10.5S6 14.7 6 10a6 6 0 1 1 12 0Z" />
+                    <circle cx="12" cy="10" r="2.25" />
                 </svg>
             </div>
-            <div class="cfc-label">City Find Collect</div>
-            <span class="tcfs-badge"></span>
+            <span class="cfc-label">City Finds</span>
+            <span class="tcfs-badge" aria-label="0 active finds"></span>
         `;
         document.body.appendChild(fab);
         badge = fab.querySelector('.tcfs-badge');
 
         panel = document.createElement('div');
         panel.id = 'tcfs-panel';
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-label', 'City Finds');
         panel.innerHTML = `
             <div class="tcfs-head">
                 <div class="tcfs-title">City Finder <span>v${VERSION}</span></div>
@@ -949,8 +1096,9 @@
 
         makeFabDraggable();
         placeFab(
-            settings.fabX == null ? window.innerWidth - 220 : settings.fabX,
-            settings.fabY == null ? window.innerHeight - 80 : settings.fabY
+            settings.fabX == null ? window.innerWidth - 62 : settings.fabX,
+            settings.fabY == null ? window.innerHeight - 80 : settings.fabY,
+            true
         );
 
         panel.addEventListener('click', onPanelClick);
@@ -966,8 +1114,7 @@
         });
 
         window.addEventListener('resize', () => {
-            const rect = fab.getBoundingClientRect();
-            placeFab(rect.left, rect.top);
+            placeFab(settings.fabX, settings.fabY, true);
             if (panel.classList.contains('tcfs-open')) anchorPanel();
         });
 
@@ -1068,6 +1215,7 @@
                 </div>
                 <div class="tcfs-setting-note">
                     Status: <strong>${escapeHtml(metaStatus)}</strong>${busyMeta ? ' (Syncing...)' : ''}. Cached values refresh auto every 12 hours.
+                    <br>Uses only Torn's public <code>torn/items</code> selection. The key and returned values stay in private local userscript storage and are sent only to <code>api.torn.com</code>. Use a Public-access key.
                     <br><button class="tcfs-smallbtn" type="button" data-action="refresh-meta" style="margin-top:5px;" ${busyMeta ? 'disabled' : ''}>Force Update Now</button>
                 </div>
             </div>
@@ -1092,6 +1240,7 @@
                     document.getElementById('tcfs-api-block').style.display = settings.apiEnabled ? 'block' : 'none';
                     if (settings.apiEnabled && !itemMetaFetchedAt) fetchItemMetadata(false);
                 }
+                if (name === 'showImages') renderMapPins();
                 render();
             });
         });
@@ -1117,14 +1266,19 @@
 
         settings.apiKey = key;
         saveSettings();
+        nextMetadataAttemptAt = 0;
         showToast('API key locally saved.');
         fetchItemMetadata(true);
     }
 
     function togglePanel(forceOpen) {
         const next = forceOpen === undefined ? !panel.classList.contains('tcfs-open') : Boolean(forceOpen);
+        fab.classList.toggle('tcfs-open', next);
+        fab.setAttribute('aria-expanded', String(next));
+        fab.setAttribute('aria-label', next ? 'Close City Finds' : 'Open City Finds');
         if (next) {
             panel.classList.add('tcfs-open');
+            render();
             anchorPanel();
         } else {
             panel.classList.remove('tcfs-open');
@@ -1133,21 +1287,22 @@
         saveSettings();
     }
 
-    function placeFab(left, top) {
+    function placeFab(left, top, persist) {
         if (!fab) return;
         const pad = 10;
-        const w = fab.offsetWidth || 150;
-        const h = fab.offsetHeight || 38;
+        const w = 46;
+        const h = 46;
 
         const x = Math.max(pad, Math.min(window.innerWidth - w - pad, left));
         const y = Math.max(pad, Math.min(window.innerHeight - h - pad, top));
 
         fab.style.left = x + 'px';
         fab.style.top = y + 'px';
+        fab.classList.toggle('tcfs-expand-left', x + (w / 2) > window.innerWidth / 2);
 
         settings.fabX = x;
         settings.fabY = y;
-        saveSettings();
+        if (persist) saveSettings();
     }
 
     function anchorPanel() {
@@ -1173,55 +1328,86 @@
 
     function makeFabDraggable() {
         let dragging = false;
+        let suppressClick = false;
+        let pointerId = null;
+        let originX = 0;
+        let originY = 0;
         let startX = 0;
         let startY = 0;
-        let moveX = 0;
-        let moveY = 0;
 
-        fab.addEventListener('mousedown', onStart);
-        fab.addEventListener('touchstart', onStart, { passive: false });
+        fab.addEventListener('pointerdown', onStart);
+        fab.addEventListener('pointermove', onMove);
+        fab.addEventListener('pointerup', onEnd);
+        fab.addEventListener('pointercancel', onCancel);
+        fab.addEventListener('click', onClick);
 
         function onStart(event) {
-            if (event.button && event.button !== 0) return;
-            const clientX = event.touches ? event.touches[0].clientX : event.clientX;
-            const clientY = event.touches ? event.touches[0].clientY : event.clientY;
+            if (event.button !== 0 || pointerId !== null) return;
 
             dragging = false;
+            suppressClick = false;
+            pointerId = event.pointerId;
+            originX = event.clientX;
+            originY = event.clientY;
             const rect = fab.getBoundingClientRect();
-            startX = clientX - rect.left;
-            startY = clientY - rect.top;
+            const cssLeft = parseFloat(fab.style.left);
+            const cssTop = parseFloat(fab.style.top);
+            startX = event.clientX - (Number.isFinite(cssLeft) ? cssLeft : rect.left);
+            startY = event.clientY - (Number.isFinite(cssTop) ? cssTop : rect.top);
 
-            window.addEventListener('mousemove', onMove);
-            window.addEventListener('mouseup', onEnd);
-            window.addEventListener('touchmove', onMove, { passive: false });
-            window.addEventListener('touchend', onEnd);
+            try {
+                fab.setPointerCapture(pointerId);
+            } catch (_) {}
         }
 
         function onMove(event) {
-            const clientX = event.touches ? event.touches[0].clientX : event.clientX;
-            const clientY = event.touches ? event.touches[0].clientY : event.clientY;
+            if (event.pointerId !== pointerId) return;
 
             if (!dragging) {
+                const distance = Math.hypot(event.clientX - originX, event.clientY - originY);
+                if (distance < DRAG_THRESHOLD_PX) return;
                 dragging = true;
-                if (event.cancelable) event.preventDefault();
+                suppressClick = true;
+                fab.classList.add('tcfs-dragging');
             }
 
-            moveX = clientX - startX;
-            moveY = clientY - startY;
-            placeFab(moveX, moveY);
+            if (event.cancelable) event.preventDefault();
+            placeFab(event.clientX - startX, event.clientY - startY, false);
+            if (panel.classList.contains('tcfs-open')) anchorPanel();
         }
 
-        function onEnd() {
-            window.removeEventListener('mousemove', onMove);
-            window.removeEventListener('mouseup', onEnd);
-            window.removeEventListener('touchmove', onMove);
-            window.removeEventListener('touchend', onEnd);
+        function finishPointer(event, cancelled) {
+            if (event.pointerId !== pointerId) return;
+            try {
+                fab.releasePointerCapture(pointerId);
+            } catch (_) {}
+            pointerId = null;
+            fab.classList.remove('tcfs-dragging');
 
-            if (!dragging) {
-                togglePanel();
-            } else if (panel.classList.contains('tcfs-open')) {
-                anchorPanel();
+            if (dragging) {
+                saveSettings();
+                if (panel.classList.contains('tcfs-open')) anchorPanel();
             }
+            dragging = false;
+            if (cancelled) suppressClick = false;
+            else setTimeout(() => { suppressClick = false; }, 0);
+        }
+
+        function onEnd(event) {
+            finishPointer(event, false);
+        }
+
+        function onCancel(event) {
+            finishPointer(event, true);
+        }
+
+        function onClick(event) {
+            if (suppressClick) {
+                event.preventDefault();
+                suppressClick = false;
+                return;
+            }
+            togglePanel();
         }
     }
 
@@ -1235,7 +1421,7 @@
         }
 
         clearTimeout(toastTimer);
-        toast.innerHTML = cleanText(message);
+        toast.textContent = cleanText(message);
         toast.classList.add('tcfs-show');
 
         toastTimer = setTimeout(() => {
@@ -1311,7 +1497,7 @@
         saveHistory();
 
         if (selectedKey === key) selectedKey = null;
-        showToast(`Logged "${escapeHtml(record.title)}" as manually collected.`);
+        showToast(`Logged "${record.title}" as manually collected.`);
         syncNow(false);
     }
 
@@ -1325,7 +1511,7 @@
         record.goneAt = null;
         saveHistory();
 
-        showToast(`Restored "${escapeHtml(record.title)}" to active trackers.`);
+        showToast(`Restored "${record.title}" to active trackers.`);
         syncNow(false);
     }
 
@@ -1508,22 +1694,21 @@
     function updateFabCounter() {
         if (!badge) return;
         const count = visibleActiveItems().length;
+        fab.classList.toggle('tcfs-has-items', count > 0);
+        badge.setAttribute('aria-label', `${count} active ${count === 1 ? 'find' : 'finds'}`);
         if (count > 0) {
             badge.innerText = count;
-            badge.style.display = 'block';
+            badge.style.display = 'inline-flex';
         } else {
+            badge.innerText = '';
             badge.style.display = 'none';
         }
     }
 
     function clearMarkers() {
-        const L = getLeaflet();
-        const torn = getTorn();
-        if (!L || !torn || !torn.map || !torn.map.lmap) return;
-
         Object.keys(markers).forEach((key) => {
             try {
-                markers[key].removeFrom(torn.map.lmap);
+                markers[key].remove();
             } catch (_) {}
         });
         markers = {};
@@ -1535,7 +1720,7 @@
 
         const L = getLeaflet();
         const torn = getTorn();
-        const now = Date.now();
+        markerMap = torn.map.lmap;
 
         activeItems.forEach((item) => {
             const record = historyMap[item.key];
@@ -1545,7 +1730,6 @@
             if (!latLng) return;
 
             const isSel = item.key === selectedKey;
-            const meta = metadataFor(item.itemId);
             const labelHtml = escapeHtml(item.title);
 
             let pinInner = escapeHtml(item.title.slice(0, 2));
@@ -1597,6 +1781,7 @@
                 }
             });
         }
+        lastRenderedItemSignature = markerSignature();
     }
 
     function syncNow(explicitManual) {
@@ -1606,12 +1791,29 @@
         }
 
         const freshItems = getPageItems();
+        const hadTrackedActiveItems = activeItems.length > 0 || Object.values(historyMap).some((record) => record.status === 'active');
+
+        if (freshItems.length === 0 && hadTrackedActiveItems) {
+            consecutiveEmptyScans++;
+            if (consecutiveEmptyScans < EMPTY_SCAN_CONFIRMATIONS) {
+                if (explicitManual) showToast('Map item data is temporarily empty. Waiting for confirmation before changing history.');
+                return;
+            }
+        } else {
+            consecutiveEmptyScans = 0;
+        }
+
         activeItems = freshItems;
 
-        updateHistory(freshItems);
+        updateHistory(freshItems, true);
         updateFabCounter();
-        renderMapPins();
+        if (getTorn().map.lmap !== markerMap || markerSignature() !== lastRenderedItemSignature) renderMapPins();
         render();
+
+        if (settings.apiEnabled && settings.apiKey &&
+            Date.now() - itemMetaFetchedAt >= METADATA_CACHE_MAX_AGE_MS) {
+            fetchItemMetadata(false);
+        }
 
         if (explicitManual) showToast(`Scan complete. Found ${freshItems.length} active loot target coordinates.`);
     }
@@ -1629,8 +1831,10 @@
             metaStatus = 'Cached';
             return;
         }
+        if (!force && now < nextMetadataAttemptAt) return;
 
         busyMeta = true;
+        nextMetadataAttemptAt = now + METADATA_RETRY_MS;
         metaStatus = 'Syncing...';
         renderSettings();
 
@@ -1663,6 +1867,7 @@
 
                         itemMeta = parsedMeta;
                         itemMetaFetchedAt = Date.now();
+                        nextMetadataAttemptAt = itemMetaFetchedAt + METADATA_CACHE_MAX_AGE_MS;
                         metaStatus = 'Cached';
 
                         STORE.set('itemMeta', itemMeta);
@@ -1671,8 +1876,18 @@
                         showToast('Market metadata successfully synced with Torn Public API.');
                         syncNow(false);
                     } else if (data && data.error && typeof data.error === 'object') {
+                        const errorCode = Number(data.error.code);
                         metaStatus = 'API Error ' + (data.error.code || '?');
-                        showToast(`API sync warning: ${escapeHtml(data.error.error || 'Unknown error code')}`);
+                        if (errorCode === 2) {
+                            settings.apiKey = '';
+                            settings.apiEnabled = false;
+                            saveSettings();
+                            metaStatus = 'Invalid Key';
+                        } else if (errorCode === 13 || errorCode === 18) {
+                            settings.apiEnabled = false;
+                            saveSettings();
+                        }
+                        showToast(`API sync warning: ${data.error.error || 'Unknown error code'}`);
                     } else {
                         metaStatus = 'Bad Format';
                     }
@@ -1707,11 +1922,18 @@
         }, POLL_MS);
     }
 
-    const startObserver = new MutationObserver((mutations, obs) => {
+    function tryStart() {
         if (document.body && tornReady()) {
             initLoop();
-            obs.disconnect();
+            return true;
         }
-    });
-    startObserver.observe(document.documentElement, { childList: true, subtree: true });
+        return false;
+    }
+
+    if (!tryStart()) {
+        const startObserver = new MutationObserver((mutations, obs) => {
+            if (tryStart()) obs.disconnect();
+        });
+        startObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
 })();
