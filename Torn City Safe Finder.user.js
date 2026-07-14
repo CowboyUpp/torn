@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.1.3
+// @version      1.1.4
 // @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -20,7 +20,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.1.3';
+    const VERSION = '1.1.4';
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -469,7 +469,7 @@
                 touch-action: none;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
                 transition: width .2s ease, background .15s ease, border-color .15s ease,
-                            transform .1s ease, box-shadow .18s ease;
+                            transform .2s ease, box-shadow .18s ease;
             }
 
             #tcfs-fab::before {
