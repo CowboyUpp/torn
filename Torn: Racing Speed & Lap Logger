@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.11
+// @version      2.7.13
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.11';
+const SCRIPT_VERSION = '2.7.13';
 const $ = unsafeWindow.$;
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -360,20 +360,23 @@ GM_addStyle(`
     #rslogSessionTopVal { color: #ff9900; font-weight: bold; }
     #rslogPbCompare { color: #888; font-size: 10px; white-space: nowrap; }
     #rslogPbCompare.rslogPbAhead { color: #00ff88; font-weight: bold; }
-    #rslogStatus { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid #555; border-radius: 10px; color: #aaa; font-size: 9px; font-weight: bold; white-space: nowrap; }
-    #rslogStatus::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #777; }
-    #rslogStatus.rslogStatusLogging { color: #00ff88; border-color: #17633f; }
-    #rslogStatus.rslogStatusLogging::before { background: #00ff88; box-shadow: 0 0 4px #00ff88; }
-    #rslogStatus.rslogStatusWaiting { color: #ffd700; border-color: #685b19; }
-    #rslogStatus.rslogStatusWaiting::before { background: #ffd700; }
-    #rslogStatus.rslogStatusPaused { color: #ff9900; border-color: #714a15; }
-    #rslogStatus.rslogStatusPaused::before { background: #ff9900; }
+    #rslogStatus, #rslogToolbarStatus { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid #555; border-radius: 10px; color: #aaa; font-size: 9px; font-weight: bold; white-space: nowrap; }
+    #rslogStatus::before, #rslogToolbarStatus::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #777; }
+    #rslogStatus.rslogStatusLogging, #rslogToolbarStatus.rslogStatusLogging { color: #00ff88; border-color: #17633f; }
+    #rslogStatus.rslogStatusLogging::before, #rslogToolbarStatus.rslogStatusLogging::before { background: #00ff88; box-shadow: 0 0 4px #00ff88; }
+    #rslogStatus.rslogStatusWaiting, #rslogToolbarStatus.rslogStatusWaiting { color: #ffd700; border-color: #685b19; }
+    #rslogStatus.rslogStatusWaiting::before, #rslogToolbarStatus.rslogStatusWaiting::before { background: #ffd700; }
+    #rslogStatus.rslogStatusPaused, #rslogToolbarStatus.rslogStatusPaused { color: #ff9900; border-color: #714a15; }
+    #rslogStatus.rslogStatusPaused::before, #rslogToolbarStatus.rslogStatusPaused::before { background: #ff9900; }
     #rslogLiveModeBtn { padding: 2px 6px; border: 1px solid #444; border-radius: 3px; background: #181818; color: #888; font: inherit; font-size: 9px; cursor: pointer; }
     #rslogLiveModeBtn:hover { color: #fff200; border-color: #777; }
-    .rslogRaceHeaderHost { position: relative !important; }
-    #rslogRaceSpeedBadge { position: absolute; right: 34px; top: 50%; transform: translateY(-50%); z-index: 5; padding: 2px 7px; border: 1px solid #706500; border-radius: 9px; background: rgba(12,12,12,.88); color: #fff200; font-size: 10px; font-weight: bold; line-height: 14px; white-space: nowrap; pointer-events: none; }
-    #rslogRaceSpeedBadge .rslogRaceSpeedLabel { color: #aaa; font-weight: normal; margin-right: 3px; }
-    #rslogRaceLinkBtn { position: absolute; right: 138px; top: 50%; transform: translateY(-50%); z-index: 6; padding: 2px 7px; border: 1px solid #3e6b83; border-radius: 9px; background: rgba(12,12,12,.88); color: #58c8ff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
+    #rslogRaceToolbar { display: flex; align-items: center; gap: 10px; min-height: 25px; margin-bottom: 6px; padding: 3px 10px; box-sizing: border-box; border: 1px solid #333; border-radius: 5px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); color: #ccc; font-family: "Courier New", Courier, monospace; font-size: 10px; }
+    #rslogRaceToolbar .rslogVersion { color: #aaa; font-weight: 600; text-shadow: 0 1px 1px #000; }
+    #rslogToolbarLiveWrap, #rslogToolbarTopWrap { white-space: nowrap; }
+    #rslogToolbarSpeed { color: #fff200; font-weight: bold; }
+    #rslogToolbarTop { color: #ff9900; font-weight: bold; }
+    #rslogRaceToolbar .rslogToolbarSpacer { flex: 1; }
+    #rslogRaceLinkBtn { padding: 2px 8px; border: 1px solid #3e6b83; border-radius: 9px; background: #171717; color: #58c8ff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
     #rslogRaceLinkBtn:hover { color: #fff; border-color: #58c8ff; }
     #rslogRaceLinkBtn:disabled { color: #666; border-color: #444; cursor: default; }
     .rslogFinalResult { margin-left: 5px; color: #ccc; font-size: 11px; white-space: nowrap; }
@@ -481,8 +484,13 @@ function setLoggerStatus(status) {
     const labels = { logging: 'LOGGING', waiting: 'WAITING', paused: 'SAMPLE RESET' };
     const classes = 'rslogStatusLogging rslogStatusWaiting rslogStatusPaused';
     const el = $('#rslogStatus');
-    if (!el.length) return;
-    el.removeClass(classes)
+    if (el.length) {
+        el.removeClass(classes)
+            .addClass(status === 'logging' ? 'rslogStatusLogging' : status === 'paused' ? 'rslogStatusPaused' : 'rslogStatusWaiting')
+            .text(labels[status] || labels.waiting);
+    }
+    const toolbar = $('#rslogToolbarStatus');
+    toolbar.removeClass(classes)
         .addClass(status === 'logging' ? 'rslogStatusLogging' : status === 'paused' ? 'rslogStatusPaused' : 'rslogStatusWaiting')
         .text(labels[status] || labels.waiting);
 }
@@ -492,20 +500,20 @@ function getLiveSpeedMode() {
     return ['auto', 'show', 'hide'].includes(mode) ? mode : 'auto';
 }
 
-function injectRaceSpeedBadge() {
-    const title = document.querySelector('div.title-black.t-overflow');
-    const host = title?.parentElement;
+function injectRaceToolbar() {
+    const host = document.getElementById('racingupdatesnew');
     if (!host) return;
-    host.classList.add('rslogRaceHeaderHost');
-    if (!document.getElementById('rslogRaceSpeedBadge')) {
-        host.insertAdjacentHTML('beforeend', `
-            <span id="rslogRaceSpeedBadge" title="Racing Speed & Lap Logger v${SCRIPT_VERSION}">
-                <span class="rslogRaceSpeedLabel">SPD</span><span id="rslogRaceSpeedValue">–.— mph</span>
-            </span>
+    if (!document.getElementById('rslogRaceToolbar')) {
+        host.insertAdjacentHTML('afterbegin', `
+            <div id="rslogRaceToolbar">
+                <span class="rslogVersion">v${SCRIPT_VERSION}</span>
+                <span id="rslogToolbarStatus" class="rslogStatusWaiting">WAITING</span>
+                <span id="rslogToolbarLiveWrap">Current <span id="rslogToolbarSpeed">–.— mph</span></span>
+                <span id="rslogToolbarTopWrap">Session top <span id="rslogToolbarTop">${sessionTopSpeed.toFixed(2)} mph</span></span>
+                <span class="rslogToolbarSpacer"></span>
+                <button id="rslogRaceLinkBtn" type="button" disabled>Copy race link</button>
+            </div>
         `);
-    }
-    if (!document.getElementById('rslogRaceLinkBtn')) {
-        host.insertAdjacentHTML('beforeend', '<button id="rslogRaceLinkBtn" type="button" disabled>Copy race link</button>');
         document.getElementById('rslogRaceLinkBtn').addEventListener('click', copyCurrentRaceLink);
     }
     updateRaceLinkButton();
@@ -548,7 +556,7 @@ function applyLiveSpeedVisibility() {
     const lugburzDetected = !!document.getElementById('speed_mph');
     const showLive = mode === 'show' || (mode === 'auto' && !lugburzDetected);
     $('#rslogSpeed').toggle(showLive);
-    $('#rslogRaceSpeedBadge').toggle(showLive);
+    $('#rslogToolbarLiveWrap').toggle(showLive);
     $('#rslogLiveModeBtn')
         .text(`LIVE: ${mode.toUpperCase()}`)
         .attr('title', mode === 'auto'
@@ -696,7 +704,7 @@ function injectWidget() {
 
     $('#racingdetails').after(html);
 
-    injectRaceSpeedBadge();
+    injectRaceToolbar();
     wireInfoIcon('#rslogWidgetSpeedInfoIcon');
 
     $('#rslogSpeedToggle').on('click', function () {
@@ -1246,7 +1254,7 @@ function startSpeedLoop() {
     maybeClear();
     setLoggerStatus('waiting');
     speedInterval = setInterval(() => {
-        injectRaceSpeedBadge();
+        injectRaceToolbar();
         applyLiveSpeedVisibility();
         const trackInfo = $('#racingupdatesnew').find('div.track-info');
         if (trackInfo.length < 1) {
@@ -1311,10 +1319,11 @@ function startSpeedLoop() {
         }
         if (Number.isFinite(speed) && speed > 10 && speed < 400) {
             setLoggerStatus('logging');
-            $('#rslogSpeed, #rslogRaceSpeedValue').text(speed.toFixed(2) + ' mph');
+            $('#rslogSpeed, #rslogToolbarSpeed').text(speed.toFixed(2) + ' mph');
             if (speed > sessionTopSpeed) {
                 sessionTopSpeed = speed;
                 $('#rslogSessionTopVal').text(speed.toFixed(2));
+                $('#rslogToolbarTop').text(speed.toFixed(2) + ' mph');
             }
             const previousRecord = currentSpeedRecord(currentTrack, currentCar);
             const isNewRecord = updateTopSpeed(currentTrack, speed, currentCar);
@@ -1449,10 +1458,9 @@ function renderLobbyLapTable() {
 // ─── Cleanup ───────────────────────────────────────────────────────────────────
 function cleanupRaceState(preserveRaceData = false) {
     maybeClear();
-    ['rslogWrapper', 'rslogRaceSpeedBadge', 'rslogRaceLinkBtn', 'rslogLobbyBtn', 'rslogLobbyVersion', 'rslogLobbyPanel'].forEach(id => {
+    ['rslogWrapper', 'rslogRaceToolbar', 'rslogLobbyBtn', 'rslogLobbyVersion', 'rslogLobbyPanel'].forEach(id => {
         document.getElementById(id)?.remove();
     });
-    document.querySelectorAll('.rslogRaceHeaderHost').forEach(el => el.classList.remove('rslogRaceHeaderHost'));
     $('.rslogOwnedPopover').remove();
     $(document).off('.rslogInfo');
     currentTrack    = '';
@@ -1488,11 +1496,11 @@ function checkRaceDom() {
         startSpeedLoop();
     }
     if (hasDetails) {
-        injectRaceSpeedBadge();
+        injectRaceToolbar();
         applyLiveSpeedVisibility();
         renderRaceResultsToLeaderboard();
     }
-    if (!hasDetails && (document.getElementById('rslogWrapper') || document.getElementById('rslogRaceSpeedBadge'))) {
+    if (!hasDetails && (document.getElementById('rslogWrapper') || document.getElementById('rslogRaceToolbar'))) {
         cleanupRaceState();
     }
     if (hasLobby && !hasDetails) {
