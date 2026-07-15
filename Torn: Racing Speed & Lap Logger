@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.9
+// @version      2.7.10
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.9';
+const SCRIPT_VERSION = '2.7.10';
 const $ = unsafeWindow.$;
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -242,11 +242,8 @@ function dateCellHtml(iso, todayCssClass) {
 }
 
 // ─── Update functions ──────────────────────────────────────────────────────────
-function updateTopSpeed(trackName, speed, carImg, trackLen) {
-    if (!trackName || carKey(carImg) === 'unknown' || !Number.isFinite(speed) || !Number.isFinite(trackLen)) return false;
-    const minSpeed = Math.max(10, trackLen * 10);
-    if (speed < minSpeed) return false;
-
+function updateTopSpeed(trackName, speed, carImg) {
+    if (!trackName || carKey(carImg) === 'unknown' || !Number.isFinite(speed) || speed <= 10) return false;
     const log = getSpeedLog();
     const key = trackName + '|' + carKey(carImg);
     if (!log[key] || speed > (log[key].topSpeed || 0)) {
@@ -647,11 +644,7 @@ function injectWidget() {
         </div>
     `;
 
-    if ($('#racingdetails').length > 0) {
-        $('#racingdetails').after(html);
-    } else if ($('#racingupdatesnew').length > 0) {
-        $('#racingupdatesnew').prepend(html);
-    }
+    $('#racingdetails').after(html);
 
     injectRaceSpeedBadge();
     wireInfoIcon('#rslogWidgetSpeedInfoIcon');
@@ -969,19 +962,28 @@ function launchFirework() {
 // Robust base64 decode — falls back to manual implementation if atob() fails
 // (Torn PDA's webview can occasionally mangle/restrict the native atob).
 function safeAtob(input) {
+    if (typeof input !== 'string') return null;
+    const clean = input.replace(/\s/g, '');
+    if (!clean || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean)
+        || clean.length % 4 === 1
+        || (clean.includes('=') && clean.length % 4 !== 0)) {
+        return null;
+    }
+    const padded = clean.padEnd(Math.ceil(clean.length / 4) * 4, '=');
+
     try {
-        return atob(input);
+        return atob(padded);
     } catch (e) {
         // Manual base64 decode fallback
         const keyStr = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
         let output = '';
         let i = 0;
-        const clean = input.replace(/[^A-Za-z0-9+/=]/g, '');
-        while (i < clean.length) {
-            const enc1 = keyStr.indexOf(clean.charAt(i++));
-            const enc2 = keyStr.indexOf(clean.charAt(i++));
-            const enc3 = keyStr.indexOf(clean.charAt(i++));
-            const enc4 = keyStr.indexOf(clean.charAt(i++));
+        while (i < padded.length) {
+            const enc1 = keyStr.indexOf(padded.charAt(i++));
+            const enc2 = keyStr.indexOf(padded.charAt(i++));
+            const enc3 = keyStr.indexOf(padded.charAt(i++));
+            const enc4 = keyStr.indexOf(padded.charAt(i++));
+            if (enc1 < 0 || enc2 < 0 || enc3 < 0 || enc4 < 0 || enc1 === 64 || enc2 === 64) return null;
             const chr1 = (enc1 << 2) | (enc2 >> 4);
             const chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
             const chr3 = ((enc3 & 3) << 6) | enc4;
@@ -1020,6 +1022,10 @@ function parseBestLapFromResponse(data) {
         if (!Array.isArray(trackData.intervals) || trackData.intervals.length === 0) return;
         const trackIntervals = trackData.intervals.length;
         const decoded = safeAtob(encoded);
+        if (decoded === null) {
+            console.debug('[Racing Logger] Ignoring malformed encoded race data.');
+            return;
+        }
         const intervals = decoded
             .split(',')
             .map(value => value.trim())
@@ -1078,7 +1084,15 @@ function startSpeedLoop() {
         injectRaceSpeedBadge();
         applyLiveSpeedVisibility();
         const trackInfo = $('#racingupdatesnew').find('div.track-info');
-        if (trackInfo.length < 1) { setLoggerStatus('waiting'); maybeClear(); return; }
+        if (trackInfo.length < 1) {
+            setLoggerStatus('waiting');
+            last_compl = -1.0;
+            lastSampleAt = 0;
+            lastSampleTrack = '';
+            lastSampleCar = '';
+            lastSampleLaps = 0;
+            return;
+        }
 
         const titleEl  = document.querySelector('div.title-black.t-overflow');
         const titleText = titleEl ? titleEl.textContent.trim() : '';
@@ -1138,7 +1152,7 @@ function startSpeedLoop() {
                 $('#rslogSessionTopVal').text(speed.toFixed(2));
             }
             const previousRecord = currentSpeedRecord(currentTrack, currentCar);
-            const isNewRecord = updateTopSpeed(currentTrack, speed, currentCar, len);
+            const isNewRecord = updateTopSpeed(currentTrack, speed, currentCar);
             updatePbComparison(speed, previousRecord, isNewRecord);
             if (isNewRecord) {
                 $('#rslogNewRecord').stop(true, true).show().delay(2000).fadeOut(500);
