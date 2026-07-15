@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.10
+// @version      2.7.11
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.10';
+const SCRIPT_VERSION = '2.7.11';
 const $ = unsafeWindow.$;
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -61,6 +61,10 @@ let sessionTopSpeed = 0;
 let currentTrack    = '';
 let currentCar      = '';
 let currentRaceLaps = 0;
+let currentRaceId   = '';
+let cachedRaceResults = null;
+let lastRaceResultKey = '';
+let lastResultsRenderAt = 0;
 let lastSampleAt    = 0;
 let lastSampleTrack = '';
 let lastSampleCar   = '';
@@ -369,6 +373,14 @@ GM_addStyle(`
     .rslogRaceHeaderHost { position: relative !important; }
     #rslogRaceSpeedBadge { position: absolute; right: 34px; top: 50%; transform: translateY(-50%); z-index: 5; padding: 2px 7px; border: 1px solid #706500; border-radius: 9px; background: rgba(12,12,12,.88); color: #fff200; font-size: 10px; font-weight: bold; line-height: 14px; white-space: nowrap; pointer-events: none; }
     #rslogRaceSpeedBadge .rslogRaceSpeedLabel { color: #aaa; font-weight: normal; margin-right: 3px; }
+    #rslogRaceLinkBtn { position: absolute; right: 138px; top: 50%; transform: translateY(-50%); z-index: 6; padding: 2px 7px; border: 1px solid #3e6b83; border-radius: 9px; background: rgba(12,12,12,.88); color: #58c8ff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
+    #rslogRaceLinkBtn:hover { color: #fff; border-color: #58c8ff; }
+    #rslogRaceLinkBtn:disabled { color: #666; border-color: #444; cursor: default; }
+    .rslogFinalResult { margin-left: 5px; color: #ccc; font-size: 11px; white-space: nowrap; }
+    .rslogFinalResult.rslogPlace1 { color: #ffd700; font-weight: bold; }
+    .rslogFinalResult.rslogPlace2 { color: #d5d5d5; font-weight: bold; }
+    .rslogFinalResult.rslogPlace3 { color: #cd7f32; font-weight: bold; }
+    .rslogFinalResult.rslogCrashed { color: #cc6666; }
     #rslogNewRecord { display: none; color: #00ff88; font-weight: bold; font-size: 36px; text-shadow: 0 0 12px #00ff88; animation: rslogPulse 0.6s ease-in-out 3; }
     @keyframes rslogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
     .rslogToggle { cursor: pointer; color: #888; font-size: 10px; text-decoration: underline; margin-left: auto; user-select: none; }
@@ -481,16 +493,54 @@ function getLiveSpeedMode() {
 }
 
 function injectRaceSpeedBadge() {
-    if ($('#rslogRaceSpeedBadge').length) return;
     const title = document.querySelector('div.title-black.t-overflow');
     const host = title?.parentElement;
     if (!host) return;
     host.classList.add('rslogRaceHeaderHost');
-    host.insertAdjacentHTML('beforeend', `
-        <span id="rslogRaceSpeedBadge" title="Racing Speed & Lap Logger v${SCRIPT_VERSION}">
-            <span class="rslogRaceSpeedLabel">SPD</span><span id="rslogRaceSpeedValue">–.— mph</span>
-        </span>
-    `);
+    if (!document.getElementById('rslogRaceSpeedBadge')) {
+        host.insertAdjacentHTML('beforeend', `
+            <span id="rslogRaceSpeedBadge" title="Racing Speed & Lap Logger v${SCRIPT_VERSION}">
+                <span class="rslogRaceSpeedLabel">SPD</span><span id="rslogRaceSpeedValue">–.— mph</span>
+            </span>
+        `);
+    }
+    if (!document.getElementById('rslogRaceLinkBtn')) {
+        host.insertAdjacentHTML('beforeend', '<button id="rslogRaceLinkBtn" type="button" disabled>Copy race link</button>');
+        document.getElementById('rslogRaceLinkBtn').addEventListener('click', copyCurrentRaceLink);
+    }
+    updateRaceLinkButton();
+}
+
+function currentRaceUrl() {
+    return currentRaceId
+        ? `https://www.torn.com/page.php?sid=racing&tab=log&raceID=${encodeURIComponent(currentRaceId)}`
+        : '';
+}
+
+function updateRaceLinkButton() {
+    const button = document.getElementById('rslogRaceLinkBtn');
+    if (!button) return;
+    button.disabled = !currentRaceId;
+    if (button.dataset.feedback !== 'true') button.textContent = 'Copy race link';
+}
+
+async function copyCurrentRaceLink() {
+    const url = currentRaceUrl();
+    if (!url) return;
+    const button = document.getElementById('rslogRaceLinkBtn');
+    const ok = await copyToClipboard(url);
+    if (!ok) {
+        prompt('Copy this race link:', url);
+        return;
+    }
+    if (button) {
+        button.dataset.feedback = 'true';
+        button.textContent = 'Copied!';
+        setTimeout(() => {
+            delete button.dataset.feedback;
+            updateRaceLinkButton();
+        }, 1800);
+    }
 }
 
 function applyLiveSpeedVisibility() {
@@ -996,9 +1046,130 @@ function safeAtob(input) {
 }
 
 // ─── Best Lap Parser ───────────────────────────────────────────────────────────
+function decodeRaceIntervals(encoded) {
+    const decoded = safeAtob(encoded);
+    if (decoded === null) return null;
+    const intervals = decoded.split(',').map(value => value.trim()).filter(value => value !== '').map(Number);
+    return intervals.some(value => !Number.isFinite(value) || value < 0) ? null : intervals;
+}
+
+function formatRaceDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '—';
+    const totalMs = Math.round(seconds * 1000);
+    const hours = Math.floor(totalMs / 3600000);
+    const minutes = Math.floor((totalMs % 3600000) / 60000);
+    const secs = Math.floor((totalMs % 60000) / 1000);
+    const millis = totalMs % 1000;
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
+        : `${minutes}:${String(secs).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+}
+
+function ordinal(position) {
+    const mod100 = position % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${position}th`;
+    return `${position}${position % 10 === 1 ? 'st' : position % 10 === 2 ? 'nd' : position % 10 === 3 ? 'rd' : 'th'}`;
+}
+
+function buildRaceResults(data) {
+    const cars = data?.raceData?.cars;
+    const carInfo = data?.raceData?.carInfo || {};
+    const trackParts = data?.raceData?.trackData?.intervals;
+    const laps = Number(data?.laps);
+    if (!cars || !Array.isArray(trackParts) || trackParts.length === 0
+        || !Number.isInteger(laps) || laps <= 0) return null;
+
+    const expectedIntervals = trackParts.length * laps;
+    const finishers = [];
+    const crashes = [];
+
+    for (const [name, encoded] of Object.entries(cars)) {
+        const userId = Number(carInfo[name]?.userID) || 0;
+        const intervals = decodeRaceIntervals(encoded);
+        if (!intervals || intervals.length !== expectedIntervals) {
+            crashes.push({ name, userId });
+            continue;
+        }
+        let totalTime = 0;
+        let bestLap = Infinity;
+        for (let lap = 0; lap < laps; lap++) {
+            let lapTime = 0;
+            for (let part = 0; part < trackParts.length; part++) {
+                lapTime += intervals[lap * trackParts.length + part];
+            }
+            totalTime += lapTime;
+            if (lapTime > 0) bestLap = Math.min(bestLap, lapTime);
+        }
+        if (!Number.isFinite(totalTime) || bestLap === Infinity) crashes.push({ name, userId });
+        else finishers.push({ name, userId, totalTime, bestLap });
+    }
+    finishers.sort((a, b) => a.totalTime - b.totalTime);
+    return { finishers, crashes };
+}
+
+function cacheRaceResultsFromResponse(data) {
+    const raceId = data?.raceID;
+    if (raceId !== null && raceId !== undefined && raceId !== '') {
+        currentRaceId = String(raceId);
+        updateRaceLinkButton();
+    }
+    if (!data?.timeData || data.timeData.status < 3 || !currentRaceId) return;
+    const resultKey = `${currentRaceId}:${Number(data.laps) || 0}:${Object.keys(data.raceData?.cars || {}).length}`;
+    if (lastRaceResultKey !== resultKey) {
+        const results = buildRaceResults(data);
+        if (results) {
+            cachedRaceResults = results;
+            lastRaceResultKey = resultKey;
+            lastResultsRenderAt = 0;
+        }
+    }
+    renderRaceResultsToLeaderboard();
+}
+
+function renderRaceResultsToLeaderboard() {
+    const board = document.getElementById('leaderBoard');
+    if (!board || !cachedRaceResults) return;
+    const expected = cachedRaceResults.finishers.length + cachedRaceResults.crashes.length;
+    if (expected > 0 && board.querySelectorAll('.rslogFinalResult').length >= expected) return;
+    const now = Date.now();
+    if (now - lastResultsRenderAt < 10000) return;
+    lastResultsRenderAt = now;
+
+    const byId = new Map();
+    const byName = new Map();
+    Array.from(board.children).forEach(row => {
+        const nameCell = row.querySelector?.('li.name');
+        if (!nameCell) return;
+        const idMatch = String(row.id || '').match(/(\d+)/);
+        if (idMatch) byId.set(Number(idMatch[1]), nameCell);
+        const linkText = nameCell.querySelector('a')?.textContent?.trim();
+        if (linkText) byName.set(linkText, nameCell);
+    });
+
+    const applyResult = (result, position, crashed = false) => {
+        const nameCell = byId.get(result.userId) || byName.get(result.name);
+        if (!nameCell) return;
+        let detail = nameCell.querySelector('.rslogFinalResult');
+        if (!detail) {
+            detail = document.createElement('span');
+            detail.className = 'rslogFinalResult';
+            nameCell.appendChild(detail);
+        }
+        detail.className = `rslogFinalResult${position <= 3 ? ` rslogPlace${position}` : ''}${crashed ? ' rslogCrashed' : ''}`;
+        detail.textContent = crashed
+            ? `${ordinal(position)} · crashed`
+            : `${ordinal(position)} · ${formatRaceDuration(result.totalTime)} · best ${formatRaceDuration(result.bestLap)}`;
+    };
+
+    cachedRaceResults.finishers.forEach((result, index) => applyResult(result, index + 1));
+    cachedRaceResults.crashes.forEach((result, index) => applyResult(result, cachedRaceResults.finishers.length + index + 1, true));
+}
+
 function parseBestLapFromResponse(data) {
     try {
-        if (!data || !data.timeData || data.timeData.status < 3) return;
+        if (!data) return;
+        cacheRaceResultsFromResponse(data);
+        if (!data.timeData || data.timeData.status < 3) return;
         const cars       = data.raceData?.cars;
         const trackData  = data.raceData?.trackData;
         const playerName = data.user?.playername;
@@ -1021,17 +1192,11 @@ function parseBestLapFromResponse(data) {
 
         if (!Array.isArray(trackData.intervals) || trackData.intervals.length === 0) return;
         const trackIntervals = trackData.intervals.length;
-        const decoded = safeAtob(encoded);
-        if (decoded === null) {
+        const intervals = decodeRaceIntervals(encoded);
+        if (intervals === null) {
             console.debug('[Racing Logger] Ignoring malformed encoded race data.');
             return;
         }
-        const intervals = decoded
-            .split(',')
-            .map(value => value.trim())
-            .filter(value => value !== '')
-            .map(Number);
-        if (intervals.some(value => !Number.isFinite(value) || value < 0)) return;
         if (intervals.length < trackIntervals) return;
 
         const completedLaps = Math.min(totalLaps, Math.floor(intervals.length / trackIntervals));
@@ -1282,9 +1447,9 @@ function renderLobbyLapTable() {
 }
 
 // ─── Cleanup ───────────────────────────────────────────────────────────────────
-function cleanupRaceState() {
+function cleanupRaceState(preserveRaceData = false) {
     maybeClear();
-    ['rslogWrapper', 'rslogRaceSpeedBadge', 'rslogLobbyBtn', 'rslogLobbyVersion', 'rslogLobbyPanel'].forEach(id => {
+    ['rslogWrapper', 'rslogRaceSpeedBadge', 'rslogRaceLinkBtn', 'rslogLobbyBtn', 'rslogLobbyVersion', 'rslogLobbyPanel'].forEach(id => {
         document.getElementById(id)?.remove();
     });
     document.querySelectorAll('.rslogRaceHeaderHost').forEach(el => el.classList.remove('rslogRaceHeaderHost'));
@@ -1293,6 +1458,12 @@ function cleanupRaceState() {
     currentTrack    = '';
     currentCar      = '';
     currentRaceLaps = 0;
+    if (!preserveRaceData) {
+        currentRaceId = '';
+        cachedRaceResults = null;
+        lastRaceResultKey = '';
+        lastResultsRenderAt = 0;
+    }
     last_compl      = -1.0;
     sessionTopSpeed = 0;
     _initialized    = false;
@@ -1312,13 +1483,14 @@ function checkRaceDom() {
     const hasLobby = !!document.getElementById('racingAdditionalContainer');
 
     if (hasDetails && !document.getElementById('rslogWrapper')) {
-        cleanupRaceState();
+        cleanupRaceState(true);
         injectWidget();
         startSpeedLoop();
     }
-    if (hasDetails && !document.getElementById('rslogRaceSpeedBadge')) {
+    if (hasDetails) {
         injectRaceSpeedBadge();
         applyLiveSpeedVisibility();
+        renderRaceResultsToLeaderboard();
     }
     if (!hasDetails && (document.getElementById('rslogWrapper') || document.getElementById('rslogRaceSpeedBadge'))) {
         cleanupRaceState();
