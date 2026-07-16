@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.21
+// @version      2.7.22
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.21';
+const SCRIPT_VERSION = '2.7.22';
 const $ = unsafeWindow.$;
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -36,12 +36,37 @@ function isRacingResponse(data) {
         && data.raceID !== null && data.raceID !== undefined && data.raceID !== '');
 }
 
+function responseMatchesDisplayedRace(data) {
+    if (!document.getElementById('racingdetails')) return true;
+
+    const titleEl = document.querySelector('div.title-black.t-overflow');
+    const visibleTitle = titleEl?.textContent?.trim() || '';
+    const visibleTrack = normalizeTrackName(visibleTitle);
+    const responseTrack = normalizeTrackName(data?.raceData?.title || '');
+    if (visibleTrack && responseTrack && visibleTrack.toLowerCase() !== responseTrack.toLowerCase()) return false;
+
+    const visibleLaps = parseLapCount(visibleTitle);
+    const responseLaps = Number(data?.laps) || 0;
+    if (visibleLaps > 0 && responseLaps > 0 && visibleLaps !== responseLaps) return false;
+
+    const responseNames = Object.keys(data?.raceData?.cars || {});
+    const visibleNames = Array.from(document.querySelectorAll('#leaderBoard li.name'))
+        .map(cell => cell.querySelector?.('a')?.textContent?.trim() || cell.firstChild?.textContent?.trim() || '')
+        .filter(Boolean);
+    if (visibleNames.length > 0 && visibleNames.length === responseNames.length) {
+        const visibleSet = new Set(visibleNames);
+        if (!responseNames.every(name => visibleSet.has(name))) return false;
+    }
+    return true;
+}
+
 function isDisplayedRaceResponse(data) {
     const nextRaceId = String(data?.raceID ?? '');
-    if (!currentRaceId || !nextRaceId || nextRaceId === currentRaceId) return true;
-    // During a countdown Torn can emit background packets for another race.
-    // Keep the active details page locked to its first accepted race ID.
-    return !document.getElementById('racingdetails');
+    if (!nextRaceId) return false;
+    if (currentRaceId && nextRaceId === currentRaceId) return responseMatchesDisplayedRace(data);
+    // A different ID is valid when its track/laps/field match the panel Torn
+    // currently displays. This permits a new race without accepting background data.
+    return responseMatchesDisplayedRace(data);
 }
 
 function tornAjax(callback) {
@@ -1531,7 +1556,6 @@ function startSpeedLoop() {
         const identityChanged = currentTrack !== lastSampleTrack
             || sampleCar !== lastSampleCar
             || currentRaceLaps !== lastSampleLaps;
-
         if (!currentTrack || sampleCar === 'unknown' || currentRaceLaps <= 0
             || identityChanged || last_compl < 0 || compl < last_compl) {
             setLoggerStatus(identityChanged && last_compl >= 0 ? 'paused' : 'waiting');
