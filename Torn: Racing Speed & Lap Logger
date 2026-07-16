@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.22
+// @version      2.7.23
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
+// @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -17,8 +18,8 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.22';
-const $ = unsafeWindow.$;
+const SCRIPT_VERSION = '2.7.23';
+const $ = (...args) => unsafeWindow.$(...args);
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
 // GM_setClipboard are unreliable or unavailable. Same heuristic used by
@@ -69,25 +70,56 @@ function isDisplayedRaceResponse(data) {
     return responseMatchesDisplayedRace(data);
 }
 
-function tornAjax(callback) {
-    $(document).ajaxComplete((event, xhr, settings) => {
-        if (xhr.readyState > 3 && xhr.status === 200) {
-            try {
-                const data = JSON.parse(xhr.responseText);
-                // Torn's SPA sometimes supplies the race packet through a generic
-                // loader/page URL with no `sid=racing`, so identify it by shape.
-                if (!isRacingResponse(data)) return;
-                if (!isDisplayedRaceResponse(data)) return;
-                parseBestLapFromResponse(data);
-                callback();
-            } catch (error) {
-                if (settings?.url?.includes('sid=racing')) {
-                    console.debug('[Racing Logger] Racing response was not usable lap data.', error);
-                }
-            }
+let racingResponseHandler = null;
+let pendingRacingResponses = [];
+
+function captureNativeRacingText(responseText) {
+    if (typeof responseText !== 'string'
+        || !responseText.includes('"raceData"')
+        || !responseText.includes('"raceID"')) return;
+    try {
+        const data = JSON.parse(responseText);
+        if (!isRacingResponse(data)) return;
+        if (racingResponseHandler) racingResponseHandler(data);
+        else {
+            pendingRacingResponses.push(data);
+            if (pendingRacingResponses.length > 5) pendingRacingResponses.shift();
         }
-    });
+    } catch (error) {
+        console.debug('[Racing Logger] Early racing response was not usable.', error);
+    }
 }
+
+function installNativeRaceCapture() {
+    try {
+        const XHR = unsafeWindow.XMLHttpRequest;
+        if (!XHR?.prototype?.send || XHR.prototype.__rslogCaptureInstalled) return;
+        const nativeSend = XHR.prototype.send;
+        Object.defineProperty(XHR.prototype, '__rslogCaptureInstalled', { value: true });
+        XHR.prototype.send = function (...args) {
+            this.addEventListener('load', () => {
+                if (this.status === 200) {
+                    try { captureNativeRacingText(this.responseText); } catch (_) { /* non-text response */ }
+                }
+            }, { once: true });
+            return nativeSend.apply(this, args);
+        };
+    } catch (error) {
+        console.debug('[Racing Logger] Could not install early race capture.', error);
+    }
+}
+
+function tornAjax(callback) {
+    racingResponseHandler = data => {
+        if (!isDisplayedRaceResponse(data)) return;
+        parseBestLapFromResponse(data);
+        callback();
+    };
+    const queued = pendingRacingResponses.splice(0);
+    queued.forEach(data => racingResponseHandler(data));
+}
+
+installNativeRaceCapture();
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 const POLL_MS = 1000;
@@ -1800,5 +1832,13 @@ function init() {
     watchForRaceStart();
 }
 
-tornAjax(() => { init(); });
-init();
+function bootstrapWhenReady() {
+    if (typeof unsafeWindow.$ !== 'function' || !document.body) {
+        setTimeout(bootstrapWhenReady, 50);
+        return;
+    }
+    tornAjax(() => { init(); });
+    init();
+}
+
+bootstrapWhenReady();
