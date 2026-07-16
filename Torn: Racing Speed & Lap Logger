@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.20
+// @version      2.7.21
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.20';
+const SCRIPT_VERSION = '2.7.21';
 const $ = unsafeWindow.$;
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -32,7 +32,16 @@ function isRacingResponse(data) {
     return !!(data && typeof data === 'object'
         && data.raceData && typeof data.raceData === 'object'
         && data.timeData && typeof data.timeData === 'object'
-        && data.user && typeof data.user === 'object');
+        && data.user && typeof data.user === 'object'
+        && data.raceID !== null && data.raceID !== undefined && data.raceID !== '');
+}
+
+function isDisplayedRaceResponse(data) {
+    const nextRaceId = String(data?.raceID ?? '');
+    if (!currentRaceId || !nextRaceId || nextRaceId === currentRaceId) return true;
+    // During a countdown Torn can emit background packets for another race.
+    // Keep the active details page locked to its first accepted race ID.
+    return !document.getElementById('racingdetails');
 }
 
 function tornAjax(callback) {
@@ -43,6 +52,7 @@ function tornAjax(callback) {
                 // Torn's SPA sometimes supplies the race packet through a generic
                 // loader/page URL with no `sid=racing`, so identify it by shape.
                 if (!isRacingResponse(data)) return;
+                if (!isDisplayedRaceResponse(data)) return;
                 parseBestLapFromResponse(data);
                 callback();
             } catch (error) {
@@ -59,6 +69,7 @@ const POLL_MS = 1000;
 const MIN_SAMPLE_MS = 250;
 const MAX_SAMPLE_MS = 3000;
 const HEALTH_CHECK_MS = 2000;
+const RESULTS_RENDER_THROTTLE_MS = 1000;
 const SETTING_SPEED_OPEN = 'rslog_speed_panel_open';
 const SETTING_LAP_OPEN = 'rslog_lap_panel_open';
 const SETTING_LOBBY_OPEN = 'rslog_lobby_panel_open';
@@ -240,6 +251,12 @@ function parseLapCount(titleText) {
     if (!match) return 0;
     const laps = Number(match[1]);
     return Number.isInteger(laps) && laps > 0 ? laps : 0;
+}
+
+function isRaceCountdown(titleText) {
+    const title = String(titleText || '');
+    return !/race\s+started/i.test(title)
+        && /(?:\bwaiting\b|\b\d+\s+(?:minutes?|seconds?)\b)/i.test(title);
 }
 
 // ─── Date helpers ──────────────────────────────────────────────────────────────
@@ -1356,7 +1373,7 @@ function renderRaceResultsToLeaderboard() {
     const expected = cachedRaceResults.finishers.length + cachedRaceResults.crashes.length;
     if (expected > 0 && board.querySelectorAll('.rslogFinalResult').length >= expected) return;
     const now = Date.now();
-    if (now - lastResultsRenderAt < 10000) return;
+    if (now - lastResultsRenderAt < RESULTS_RENDER_THROTTLE_MS) return;
     lastResultsRenderAt = now;
 
     const byId = new Map();
@@ -1496,6 +1513,16 @@ function startSpeedLoop() {
 
         if (!Number.isFinite(compl) || !Number.isFinite(len)) {
             setLoggerStatus('waiting');
+            return;
+        }
+
+        if (isRaceCountdown(titleText)) {
+            setLoggerStatus('waiting');
+            last_compl = compl;
+            lastSampleAt = performance.now();
+            lastSampleTrack = currentTrack;
+            lastSampleCar = carKey(currentCar);
+            lastSampleLaps = currentRaceLaps;
             return;
         }
 
