@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.19
+// @version      2.7.20
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.19';
+const SCRIPT_VERSION = '2.7.20';
 const $ = unsafeWindow.$;
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -100,6 +100,30 @@ const WARP_MESSAGES = [
     'Navigation computer refuses route: “Second star to the right” is not a valid Torn address.',
     'Warp factor nine approved. Fuel cost: all of your points and one suspiciously glowing hamster.',
     'The mechanic found the problem: the warp drive was set to “dramatic television noises”.'
+    ,'Warp permit denied. City Hall says the speed limit still applies in hyperspace.'
+    ,'The drive was installed backwards. Your estimated arrival time has increased by three weeks.'
+    ,'Autopilot plotted the fastest route directly through the hospital. Route rejected.'
+    ,'The mechanic painted flames on the doors and billed you for advanced propulsion.'
+    ,'Tachyon sensor calibrated. It now detects speeding tickets five minutes before they are issued.'
+    ,'Quantum mechanic unavailable. He is simultaneously at lunch and charging by the hour.'
+    ,'Warp core test successful. The garage is now six inches to the left.'
+    ,'Hyperspace lane closed for pothole repairs. Please use the scenic route through Uptown.'
+    ,'Your warp signature attracted Duke. Installation quietly cancelled.'
+    ,'Racing officials rejected the upgrade because arriving before the race starts is considered suspicious.'
+    ,'Fusion reactor needs premium fuel, two energy drinks, and a mechanic with fewer questions.'
+    ,'Time machine activated. You returned to the moment before buying this upgrade.'
+    ,'Space-time warranty expired yesterday, which is impressive because you purchased it tomorrow.'
+    ,'Horsepower conversion complete: your car now contains 412 theoretical space ponies.'
+    ,'Warp request denied by the server tick. The laws of physics have been queued for processing.'
+    ,'The drive engaged successfully. Torn responded with Connection Lost.'
+    ,'Diagnostics found a loose nut behind the steering wheel. The mechanic refuses to elaborate.'
+    ,'Destination entered: finish line. Navigation suggests walking may be faster.'
+    ,'Faster-than-light mode locked until you prove you are not a robot.'
+    ,'The pit crew crossed two wires. Your headlights can now achieve warp factor seven.'
+    ,'Warp core temperature nominal. Driver confidence critically unstable.'
+    ,'Anti-gravity installed. Traction has submitted a formal complaint.'
+    ,'The upgrade passed every simulation except the one involving your driving.'
+    ,'Emergency shutdown: the onboard computer discovered your repair bill.'
 ];
 let lastSampleAt    = 0;
 let lastSampleTrack = '';
