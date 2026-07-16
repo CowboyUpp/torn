@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.18
+// @version      2.7.19
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.18';
+const SCRIPT_VERSION = '2.7.19';
 const $ = unsafeWindow.$;
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -28,17 +28,27 @@ function isPdaWebView() {
 }
 
 // ─── Torn AJAX hook ────────────────────────────────────────────────────────────
+function isRacingResponse(data) {
+    return !!(data && typeof data === 'object'
+        && data.raceData && typeof data.raceData === 'object'
+        && data.timeData && typeof data.timeData === 'object'
+        && data.user && typeof data.user === 'object');
+}
+
 function tornAjax(callback) {
     $(document).ajaxComplete((event, xhr, settings) => {
         if (xhr.readyState > 3 && xhr.status === 200) {
-            if (settings.url && settings.url.includes('sid=racing')) {
-                try {
-                    const data = JSON.parse(xhr.responseText);
-                    parseBestLapFromResponse(data);
-                } catch (error) {
+            try {
+                const data = JSON.parse(xhr.responseText);
+                // Torn's SPA sometimes supplies the race packet through a generic
+                // loader/page URL with no `sid=racing`, so identify it by shape.
+                if (!isRacingResponse(data)) return;
+                parseBestLapFromResponse(data);
+                callback();
+            } catch (error) {
+                if (settings?.url?.includes('sid=racing')) {
                     console.debug('[Racing Logger] Racing response was not usable lap data.', error);
                 }
-                callback();
             }
         }
     });
