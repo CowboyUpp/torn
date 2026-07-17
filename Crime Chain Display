@@ -76,6 +76,10 @@
             statusOpacity: '0.8',
             gearOpacity: '0.45',
             gearHover: '0.8',
+            ringInnerBg: 'rgba(255,255,255,0.08)',
+            ringInnerBorder: 'rgba(255,255,255,0.14)',
+            ringInnerShadow: 'inset 0 1px 1px rgba(255,255,255,0.10), inset 0 -1px 2px rgba(0,0,0,0.55), 0 1px 1px rgba(0,0,0,0.35)',
+            ringText: 'rgba(255,255,255,0.86)',
             chainLow: '#00ff66',
             chainMid: '#ffaa00',
             chainHigh: '#ff3344',
@@ -97,6 +101,10 @@
             statusOpacity: '1',
             gearOpacity: '0.55',
             gearHover: '0.85',
+            ringInnerBg: 'rgba(0,0,0,0.06)',
+            ringInnerBorder: 'rgba(0,0,0,0.16)',
+            ringInnerShadow: 'inset 0 1px 1px rgba(255,255,255,0.75), inset 0 -1px 2px rgba(0,0,0,0.18), 0 1px 1px rgba(255,255,255,0.45)',
+            ringText: 'rgba(32,33,36,0.82)',
             chainLow: '#16a34a',
             chainMid: '#d97706',
             chainHigh: '#dc2626',
@@ -749,14 +757,20 @@
             }
             #cct-ring-label {
                 position: absolute;
-                inset: 0;
+                inset: 3px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                font-size: 12px;
-                font-weight: 700;
+                min-width: 22px;
+                min-height: 22px;
+                border-radius: 50%;
+                font-size: 11px;
+                font-weight: 500;
                 pointer-events: none;
                 line-height: 1;
+                box-sizing: border-box;
+                font-variant-numeric: tabular-nums;
+                text-shadow: none;
             }
             #cct-text {
                 display: flex;
@@ -1013,6 +1027,14 @@
         const ringBg = document.querySelector('#cct-ring-bg');
         if (ringBg) ringBg.style.stroke = th.ringTrack;
 
+        const ringLabel = document.querySelector('#cct-ring-label');
+        if (ringLabel) {
+            ringLabel.style.background = th.ringInnerBg;
+            ringLabel.style.border = `1px solid ${th.ringInnerBorder}`;
+            ringLabel.style.boxShadow = th.ringInnerShadow;
+            ringLabel.style.color = th.ringText;
+        }
+
         const lbl = document.querySelector('#cct-label');
         if (lbl) lbl.style.opacity = th.labelOpacity;
 
@@ -1217,7 +1239,6 @@
         arc.style.strokeDashoffset = offset;
         arc.style.stroke = color;
         label.textContent = String(chain);
-        label.style.color = color;
         status.textContent = statusText(chain);
         if (manual && document.activeElement !== manual) manual.value = chain;
 
