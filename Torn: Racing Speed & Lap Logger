@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.24
+// @version      2.7.26
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -10,7 +10,9 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      api.torn.com
 // @license      MIT
 // @downloadURL https://update.greasyfork.org/scripts/582091/Torn%3A%20Racing%20Speed%20%20Lap%20Logger.user.js
 // @updateURL https://update.greasyfork.org/scripts/582091/Torn%3A%20Racing%20Speed%20%20Lap%20Logger.meta.js
@@ -18,7 +20,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.24';
+const SCRIPT_VERSION = '2.7.26';
 const $ = (...args) => unsafeWindow.$(...args);
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -133,6 +135,11 @@ const SETTING_LIVE_MODE = 'rslog_live_speed_mode';
 const RACING_SKILL_LEVEL_KEY = 'rslog_racing_skill_level';
 const RACING_SKILL_GAIN_KEY = 'rslog_last_racing_skill_gain';
 const RACING_SKILL_RACE_KEY = 'rslog_last_racing_skill_race';
+const PARTICIPANT_RS_ENABLED_KEY = 'rslog_participant_rs_enabled';
+const PARTICIPANT_RS_API_KEY = 'rslog_participant_rs_api_key';
+const PARTICIPANT_RS_CACHE_KEY = 'rslog_participant_rs_cache';
+const PARTICIPANT_RS_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const PARTICIPANT_RS_FETCH_INTERVAL_MS = 1500;
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 let last_compl      = -1.0;
@@ -151,6 +158,15 @@ let lastWarpMessage = '';
 let racingSkillStateLoaded = false;
 let lastRacingSkillGain = null;
 let lastRacingSkillRaceId = '';
+let participantRsCacheLoaded = false;
+const participantRsCache = new Map();
+const participantRsQueue = [];
+const participantRsQueuedIds = new Set();
+const participantRsFailedUntil = new Map();
+let participantRsFetchInFlight = false;
+let participantRsNextTimer = 0;
+let participantRsLastError = '';
+let participantRsGeneration = 0;
 
 const WARP_MESSAGES = [
     'Installation failed: 1.21 gigawatts required. Your mechanic says you watch too much sci-fi.',
@@ -508,11 +524,15 @@ GM_addStyle(`
     #rslogLiveModeBtn { padding: 2px 6px; border: 1px solid #444; border-radius: 3px; background: #181818; color: #888; font: inherit; font-size: 9px; cursor: pointer; }
     #rslogLiveModeBtn:hover { color: #fff200; border-color: #777; }
     #rslogRaceToolbar { display: flex; align-items: center; gap: 7px; min-height: 25px; margin-bottom: 6px; padding: 3px 7px; box-sizing: border-box; border: 1px solid #333; border-radius: 5px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); color: #ccc; font-family: "Courier New", Courier, monospace; font-size: 10px; }
-    #rslogRaceToolbar .rslogVersion { color: #aaa; font-weight: 600; text-shadow: 0 1px 1px #000; }
     #rslogToolbarLiveWrap, #rslogToolbarTopWrap, #rslogToolbarSkillWrap { white-space: nowrap; }
     #rslogToolbarSpeed { color: #fff200; font-weight: bold; }
     #rslogToolbarTop { color: #ff9900; font-weight: bold; }
     #rslogToolbarSkill { color: #00ff88; font-weight: bold; }
+    #rslogParticipantRsBtn { padding: 2px 6px; border: 1px solid #555; border-radius: 9px; background: #171717; color: #888; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
+    #rslogParticipantRsBtn:hover { color: #fff; border-color: #ba78ef; }
+    #rslogParticipantRsBtn.rslogRsEnabled { color: #c6ffdf; border-color: #2d9d68; box-shadow: 0 0 6px rgba(0,255,136,.22); }
+    #rslogParticipantRsBtn.rslogRsEnabled::before { content: '● '; color: #00ff88; }
+    #rslogParticipantRsBtn.rslogRsError { color: #ff8c8c; border-color: #8f3939; }
     #rslogRaceToolbar .rslogToolbarSpacer { flex: 1; }
     #rslogRaceToolbar .rslogToolbarActions { display: flex; align-items: center; gap: 4px; }
     #rslogRaceLinkBtn { padding: 2px 6px; border: 1px solid #3e6b83; border-radius: 9px; background: #171717; color: #58c8ff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
@@ -532,6 +552,40 @@ GM_addStyle(`
     #rslogWarpModal .rslogWarpMessage { min-height: 48px; margin: 0 4px 16px; color: #eee; font-size: 12px; line-height: 1.55; }
     #rslogWarpModal .rslogWarpClose { padding: 5px 13px; border: 1px solid #8d4ec2; border-radius: 10px; background: #17131e; color: #e6b6ff; font-family: inherit; font-size: 10px; cursor: pointer; }
     #rslogWarpModal .rslogWarpClose:hover { color: #fff; border-color: #dd8cff; }
+    #rslogRsModal { position: fixed; inset: 0; z-index: 1000001; display: none; align-items: center; justify-content: center; font-family: "Courier New", Courier, monospace; }
+    #rslogRsModal.rslogRsOpen { display: flex; }
+    #rslogRsModal .rslogRsBackdrop { position: absolute; inset: 0; background: rgba(0,0,0,.72); }
+    #rslogRsModal .rslogRsPanel { position: relative; width: min(460px, calc(100vw - 32px)); padding: 18px; box-sizing: border-box; border: 1px solid #76548f; border-radius: 9px; background: radial-gradient(circle at top,#21172b 0,#151419 58%,#101010 100%); color: #ddd; box-shadow: 0 0 24px rgba(161,86,212,.3); }
+    #rslogRsModal .rslogRsTitle { color: #e6b6ff; font-size: 16px; font-weight: bold; letter-spacing: .5px; }
+    #rslogRsModal .rslogRsIntro { margin: 6px 0 14px; color: #999; font-size: 10px; line-height: 1.45; }
+    #rslogRsModal .rslogRsToggleRow { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; padding: 9px 10px; border: 1px solid #333; border-radius: 6px; background: #151515; font-size: 11px; }
+    #rslogRsModal .rslogRsSwitch { position: relative; width: 34px; height: 18px; }
+    #rslogRsModal .rslogRsSwitch input { position: absolute; opacity: 0; pointer-events: none; }
+    #rslogRsModal .rslogRsSlider { position: absolute; inset: 0; border-radius: 10px; background: #444; cursor: pointer; transition: .18s ease; }
+    #rslogRsModal .rslogRsSlider::before { content: ''; position: absolute; width: 14px; height: 14px; top: 2px; left: 2px; border-radius: 50%; background: #aaa; transition: .18s ease; }
+    #rslogRsModal .rslogRsSwitch input:checked + .rslogRsSlider { background: #17633f; box-shadow: 0 0 7px rgba(0,255,136,.25); }
+    #rslogRsModal .rslogRsSwitch input:checked + .rslogRsSlider::before { transform: translateX(16px); background: #00ff88; }
+    #rslogRsModal .rslogRsLabel { display: block; margin-bottom: 5px; color: #bbb; font-size: 10px; }
+    #rslogRsModal .rslogRsKeyRow { display: flex; gap: 5px; }
+    #rslogRsApiKeyInput { flex: 1; min-width: 0; padding: 7px 9px; box-sizing: border-box; border: 1px solid #444; border-radius: 5px; background: #0e0e0e; color: #eee; font-family: inherit; font-size: 11px; outline: none; }
+    #rslogRsApiKeyInput:focus { border-color: #b868ef; box-shadow: 0 0 5px rgba(184,104,239,.25); }
+    #rslogRsKeyReveal { width: 46px; border: 1px solid #444; border-radius: 5px; background: #191919; color: #aaa; font-family: inherit; font-size: 9px; cursor: pointer; }
+    #rslogRsKeyReveal:hover { color: #fff; border-color: #777; }
+    #rslogRsModal .rslogRsKeyHelp { margin-top: 6px; color: #777; font-size: 9px; }
+    #rslogRsModal .rslogRsKeyHelp a { color: #58c8ff; }
+    #rslogRsStatus { min-height: 16px; margin: 10px 0 4px; color: #888; font-size: 10px; }
+    #rslogRsStatus.rslogRsSuccess { color: #00ff88; }
+    #rslogRsStatus.rslogRsFailure { color: #ff7777; }
+    #rslogRsModal .rslogRsActions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    #rslogRsModal .rslogRsActions button { padding: 5px 9px; border: 1px solid #555; border-radius: 8px; background: #181818; color: #bbb; font-family: inherit; font-size: 9px; cursor: pointer; }
+    #rslogRsModal .rslogRsActions button:hover { color: #fff; border-color: #999; }
+    #rslogRsSaveBtn { color: #e6b6ff !important; border-color: #76548f !important; }
+    #rslogRsCloseBtn { margin-left: auto; }
+    .rslogParticipantRs { display: inline-flex; align-items: center; justify-content: center; min-width: 43px; margin-left: 7px; padding: 1px 5px; box-sizing: border-box; border: 1px solid #70478b; border-radius: 8px; background: linear-gradient(90deg,#21152a,#11161b); font: bold 9px/13px "Courier New", Courier, monospace; vertical-align: middle; white-space: nowrap; box-shadow: inset 0 0 5px rgba(184,104,239,.13),0 0 4px rgba(184,104,239,.15); }
+    .rslogParticipantRs .rslogRsBadgeLabel { color: #d9a6ff; }
+    .rslogParticipantRs .rslogRsBadgeValue { margin-left: 4px; color: #fff200; font-size: 10px; }
+    .rslogParticipantRs.rslogRsLoading { border-color: #444; box-shadow: none; opacity: .62; }
+    .rslogParticipantRs.rslogRsLoading .rslogRsBadgeValue { color: #888; }
     .rslogFinalResult { margin-left: 5px; color: #ccc; font-size: 11px; white-space: nowrap; }
     .rslogFinalResult.rslogPlace1 { color: #ffd700; font-weight: bold; }
     .rslogFinalResult.rslogPlace2 { color: #d5d5d5; font-weight: bold; }
@@ -696,17 +750,385 @@ function updateRacingSkillFromResponse(data) {
     renderRacingSkillGain();
 }
 
+function getParticipantRsApiKey() {
+    return String(GM_getValue(PARTICIPANT_RS_API_KEY, '') || '').trim();
+}
+
+function participantRsIsEnabled() {
+    return getBooleanSetting(PARTICIPANT_RS_ENABLED_KEY, false) && getParticipantRsApiKey().length > 0;
+}
+
+function loadParticipantRsCache() {
+    if (participantRsCacheLoaded) return;
+    participantRsCacheLoaded = true;
+    let saved = GM_getValue(PARTICIPANT_RS_CACHE_KEY, {});
+    if (typeof saved === 'string') {
+        try { saved = JSON.parse(saved); } catch (_) { saved = {}; }
+    }
+    const now = Date.now();
+    for (const [driverId, entry] of Object.entries(saved || {})) {
+        const skill = Number(entry?.skill);
+        const timestamp = Number(entry?.timestamp ?? entry?.ts);
+        if (!Number.isFinite(skill) || !Number.isFinite(timestamp)
+            || now - timestamp > PARTICIPANT_RS_CACHE_MAX_AGE_MS) continue;
+        participantRsCache.set(Number(driverId), { skill, timestamp });
+    }
+}
+
+function persistParticipantRsCache() {
+    loadParticipantRsCache();
+    const now = Date.now();
+    const saved = {};
+    for (const [driverId, entry] of participantRsCache) {
+        if (now - entry.timestamp <= PARTICIPANT_RS_CACHE_MAX_AGE_MS) {
+            saved[String(driverId)] = entry;
+        }
+    }
+    GM_setValue(PARTICIPANT_RS_CACHE_KEY, saved);
+}
+
+function cacheParticipantRacingSkill(driverId, skill, timestamp = Date.now()) {
+    const id = Number(driverId);
+    const value = Number(skill);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(value) || value < 0) return false;
+    loadParticipantRsCache();
+    participantRsCache.set(id, { skill: value, timestamp });
+    participantRsFailedUntil.delete(id);
+    persistParticipantRsCache();
+    return true;
+}
+
+function getCachedParticipantRacingSkill(driverId) {
+    loadParticipantRsCache();
+    const id = Number(driverId);
+    const entry = participantRsCache.get(id) || null;
+    if (entry && Date.now() - entry.timestamp > PARTICIPANT_RS_CACHE_MAX_AGE_MS) {
+        participantRsCache.delete(id);
+        return null;
+    }
+    return entry;
+}
+
+function formatParticipantRs(skill) {
+    const value = Number(skill);
+    return Number.isFinite(value) && value >= 0 ? String(Math.trunc(value)) : '\u2026';
+}
+
+function participantRsCacheAge(timestamp) {
+    const ageMs = Math.max(0, Date.now() - Number(timestamp || 0));
+    if (ageMs < 60000) return 'just now';
+    if (ageMs < 3600000) return `${Math.floor(ageMs / 60000)}m ago`;
+    return `${Math.floor(ageMs / 3600000)}h ago`;
+}
+
+function updateParticipantRsButton() {
+    const button = document.getElementById('rslogParticipantRsBtn');
+    if (!button) return;
+    const enabled = participantRsIsEnabled();
+    button.textContent = enabled ? 'RS ON' : 'RS OFF';
+    button.classList.toggle('rslogRsEnabled', enabled && !participantRsLastError);
+    button.classList.toggle('rslogRsError', enabled && !!participantRsLastError);
+    button.title = participantRsLastError || (enabled
+        ? 'Participant racing skill is enabled. Click for settings.'
+        : 'Participant racing skill is disabled. Click for settings.');
+}
+
+function removeParticipantRsBadges() {
+    document.querySelectorAll('.rslogParticipantRs').forEach(badge => badge.remove());
+}
+
+function raceDriverRows() {
+    const board = document.getElementById('leaderBoard');
+    return board ? Array.from(board.children) : [];
+}
+
+function driverIdFromRaceRow(row) {
+    const match = String(row?.id || '').match(/(\d+)/);
+    return match ? Number(match[1]) : 0;
+}
+
+function queueParticipantRsDriver(driverId) {
+    const id = Number(driverId);
+    if (!participantRsIsEnabled() || !Number.isInteger(id) || id <= 0) return;
+    loadParticipantRsCache();
+    if (getCachedParticipantRacingSkill(id) || participantRsQueuedIds.has(id)
+        || (participantRsFailedUntil.get(id) || 0) > Date.now()) return;
+    participantRsQueuedIds.add(id);
+    participantRsQueue.push(id);
+}
+
+function makeParticipantRsBadge(entry) {
+    const badge = document.createElement('span');
+    badge.className = `rslogParticipantRs${entry ? '' : ' rslogRsLoading'}`;
+    const label = document.createElement('span');
+    label.className = 'rslogRsBadgeLabel';
+    label.textContent = 'RS';
+    const value = document.createElement('span');
+    value.className = 'rslogRsBadgeValue';
+    value.textContent = formatParticipantRs(entry?.skill);
+    badge.append(label, value);
+    badge.title = entry
+        ? `Racing skill ${entry.skill.toFixed(5)} · cached ${participantRsCacheAge(entry.timestamp)}`
+        : 'Racing skill is queued for retrieval.';
+    return badge;
+}
+
+function paintParticipantRsBadges() {
+    if (!participantRsIsEnabled()) {
+        removeParticipantRsBadges();
+        return;
+    }
+    loadParticipantRsCache();
+    for (const row of raceDriverRows()) {
+        const driverId = driverIdFromRaceRow(row);
+        const nameCell = row.querySelector?.('li.name');
+        if (!driverId || !nameCell) continue;
+        const entry = getCachedParticipantRacingSkill(driverId);
+        let badge = nameCell.querySelector('.rslogParticipantRs');
+        const expected = formatParticipantRs(entry?.skill);
+        if (!badge || badge.querySelector('.rslogRsBadgeValue')?.textContent !== expected
+            || badge.classList.contains('rslogRsLoading') === !!entry) {
+            badge?.remove();
+            badge = makeParticipantRsBadge(entry);
+            nameCell.insertBefore(badge, nameCell.querySelector('.rslogFinalResult'));
+        }
+        if (!entry) queueParticipantRsDriver(driverId);
+    }
+    processParticipantRsQueue();
+}
+
+function participantRsRequestUrl(driverId, apiKey) {
+    const userPart = driverId ? String(Number(driverId)) : '';
+    return `https://api.torn.com/user/${userPart}?selections=personalstats&stat=racingskill&comment=RacingSpeedLapLogger&key=${encodeURIComponent(apiKey)}`;
+}
+
+function requestParticipantRacingSkill(driverId, apiKey) {
+    return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            reject(new Error('This userscript manager does not provide cross-domain API requests.'));
+            return;
+        }
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: participantRsRequestUrl(driverId, apiKey),
+            timeout: 15000,
+            onload: response => {
+                try {
+                    const json = JSON.parse(response.responseText);
+                    if (json?.error) {
+                        const error = new Error(json.error.error || 'Torn API error');
+                        error.code = Number(json.error.code) || 0;
+                        reject(error);
+                        return;
+                    }
+                    const skill = Number(json?.personalstats?.racingskill);
+                    if (!Number.isFinite(skill)) throw new Error('The API response did not contain racing skill.');
+                    resolve(skill);
+                } catch (error) {
+                    reject(error);
+                }
+            },
+            onerror: () => reject(new Error('The Torn API request failed.')),
+            ontimeout: () => reject(new Error('The Torn API request timed out.'))
+        });
+    });
+}
+
+function clearParticipantRsQueue() {
+    participantRsQueue.length = 0;
+    participantRsQueuedIds.clear();
+    if (participantRsNextTimer) clearTimeout(participantRsNextTimer);
+    participantRsNextTimer = 0;
+}
+
+function scheduleParticipantRsQueue(delay = PARTICIPANT_RS_FETCH_INTERVAL_MS) {
+    if (participantRsNextTimer || !participantRsIsEnabled() || participantRsQueue.length === 0) return;
+    participantRsNextTimer = setTimeout(() => {
+        participantRsNextTimer = 0;
+        processParticipantRsQueue();
+    }, delay);
+}
+
+async function processParticipantRsQueue() {
+    if (participantRsFetchInFlight || !participantRsIsEnabled()) return;
+    loadParticipantRsCache();
+    let driverId = 0;
+    while (participantRsQueue.length > 0 && !driverId) {
+        const candidate = participantRsQueue.shift();
+        if (!getCachedParticipantRacingSkill(candidate)
+            && (participantRsFailedUntil.get(candidate) || 0) <= Date.now()) driverId = candidate;
+        else participantRsQueuedIds.delete(candidate);
+    }
+    if (!driverId) return;
+
+    participantRsFetchInFlight = true;
+    const generation = participantRsGeneration;
+    try {
+        const skill = await requestParticipantRacingSkill(driverId, getParticipantRsApiKey());
+        if (generation !== participantRsGeneration) return;
+        cacheParticipantRacingSkill(driverId, skill);
+        participantRsLastError = '';
+        paintParticipantRsBadges();
+    } catch (error) {
+        if (generation !== participantRsGeneration) return;
+        participantRsLastError = error.message || 'Could not retrieve racing skill.';
+        const retryMs = error.code === 5 ? 60000 : 5 * 60000;
+        participantRsFailedUntil.set(driverId, Date.now() + retryMs);
+        if ([1, 2, 16].includes(error.code)) clearParticipantRsQueue();
+        updateParticipantRsButton();
+    } finally {
+        participantRsQueuedIds.delete(driverId);
+        participantRsFetchInFlight = false;
+        scheduleParticipantRsQueue();
+    }
+}
+
+function seedOwnParticipantRacingSkill(data) {
+    if (!participantRsIsEnabled()) return;
+    const playerName = data?.user?.playername;
+    const driverId = Number(data?.raceData?.carInfo?.[playerName]?.userID);
+    const skill = Number(data?.user?.racinglevel);
+    const existing = getCachedParticipantRacingSkill(driverId);
+    if (Number.isInteger(driverId) && driverId > 0 && Number.isFinite(skill)
+        && (!existing || existing.skill !== skill)) cacheParticipantRacingSkill(driverId, skill);
+}
+
+function setParticipantRsModalStatus(message, type = '') {
+    const status = document.getElementById('rslogRsStatus');
+    if (!status) return;
+    status.textContent = message;
+    status.className = type === 'success' ? 'rslogRsSuccess' : type === 'failure' ? 'rslogRsFailure' : '';
+}
+
+function closeParticipantRsModal() {
+    const modal = document.getElementById('rslogRsModal');
+    if (!modal) return;
+    modal.classList.remove('rslogRsOpen');
+    const input = document.getElementById('rslogRsApiKeyInput');
+    if (input) {
+        input.type = 'password';
+        input.value = '';
+    }
+}
+
+function ensureParticipantRsModal() {
+    if (document.getElementById('rslogRsModal')) return;
+    document.body.insertAdjacentHTML('beforeend', `
+        <div id="rslogRsModal" role="dialog" aria-modal="true" aria-labelledby="rslogRsModalTitle">
+            <div class="rslogRsBackdrop"></div>
+            <div class="rslogRsPanel">
+                <div id="rslogRsModalTitle" class="rslogRsTitle">Participant Racing Skill</div>
+                <div class="rslogRsIntro">Show a cached whole-number RS badge beside every racer. A dedicated Public Torn API key is sufficient.</div>
+                <div class="rslogRsToggleRow">
+                    <span>Show participant RS</span>
+                    <label class="rslogRsSwitch">
+                        <input id="rslogRsEnabledInput" type="checkbox">
+                        <span class="rslogRsSlider"></span>
+                    </label>
+                </div>
+                <label class="rslogRsLabel" for="rslogRsApiKeyInput">Public API key</label>
+                <div class="rslogRsKeyRow">
+                    <input id="rslogRsApiKeyInput" type="password" maxlength="64" autocomplete="off" spellcheck="false" placeholder="Enter a dedicated Public key">
+                    <button id="rslogRsKeyReveal" type="button">Show</button>
+                </div>
+                <div class="rslogRsKeyHelp">Stored locally by your userscript manager. <a href="https://www.torn.com/preferences.php#tab=api" target="_blank" rel="noopener">Create or manage API keys</a></div>
+                <div id="rslogRsStatus"></div>
+                <div class="rslogRsActions">
+                    <button id="rslogRsSaveBtn" type="button">Validate &amp; Save</button>
+                    <button id="rslogRsClearKeyBtn" type="button">Clear key</button>
+                    <button id="rslogRsClearCacheBtn" type="button">Clear RS cache</button>
+                    <button id="rslogRsCloseBtn" type="button">Close</button>
+                </div>
+            </div>
+        </div>
+    `);
+
+    const modal = document.getElementById('rslogRsModal');
+    const input = document.getElementById('rslogRsApiKeyInput');
+    document.getElementById('rslogRsKeyReveal').addEventListener('click', event => {
+        input.type = input.type === 'password' ? 'text' : 'password';
+        event.currentTarget.textContent = input.type === 'password' ? 'Show' : 'Hide';
+    });
+    document.getElementById('rslogRsSaveBtn').addEventListener('click', async event => {
+        const button = event.currentTarget;
+        const apiKey = input.value.trim();
+        if (apiKey.length < 8) {
+            setParticipantRsModalStatus('Enter a valid Public Torn API key.', 'failure');
+            input.focus();
+            return;
+        }
+        button.disabled = true;
+        setParticipantRsModalStatus('Validating key with Torn…');
+        try {
+            await requestParticipantRacingSkill(null, apiKey);
+            GM_setValue(PARTICIPANT_RS_API_KEY, apiKey);
+            GM_setValue(PARTICIPANT_RS_ENABLED_KEY, document.getElementById('rslogRsEnabledInput').checked);
+            participantRsGeneration += 1;
+            participantRsLastError = '';
+            clearParticipantRsQueue();
+            setParticipantRsModalStatus('Public key verified. Cache lifetime: 24 hours.', 'success');
+            updateParticipantRsButton();
+            paintParticipantRsBadges();
+        } catch (error) {
+            setParticipantRsModalStatus(error.message || 'The key could not be validated.', 'failure');
+        } finally {
+            button.disabled = false;
+        }
+    });
+    document.getElementById('rslogRsClearKeyBtn').addEventListener('click', () => {
+        GM_setValue(PARTICIPANT_RS_API_KEY, '');
+        GM_setValue(PARTICIPANT_RS_ENABLED_KEY, false);
+        participantRsGeneration += 1;
+        input.value = '';
+        document.getElementById('rslogRsEnabledInput').checked = false;
+        participantRsLastError = '';
+        clearParticipantRsQueue();
+        removeParticipantRsBadges();
+        updateParticipantRsButton();
+        setParticipantRsModalStatus('API key removed. Cached RS values were preserved.', 'success');
+    });
+    document.getElementById('rslogRsClearCacheBtn').addEventListener('click', () => {
+        participantRsCache.clear();
+        participantRsGeneration += 1;
+        GM_setValue(PARTICIPANT_RS_CACHE_KEY, {});
+        participantRsFailedUntil.clear();
+        removeParticipantRsBadges();
+        setParticipantRsModalStatus('The participant RS cache was cleared.', 'success');
+        paintParticipantRsBadges();
+    });
+    document.getElementById('rslogRsCloseBtn').addEventListener('click', closeParticipantRsModal);
+    modal.querySelector('.rslogRsBackdrop').addEventListener('click', closeParticipantRsModal);
+    modal.addEventListener('keydown', event => {
+        if (event.key === 'Escape') closeParticipantRsModal();
+    });
+}
+
+function showParticipantRsModal() {
+    ensureParticipantRsModal();
+    const modal = document.getElementById('rslogRsModal');
+    const input = document.getElementById('rslogRsApiKeyInput');
+    input.type = 'password';
+    input.value = getParticipantRsApiKey();
+    document.getElementById('rslogRsKeyReveal').textContent = 'Show';
+    document.getElementById('rslogRsEnabledInput').checked = getBooleanSetting(PARTICIPANT_RS_ENABLED_KEY, false);
+    loadParticipantRsCache();
+    setParticipantRsModalStatus(participantRsLastError
+        || `${participantRsCache.size} cached racer${participantRsCache.size === 1 ? '' : 's'} · expires after 24 hours`, participantRsLastError ? 'failure' : '');
+    modal.classList.add('rslogRsOpen');
+    input.focus();
+}
+
 function injectRaceToolbar() {
     const host = document.getElementById('racingupdatesnew');
     if (!host) return;
     if (!document.getElementById('rslogRaceToolbar')) {
         host.insertAdjacentHTML('afterbegin', `
             <div id="rslogRaceToolbar">
-                <span class="rslogVersion">v${SCRIPT_VERSION}</span>
                 <span id="rslogToolbarStatus" class="rslogStatusWaiting">WAITING</span>
                 <span id="rslogToolbarLiveWrap">Current <span id="rslogToolbarSpeed">–.— mph</span></span>
                 <span id="rslogToolbarTopWrap">Session top <span id="rslogToolbarTop">${sessionTopSpeed.toFixed(2)} mph</span></span>
                 <span id="rslogToolbarSkillWrap">Last RS <span id="rslogToolbarSkill">\u2014</span></span>
+                <button id="rslogParticipantRsBtn" type="button">RS OFF</button>
                 <span class="rslogToolbarSpacer"></span>
                 <span class="rslogToolbarActions">
                     <button id="rslogResultsToggleBtn" type="button" disabled>Show results</button>
@@ -716,10 +1138,12 @@ function injectRaceToolbar() {
             </div>
         `);
         document.getElementById('rslogResultsToggleBtn').addEventListener('click', toggleRaceResults);
+        document.getElementById('rslogParticipantRsBtn').addEventListener('click', showParticipantRsModal);
         document.getElementById('rslogWarpBtn').addEventListener('click', showWarpModal);
         document.getElementById('rslogRaceLinkBtn').addEventListener('click', copyCurrentRaceLink);
     }
     renderRacingSkillGain();
+    updateParticipantRsButton();
     updateResultsToggleButton();
     updateRaceLinkButton();
 }
@@ -1412,6 +1836,7 @@ function cacheRaceResultsFromResponse(data) {
         updateRaceLinkButton();
     }
     updateRacingSkillFromResponse(data);
+    seedOwnParticipantRacingSkill(data);
     if (!data?.timeData || data.timeData.status < 3 || !currentRaceId) return;
     const resultKey = `${currentRaceId}:${Number(data.laps) || 0}:${Object.keys(data.raceData?.cars || {}).length}`;
     if (lastRaceResultKey !== resultKey) {
@@ -1464,6 +1889,7 @@ function renderRaceResultsToLeaderboard() {
 
     cachedRaceResults.finishers.forEach((result, index) => applyResult(result, index + 1));
     cachedRaceResults.crashes.forEach((result, index) => applyResult(result, cachedRaceResults.finishers.length + index + 1, true));
+    paintParticipantRsBadges();
 }
 
 function parseBestLapFromResponse(data) {
@@ -1780,6 +2206,8 @@ function cleanupRaceState(preserveRaceData = false) {
     currentCar      = '';
     currentRaceLaps = 0;
     if (!preserveRaceData) {
+        clearParticipantRsQueue();
+        closeParticipantRsModal();
         removeRaceResultLabels();
         currentRaceId = '';
         cachedRaceResults = null;
@@ -1814,6 +2242,7 @@ function checkRaceDom() {
         injectRaceToolbar();
         applyLiveSpeedVisibility();
         renderRaceResultsToLeaderboard();
+        paintParticipantRsBadges();
     }
     if (!hasDetails && (document.getElementById('rslogWrapper') || document.getElementById('rslogRaceToolbar'))) {
         cleanupRaceState();
