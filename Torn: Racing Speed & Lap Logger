@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.26
+// @version      2.7.27
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.26';
+const SCRIPT_VERSION = '2.7.27';
 const $ = (...args) => unsafeWindow.$(...args);
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -167,6 +167,8 @@ let participantRsFetchInFlight = false;
 let participantRsNextTimer = 0;
 let participantRsLastError = '';
 let participantRsGeneration = 0;
+let participantRsObserver = null;
+let participantRsObservedBoard = null;
 
 const WARP_MESSAGES = [
     'Installation failed: 1.21 gigawatts required. Your mechanic says you watch too much sci-fi.',
@@ -837,6 +839,33 @@ function removeParticipantRsBadges() {
     document.querySelectorAll('.rslogParticipantRs').forEach(badge => badge.remove());
 }
 
+function stopParticipantRsObserver() {
+    participantRsObserver?.disconnect();
+    participantRsObserver = null;
+    participantRsObservedBoard = null;
+}
+
+function participantRsMutationTouchesNames(mutation) {
+    if (mutation.target?.matches?.('li.name') || mutation.target?.closest?.('li.name')) return true;
+    return [...mutation.addedNodes, ...mutation.removedNodes].some(node => node.nodeType === 1
+        && (node.matches?.('li.name, .rslogParticipantRs')
+            || node.querySelector?.('li.name, .rslogParticipantRs')));
+}
+
+function ensureParticipantRsObserver() {
+    const board = document.getElementById('leaderBoard');
+    if (board === participantRsObservedBoard) return;
+    stopParticipantRsObserver();
+    if (!board || typeof MutationObserver !== 'function') return;
+    participantRsObservedBoard = board;
+    participantRsObserver = new MutationObserver(mutations => {
+        if (participantRsIsEnabled() && mutations.some(participantRsMutationTouchesNames)) {
+            paintParticipantRsBadges();
+        }
+    });
+    participantRsObserver.observe(board, { childList: true, subtree: true });
+}
+
 function raceDriverRows() {
     const board = document.getElementById('leaderBoard');
     return board ? Array.from(board.children) : [];
@@ -874,6 +903,7 @@ function makeParticipantRsBadge(entry) {
 }
 
 function paintParticipantRsBadges() {
+    ensureParticipantRsObserver();
     if (!participantRsIsEnabled()) {
         removeParticipantRsBadges();
         return;
@@ -2197,6 +2227,7 @@ function renderLobbyLapTable() {
 // ─── Cleanup ───────────────────────────────────────────────────────────────────
 function cleanupRaceState(preserveRaceData = false) {
     maybeClear();
+    stopParticipantRsObserver();
     ['rslogWrapper', 'rslogRaceToolbar', 'rslogLobbyBtn', 'rslogLobbyVersion', 'rslogLobbyPanel'].forEach(id => {
         document.getElementById(id)?.remove();
     });
