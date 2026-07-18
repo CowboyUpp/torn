@@ -817,7 +817,7 @@
                 top: calc(100% + 6px);
                 left: 0;
                 z-index: 9999;
-                width: 520px;
+                width: max-content;
                 max-width: calc(100vw - 24px);
                 box-sizing: border-box;
                 padding: 10px 12px;
