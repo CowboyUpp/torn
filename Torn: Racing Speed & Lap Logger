@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.23
+// @version      2.7.24
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -18,7 +18,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.23';
+const SCRIPT_VERSION = '2.7.24';
 const $ = (...args) => unsafeWindow.$(...args);
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -64,7 +64,6 @@ function responseMatchesDisplayedRace(data) {
 function isDisplayedRaceResponse(data) {
     const nextRaceId = String(data?.raceID ?? '');
     if (!nextRaceId) return false;
-    if (currentRaceId && nextRaceId === currentRaceId) return responseMatchesDisplayedRace(data);
     // A different ID is valid when its track/laps/field match the panel Torn
     // currently displays. This permits a new race without accepting background data.
     return responseMatchesDisplayedRace(data);
@@ -124,7 +123,7 @@ installNativeRaceCapture();
 // ─── Config ────────────────────────────────────────────────────────────────────
 const POLL_MS = 1000;
 const MIN_SAMPLE_MS = 250;
-const MAX_SAMPLE_MS = 3000;
+const MAX_SAMPLE_MS = 12000;
 const HEALTH_CHECK_MS = 2000;
 const RESULTS_RENDER_THROTTLE_MS = 1000;
 const SETTING_SPEED_OPEN = 'rslog_speed_panel_open';
@@ -197,6 +196,8 @@ let lastSampleAt    = 0;
 let lastSampleTrack = '';
 let lastSampleCar   = '';
 let lastSampleLaps  = 0;
+let lastSampleRaceId = '';
+let consecutiveInvalidSamples = 0;
 
 // ─── Interval helpers ──────────────────────────────────────────────────────────
 function maybeClear() {
@@ -210,6 +211,8 @@ function maybeClear() {
     lastSampleTrack = '';
     lastSampleCar   = '';
     lastSampleLaps  = 0;
+    lastSampleRaceId = '';
+    consecutiveInvalidSamples = 0;
 }
 
 // ─── Storage ───────────────────────────────────────────────────────────────────
@@ -1554,12 +1557,15 @@ function startSpeedLoop() {
             lastSampleTrack = '';
             lastSampleCar = '';
             lastSampleLaps = 0;
+            lastSampleRaceId = '';
+            consecutiveInvalidSamples = 0;
             return;
         }
 
         const titleEl  = document.querySelector('div.title-black.t-overflow');
         const titleText = titleEl ? titleEl.textContent.trim() : '';
-        currentTrack   = normalizeTrackName(titleText);
+        const parsedTrack = normalizeTrackName(titleText);
+        if (parsedTrack) currentTrack = parsedTrack;
         const titleLaps = parseLapCount(titleText);
         if (titleLaps > 0) currentRaceLaps = titleLaps;
 
@@ -1580,6 +1586,8 @@ function startSpeedLoop() {
             lastSampleTrack = currentTrack;
             lastSampleCar = carKey(currentCar);
             lastSampleLaps = currentRaceLaps;
+            lastSampleRaceId = currentRaceId;
+            consecutiveInvalidSamples = 0;
             return;
         }
 
@@ -1587,7 +1595,8 @@ function startSpeedLoop() {
         const sampleCar = carKey(currentCar);
         const identityChanged = currentTrack !== lastSampleTrack
             || sampleCar !== lastSampleCar
-            || currentRaceLaps !== lastSampleLaps;
+            || currentRaceLaps !== lastSampleLaps
+            || (!!lastSampleRaceId && !!currentRaceId && currentRaceId !== lastSampleRaceId);
         if (!currentTrack || sampleCar === 'unknown' || currentRaceLaps <= 0
             || identityChanged || last_compl < 0 || compl < last_compl) {
             setLoggerStatus(identityChanged && last_compl >= 0 ? 'paused' : 'waiting');
@@ -1596,6 +1605,8 @@ function startSpeedLoop() {
             lastSampleTrack = currentTrack;
             lastSampleCar = sampleCar;
             lastSampleLaps = currentRaceLaps;
+            lastSampleRaceId = currentRaceId;
+            consecutiveInvalidSamples = 0;
             return;
         }
 
@@ -1613,10 +1624,13 @@ function startSpeedLoop() {
         // new value becomes the next baseline, so no delayed progress is reused.
         const speed = calculateSpeed(completionDelta, len, currentRaceLaps, elapsedMs);
         if (!Number.isFinite(speed) || speed <= 10 || speed >= 400) {
-            setLoggerStatus('paused');
+            consecutiveInvalidSamples += 1;
+            if (consecutiveInvalidSamples >= 2) setLoggerStatus('paused');
             return;
         }
         if (Number.isFinite(speed) && speed > 10 && speed < 400) {
+            consecutiveInvalidSamples = 0;
+            lastSampleRaceId = currentRaceId;
             setLoggerStatus('logging');
             $('#rslogSpeed, #rslogToolbarSpeed').text(speed.toFixed(2) + ' mph');
             if (speed > sessionTopSpeed) {
