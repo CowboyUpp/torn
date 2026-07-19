@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.27
+// @version      2.7.28
 // @description  Split UI: Top Speed + Top Lap panels.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.27';
+const SCRIPT_VERSION = '2.7.28';
 const $ = (...args) => unsafeWindow.$(...args);
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
@@ -525,7 +525,7 @@ GM_addStyle(`
     #rslogStatus.rslogStatusPaused::before, #rslogToolbarStatus.rslogStatusPaused::before { background: #ff9900; }
     #rslogLiveModeBtn { padding: 2px 6px; border: 1px solid #444; border-radius: 3px; background: #181818; color: #888; font: inherit; font-size: 9px; cursor: pointer; }
     #rslogLiveModeBtn:hover { color: #fff200; border-color: #777; }
-    #rslogRaceToolbar { display: flex; align-items: center; gap: 7px; min-height: 25px; margin-bottom: 6px; padding: 3px 7px; box-sizing: border-box; border: 1px solid #333; border-radius: 5px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); color: #ccc; font-family: "Courier New", Courier, monospace; font-size: 10px; }
+    #rslogRaceToolbar { display: flex; align-items: center; gap: 5px; min-height: 25px; margin-bottom: 6px; padding: 3px 7px; box-sizing: border-box; border: 1px solid #333; border-radius: 5px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); color: #ccc; font-family: "Courier New", Courier, monospace; font-size: 10px; }
     #rslogToolbarLiveWrap, #rslogToolbarTopWrap, #rslogToolbarSkillWrap { white-space: nowrap; }
     #rslogToolbarSpeed { color: #fff200; font-weight: bold; }
     #rslogToolbarTop { color: #ff9900; font-weight: bold; }
@@ -535,8 +535,7 @@ GM_addStyle(`
     #rslogParticipantRsBtn.rslogRsEnabled { color: #c6ffdf; border-color: #2d9d68; box-shadow: 0 0 6px rgba(0,255,136,.22); }
     #rslogParticipantRsBtn.rslogRsEnabled::before { content: '● '; color: #00ff88; }
     #rslogParticipantRsBtn.rslogRsError { color: #ff8c8c; border-color: #8f3939; }
-    #rslogRaceToolbar .rslogToolbarSpacer { flex: 1; }
-    #rslogRaceToolbar .rslogToolbarActions { display: flex; align-items: center; gap: 4px; }
+    #rslogRaceToolbar .rslogToolbarActions { display: flex; align-items: center; gap: 3px; }
     #rslogRaceLinkBtn { padding: 2px 6px; border: 1px solid #3e6b83; border-radius: 9px; background: #171717; color: #58c8ff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
     #rslogRaceLinkBtn:hover { color: #fff; border-color: #58c8ff; }
     #rslogRaceLinkBtn:disabled { color: #666; border-color: #444; cursor: default; }
@@ -1159,7 +1158,6 @@ function injectRaceToolbar() {
                 <span id="rslogToolbarTopWrap">Session top <span id="rslogToolbarTop">${sessionTopSpeed.toFixed(2)} mph</span></span>
                 <span id="rslogToolbarSkillWrap">Last RS <span id="rslogToolbarSkill">\u2014</span></span>
                 <button id="rslogParticipantRsBtn" type="button">RS OFF</button>
-                <span class="rslogToolbarSpacer"></span>
                 <span class="rslogToolbarActions">
                     <button id="rslogResultsToggleBtn" type="button" disabled>Show results</button>
                     <button id="rslogWarpBtn" type="button">Install warp drive</button>
