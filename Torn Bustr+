@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      0.1.0
+// @version      1.0.1
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
 // @author       cowboyup
 // @license      MIT
@@ -11,6 +11,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_openInTab
+// @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
 // ==/UserScript==
 
@@ -18,7 +19,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '0.1.0';
+  const VERSION = '1.0.1';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -716,8 +717,7 @@
 
     const url = `https://api.torn.com/user/?selections=log&log=${BUST_LOG_ID}&key=${encodeURIComponent(state.apiKey)}`;
     state.loadBustDataPromise = (async () => {
-      const response = await fetch(url, { credentials: 'omit' });
-      const data = await response.json();
+      const data = await requestJson(url);
       if (data.error) throw new Error(data.error.error || 'Torn API error');
       state.timestamps = extractBustTimestamps(data);
       state.lastFetchMs = Date.now();
@@ -730,13 +730,36 @@
       return await state.loadBustDataPromise;
     } catch (err) {
       console.error(`${SCRIPT}:`, err);
-      renderPanel(true);
+      if (force) renderPanel(true);
       const panel = document.getElementById('bustr-plus-panel');
       if (panel) showPanelHint(panel, `API error: ${err.message}`);
       return false;
     } finally {
       state.loadBustDataPromise = null;
     }
+  }
+
+  function requestJson(url) {
+    if (typeof GM_xmlhttpRequest === 'function') {
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          anonymous: true,
+          onload: (response) => {
+            try {
+              resolve(JSON.parse(response.responseText));
+            } catch (err) {
+              reject(new Error('Bad Torn API response'));
+            }
+          },
+          onerror: () => reject(new Error('Torn API request failed')),
+          ontimeout: () => reject(new Error('Torn API request timed out')),
+          timeout: 15000,
+        });
+      });
+    }
+    return fetch(url, { credentials: 'omit' }).then((response) => response.json());
   }
 
   function extractBustTimestamps(data) {
