@@ -12,6 +12,8 @@
 // @run-at       document-idle
 // @grant        none
 // @license      MIT
+// @homepageURL  https://greasyfork.org/en/scripts/587751-torn-no-confirm-market-bazaar
+// @supportURL   https://greasyfork.org/en/scripts/587751-torn-no-confirm-market-bazaar/feedback
 // ==/UserScript==
 
 (() => {
