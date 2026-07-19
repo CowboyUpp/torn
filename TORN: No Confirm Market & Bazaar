@@ -1,0 +1,171 @@
+// ==UserScript==
+// @name         TORN: No Confirm Market & Bazaar
+// @namespace    cowboyup.torn.userscripts
+// @version      1.0.0
+// @description  Enables one-click purchases in the Torn Item Market and individual Bazaars.
+// @author       cowboyup
+// @match        https://www.torn.com/page.php?sid=ItemMarket*
+// @match        https://*.torn.com/page.php?sid=ItemMarket*
+// @match        https://www.torn.com/bazaar.php*
+// @match        https://*.torn.com/bazaar.php*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
+// @run-at       document-idle
+// @grant        none
+// @license      MIT
+// ==/UserScript==
+
+(() => {
+  'use strict';
+
+  const CONTROL_SELECTOR = [
+    'button',
+    'a',
+    'input[type="button"]',
+    'input[type="submit"]',
+    '[role="button"]',
+  ].join(',');
+
+  const CONFIRM_TIMEOUT = 5000;
+  let armed = false;
+
+  function normalize(value) {
+    return String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function isVisible(element) {
+    return (
+      element instanceof HTMLElement &&
+      element.getClientRects().length > 0 &&
+      getComputedStyle(element).visibility !== 'hidden' &&
+      getComputedStyle(element).display !== 'none' &&
+      !element.disabled
+    );
+  }
+
+  function getLabel(element) {
+    return normalize(
+      element.getAttribute('aria-label') ||
+      element.textContent ||
+      element.value ||
+      element.title
+    );
+  }
+
+  function isPurchaseTrigger(control) {
+    const signal = normalize([
+      control.getAttribute('aria-label'),
+      control.textContent,
+      control.value,
+      control.title,
+      control.dataset?.action,
+      control.className,
+    ].join(' '));
+
+    return /\b(buy|purchase)\b/.test(signal);
+  }
+
+  function isYesControl(control) {
+    const label = getLabel(control);
+    const classes = normalize(control.className);
+
+    return (
+      isVisible(control) &&
+      (label === 'yes' ||
+        label === 'confirm purchase' ||
+        classes.includes('yes-buy'))
+    );
+  }
+
+  function isNoControl(control) {
+    const label = getLabel(control);
+    const classes = normalize(control.className);
+
+    return (
+      isVisible(control) &&
+      (label === 'no' ||
+        label === 'cancel' ||
+        classes.includes('no-buy'))
+    );
+  }
+
+  function findYesControl() {
+    const controls = [...document.querySelectorAll(CONTROL_SELECTOR)];
+
+    for (const yesControl of controls) {
+      if (!isYesControl(yesControl)) continue;
+
+      // Require a nearby No/Cancel control to avoid selecting an
+      // unrelated Yes button elsewhere on the page.
+      let container = yesControl.parentElement;
+
+      for (let depth = 0; container && depth < 5; depth += 1) {
+        const noControl = [...container.querySelectorAll(CONTROL_SELECTOR)]
+          .find(isNoControl);
+
+        if (noControl) return yesControl;
+        container = container.parentElement;
+      }
+    }
+
+    return null;
+  }
+
+  function armConfirmation() {
+    if (armed) return;
+    armed = true;
+
+    let observer;
+    let timeout;
+
+    function finish() {
+      observer?.disconnect();
+      clearTimeout(timeout);
+      armed = false;
+    }
+
+    function confirmPurchase() {
+      const yesControl = findYesControl();
+      if (!yesControl) return;
+
+      finish();
+      yesControl.click();
+      console.info('[No Confirm] Purchase confirmed');
+    }
+
+    observer = new MutationObserver(confirmPurchase);
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: [
+        'class',
+        'style',
+        'hidden',
+        'aria-hidden',
+        'disabled',
+      ],
+    });
+
+    timeout = setTimeout(finish, CONFIRM_TIMEOUT);
+    queueMicrotask(confirmPurchase);
+  }
+
+  document.addEventListener(
+    'click',
+    (event) => {
+      if (!event.isTrusted || !(event.target instanceof Element)) return;
+
+      const control = event.target.closest(CONTROL_SELECTOR);
+
+      if (control && isPurchaseTrigger(control)) {
+        armConfirmation();
+      }
+    },
+    true
+  );
+
+  console.info('[No Confirm] Ready for Item Market and Bazaars');
+})();
