@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.1.4
+// @version      1.2.6
 // @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -13,14 +13,14 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.torn.com
-// @downloadURL none
-// @updateURL   none
+// @downloadURL https://update.greasyfork.org/scripts/583629/Torn%20City%20Map%20Finder.user.js
+// @updateURL https://update.greasyfork.org/scripts/583629/Torn%20City%20Map%20Finder.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.1.4';
+    const VERSION = '1.2.6';
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -38,6 +38,7 @@
         tab: 'active',
         sort: 'date',
         search: '',
+        theme: 'light',
         showImages: false,
         apiEnabled: false,
         apiKey: '',
@@ -85,6 +86,9 @@
     };
 
     let settings = Object.assign({}, DEFAULT_SETTINGS, STORE.get('settings', {}));
+    settings.theme = settings.theme === 'dark' ? 'dark' : 'light';
+    settings.tab = settings.tab === 'history' ? 'history' : 'active';
+    settings.showImages = Boolean(settings.showImages);
     let historyMap = readHistory();
     let itemMeta = STORE.get('itemMeta', {});
     let itemMetaFetchedAt = Number(STORE.get('itemMetaFetchedAt', 0)) || 0;
@@ -108,6 +112,7 @@
     let detailEl = null;
     let settingsEl = null;
     let toastTimer = null;
+    let newFindPulseTimer = null;
 
     function saveSettings() {
         STORE.set('settings', settings);
@@ -341,6 +346,7 @@
         const activeKeys = new Set(items.map((item) => item.key));
         let dirty = false;
         let persistImmediately = false;
+        let newCount = 0;
 
         items.forEach((item) => {
             const enriched = enrichItem(item);
@@ -350,6 +356,7 @@
                 historyMap[item.key] = makeRecord(item, now);
                 dirty = true;
                 persistImmediately = true;
+                newCount++;
                 return;
             }
 
@@ -398,6 +405,8 @@
         if (dirty && (persistImmediately || now - lastHistorySaveAt >= HISTORY_SAVE_INTERVAL_MS)) {
             saveHistory();
         }
+
+        return newCount;
     }
 
     function trimHistory() {
@@ -995,9 +1004,468 @@
                 font: 700 12px/1.35 Arial, sans-serif;
             }
             #tcfs-toast.tcfs-show { opacity: 1; }
+
+            /* v1.2 — compact Torn-header launcher and Find/Collect visual system */
+            #tcfs-fab {
+                width: 42px;
+                height: 42px;
+                padding: 0;
+                justify-content: center;
+                gap: 0;
+                overflow: visible;
+                border: 1px solid #5b5144;
+                border-radius: 50%;
+                background:
+                    radial-gradient(circle at 50% 48%, rgba(235,163,55,.18) 0 32%, transparent 34%),
+                    linear-gradient(180deg, #393735 0%, #242321 100%);
+                color: #f0b14b;
+                box-shadow:
+                    inset 0 1px rgba(255,255,255,.12),
+                    inset 0 -2px rgba(0,0,0,.48),
+                    0 2px 8px rgba(0,0,0,.55);
+                transition: border-color .16s ease, color .16s ease, box-shadow .2s ease,
+                            filter .16s ease, transform .12s ease;
+            }
+            #tcfs-fab::before {
+                inset: -4px;
+                width: auto;
+                height: auto;
+                border: 1px solid rgba(231,155,46,.2);
+                border-radius: 50%;
+                background: transparent;
+                opacity: 0;
+                transform: scale(.82);
+                pointer-events: none;
+            }
+            #tcfs-fab::after {
+                content: "";
+                position: absolute;
+                inset: 5px;
+                border: 1px solid rgba(240,177,75,.28);
+                border-radius: 50%;
+                pointer-events: none;
+            }
+            #tcfs-fab:hover,
+            #tcfs-fab:focus-visible,
+            #tcfs-fab.tcfs-open {
+                width: 42px;
+                gap: 0;
+                border-color: #c98b31;
+                background:
+                    radial-gradient(circle at 50% 48%, rgba(244,174,59,.28) 0 32%, transparent 34%),
+                    linear-gradient(180deg, #46413a 0%, #292621 100%);
+                color: #ffd27d;
+                box-shadow:
+                    inset 0 1px rgba(255,255,255,.14),
+                    0 2px 8px rgba(0,0,0,.58),
+                    0 0 14px rgba(231,155,46,.28);
+                transform: none;
+            }
+            #tcfs-fab:focus-visible { outline: 2px solid #f0b14b; outline-offset: 3px; }
+            #tcfs-fab:active { transform: translateY(1px); }
+            #tcfs-fab.tcfs-open::before,
+            #tcfs-fab.tcfs-has-items::before {
+                opacity: 1;
+                transform: scale(1);
+            }
+            #tcfs-fab.tcfs-has-items {
+                border-color: #d69838;
+                box-shadow:
+                    inset 0 1px rgba(255,255,255,.12),
+                    0 2px 8px rgba(0,0,0,.58),
+                    0 0 16px rgba(231,155,46,.34);
+            }
+            #tcfs-fab .cfc-icon,
+            #tcfs-fab .cfc-icon svg { width: 24px; height: 24px; }
+            #tcfs-fab .cfc-label {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                clip: rect(0 0 0 0);
+                opacity: 0;
+            }
+            #tcfs-fab:hover .cfc-label,
+            #tcfs-fab:focus-visible .cfc-label,
+            #tcfs-fab.tcfs-open .cfc-label { width: 1px; opacity: 0; }
+            #tcfs-fab .tcfs-badge {
+                top: -4px;
+                right: -7px;
+                min-width: 18px;
+                height: 18px;
+                padding: 0 4px;
+                border-color: #252321;
+                background: #d7902d;
+                color: #17130d;
+                box-shadow: 0 2px 7px rgba(0,0,0,.55), 0 0 8px rgba(231,155,46,.32);
+                font-size: 10px;
+            }
+            #tcfs-panel {
+                width: 404px;
+                border: 1px solid #49433b;
+                border-radius: 7px;
+                background:
+                    linear-gradient(rgba(24,23,22,.975), rgba(17,17,16,.985)),
+                    repeating-linear-gradient(115deg, transparent 0 8px, rgba(255,255,255,.015) 9px 10px);
+                color: #ece8df;
+                box-shadow: 0 22px 64px rgba(0,0,0,.7), 0 0 0 1px rgba(0,0,0,.6);
+            }
+            .tcfs-head {
+                min-height: 50px;
+                padding: 8px 10px 8px 12px;
+                border-bottom-color: rgba(231,155,46,.28);
+                background: linear-gradient(100deg, rgba(231,155,46,.16), rgba(255,255,255,.035) 46%, transparent);
+            }
+            .tcfs-brandmark {
+                width: 32px;
+                height: 32px;
+                flex: 0 0 32px;
+                display: grid;
+                place-items: center;
+                border: 1px solid rgba(231,155,46,.42);
+                border-radius: 50%;
+                color: #f0b14b;
+                box-shadow: inset 0 0 9px rgba(231,155,46,.11);
+            }
+            .tcfs-brandmark svg { width: 21px; height: 21px; }
+            .tcfs-title {
+                color: #f3eee4;
+                font-size: 14px;
+                font-weight: 850;
+                letter-spacing: .7px;
+                line-height: 1.15;
+                text-transform: uppercase;
+            }
+            .tcfs-title span { color: #c89546; letter-spacing: 0; }
+            .tcfs-head-status {
+                margin-top: 3px;
+                color: #8f8a81;
+                font-size: 10px;
+                font-weight: 650;
+                letter-spacing: .35px;
+                text-transform: none;
+            }
+            .tcfs-iconbtn { border-radius: 5px; color: #bbb5aa; }
+            .tcfs-tabs button.tcfs-active {
+                border-color: rgba(231,155,46,.65);
+                background: rgba(231,155,46,.13);
+                color: #f2c477;
+            }
+            .tcfs-row.tcfs-selected { border-color: rgba(231,155,46,.52); background: rgba(231,155,46,.09); }
+            .tcfs-pill { border-color: rgba(231,155,46,.34); background: rgba(231,155,46,.1); color: #f0c171; }
+            .tcfs-teal { border-color: rgba(93,178,158,.34); background: rgba(93,178,158,.1); color: #92d1c1; }
+
+            /* v1.2.1 — lighter, quieter UI with an optional dark theme */
+            #tcfs-fab {
+                width: 34px;
+                height: 34px;
+                border-color: #6a6258;
+                background: linear-gradient(180deg, #403e3b, #292826);
+                color: #e5a548;
+                box-shadow: inset 0 1px rgba(255,255,255,.13), 0 2px 6px rgba(0,0,0,.42);
+            }
+            #tcfs-fab::before { inset: -3px; }
+            #tcfs-fab::after { inset: 4px; }
+            #tcfs-fab:hover,
+            #tcfs-fab:focus-visible,
+            #tcfs-fab.tcfs-open {
+                width: 34px;
+                border-color: #d19a4b;
+                background: linear-gradient(180deg, #494640, #302e2a);
+                box-shadow: inset 0 1px rgba(255,255,255,.15), 0 2px 7px rgba(0,0,0,.44), 0 0 9px rgba(229,165,72,.2);
+            }
+            #tcfs-fab .cfc-icon,
+            #tcfs-fab .cfc-icon svg { width: 20px; height: 20px; }
+            #tcfs-fab .tcfs-badge {
+                top: -5px;
+                right: -7px;
+                min-width: 16px;
+                height: 16px;
+                border-width: 1px;
+                font-size: 9px;
+            }
+
+            #tcfs-panel[data-theme] {
+                --tcfs-bg: #f4f5f6;
+                --tcfs-surface: #ffffff;
+                --tcfs-soft: #eceff1;
+                --tcfs-soft-hover: #e3e7ea;
+                --tcfs-text: #272a2e;
+                --tcfs-muted: #71767c;
+                --tcfs-border: #d8dde1;
+                --tcfs-accent: #b9751d;
+                --tcfs-accent-soft: #fff2dc;
+                --tcfs-accent-border: #e1b66e;
+                width: 390px;
+                border-color: var(--tcfs-border);
+                border-radius: 10px;
+                background: var(--tcfs-bg);
+                color: var(--tcfs-text);
+                box-shadow: 0 18px 48px rgba(15,20,24,.22), 0 2px 8px rgba(15,20,24,.08);
+            }
+            #tcfs-panel[data-theme="dark"] {
+                --tcfs-bg: #202326;
+                --tcfs-surface: #292d31;
+                --tcfs-soft: #25292d;
+                --tcfs-soft-hover: #34393e;
+                --tcfs-text: #eef0f2;
+                --tcfs-muted: #a7adb3;
+                --tcfs-border: #3b4147;
+                --tcfs-accent: #e0a24d;
+                --tcfs-accent-soft: #3b3225;
+                --tcfs-accent-border: #765c36;
+                box-shadow: 0 20px 54px rgba(0,0,0,.48);
+            }
+            #tcfs-panel[data-theme] .tcfs-head {
+                min-height: 44px;
+                padding: 7px 9px 7px 11px;
+                border-bottom-color: var(--tcfs-border);
+                background: var(--tcfs-surface);
+            }
+            #tcfs-panel[data-theme] .tcfs-brandmark {
+                width: 28px;
+                height: 28px;
+                flex-basis: 28px;
+                border-color: var(--tcfs-accent-border);
+                color: var(--tcfs-accent);
+                box-shadow: none;
+            }
+            #tcfs-panel[data-theme] .tcfs-brandmark svg { width: 18px; height: 18px; }
+            #tcfs-panel[data-theme] .tcfs-title {
+                color: var(--tcfs-text);
+                font-size: 13px;
+                font-weight: 680;
+                letter-spacing: .15px;
+                text-transform: none;
+            }
+            #tcfs-panel[data-theme] .tcfs-title span,
+            #tcfs-panel[data-theme] .tcfs-head-status,
+            #tcfs-panel[data-theme] .tcfs-summary,
+            #tcfs-panel[data-theme] .tcfs-detail-meta,
+            #tcfs-panel[data-theme] .tcfs-row-meta,
+            #tcfs-panel[data-theme] .tcfs-setting-note,
+            #tcfs-panel[data-theme] .tcfs-empty { color: var(--tcfs-muted); }
+            #tcfs-panel[data-theme] .tcfs-head-status {
+                margin-top: 2px;
+                font-size: 10px;
+                font-weight: 500;
+                letter-spacing: 0;
+            }
+            #tcfs-panel[data-theme] .tcfs-iconbtn,
+            #tcfs-panel[data-theme] .tcfs-smallbtn,
+            #tcfs-panel[data-theme] .tcfs-row button,
+            #tcfs-panel[data-theme] .tcfs-detail-actions button,
+            #tcfs-panel[data-theme] .tcfs-tabs button {
+                border-color: var(--tcfs-border);
+                background: var(--tcfs-surface);
+                color: var(--tcfs-text);
+                font-weight: 600;
+            }
+            #tcfs-panel[data-theme] .tcfs-iconbtn:hover,
+            #tcfs-panel[data-theme] .tcfs-smallbtn:hover,
+            #tcfs-panel[data-theme] .tcfs-row button:hover,
+            #tcfs-panel[data-theme] .tcfs-detail-actions button:hover,
+            #tcfs-panel[data-theme] .tcfs-tabs button:hover { background: var(--tcfs-soft-hover); }
+            #tcfs-panel[data-theme] .tcfs-tabs,
+            #tcfs-panel[data-theme] .tcfs-tools,
+            #tcfs-panel[data-theme] .tcfs-summary,
+            #tcfs-panel[data-theme] .tcfs-detail { border-bottom-color: var(--tcfs-border); }
+            #tcfs-panel[data-theme] .tcfs-tabs { gap: 6px; padding: 7px 10px; }
+            #tcfs-panel[data-theme] .tcfs-tabs button { padding: 7px 9px; border-radius: 7px; }
+            #tcfs-panel[data-theme] .tcfs-tabs button.tcfs-active {
+                border-color: var(--tcfs-accent-border);
+                background: var(--tcfs-accent-soft);
+                color: var(--tcfs-accent);
+            }
+            #tcfs-panel[data-theme] .tcfs-tools { padding: 8px 10px; }
+            #tcfs-panel[data-theme] .tcfs-tools input,
+            #tcfs-panel[data-theme] .tcfs-tools select,
+            #tcfs-panel[data-theme] .tcfs-settings input,
+            #tcfs-panel[data-theme] .tcfs-settings select {
+                border-color: var(--tcfs-border);
+                background: var(--tcfs-surface);
+                color: var(--tcfs-text);
+            }
+            #tcfs-panel[data-theme] select option { background: var(--tcfs-surface); color: var(--tcfs-text); }
+            #tcfs-panel[data-theme] .tcfs-summary { padding: 7px 11px; }
+            #tcfs-panel[data-theme] .tcfs-detail { background: var(--tcfs-soft); }
+            #tcfs-panel[data-theme] .tcfs-detail.tcfs-open {
+                grid-template-columns: minmax(0, 1fr);
+                gap: 9px;
+            }
+            #tcfs-panel[data-theme] .tcfs-list { padding: 7px; }
+            #tcfs-panel[data-theme] .tcfs-row {
+                grid-template-columns: minmax(0, 1fr);
+                gap: 0;
+                margin-bottom: 5px;
+                padding: 9px 10px;
+                border-color: transparent;
+                border-radius: 7px;
+                background: var(--tcfs-surface);
+                box-shadow: 0 1px 2px rgba(15,20,24,.05);
+            }
+            #tcfs-panel[data-theme] .tcfs-row:hover { border-color: var(--tcfs-border); background: var(--tcfs-soft); }
+            #tcfs-panel[data-theme] .tcfs-row.tcfs-selected {
+                border-color: var(--tcfs-accent-border);
+                background: var(--tcfs-accent-soft);
+            }
+            #tcfs-panel[data-theme] .tcfs-row-name { font-weight: 650; }
+            #tcfs-panel[data-theme] .tcfs-value { color: var(--tcfs-accent); font-weight: 650; }
+            #tcfs-panel[data-theme] .tcfs-pill {
+                border: 0;
+                background: var(--tcfs-accent-soft);
+                color: var(--tcfs-accent);
+            }
+            #tcfs-panel[data-theme] .tcfs-settings {
+                border-bottom-color: var(--tcfs-border);
+                background: var(--tcfs-soft);
+            }
+            #tcfs-panel[data-theme] .tcfs-theme-icon { width: 17px; height: 17px; display: block; }
+            #tcfs-panel[data-theme="light"] .tcfs-sun,
+            #tcfs-panel[data-theme="dark"] .tcfs-moon { display: none; }
+
+            /* v1.2.2 — compact controls and a useful full-height results area */
+            #tcfs-fab {
+                width: 30px;
+                height: 30px;
+            }
+            #tcfs-fab:hover,
+            #tcfs-fab:focus-visible,
+            #tcfs-fab.tcfs-open { width: 30px; }
+            #tcfs-fab .cfc-icon,
+            #tcfs-fab .cfc-icon svg { width: 18px; height: 18px; }
+            #tcfs-fab .tcfs-badge {
+                top: -5px;
+                right: -7px;
+                min-width: 15px;
+                height: 15px;
+                padding: 0 3px;
+                font-size: 8px;
+            }
+            #tcfs-panel[data-theme] {
+                height: min(72vh, 580px);
+                min-height: 360px;
+            }
+            #tcfs-panel[data-theme] .tcfs-head {
+                min-height: 38px;
+                padding: 5px 7px 5px 9px;
+                gap: 5px;
+            }
+            #tcfs-panel[data-theme] .tcfs-brandmark {
+                width: 24px;
+                height: 24px;
+                flex-basis: 24px;
+            }
+            #tcfs-panel[data-theme] .tcfs-brandmark svg { width: 16px; height: 16px; }
+            #tcfs-panel[data-theme] .tcfs-title { font-size: 12px; }
+            #tcfs-panel[data-theme] .tcfs-head-status { font-size: 9px; }
+            #tcfs-panel[data-theme] .tcfs-iconbtn {
+                width: 26px;
+                height: 26px;
+                min-height: 26px;
+                padding: 0;
+                font-size: 12px;
+            }
+            #tcfs-panel[data-theme] .tcfs-theme-icon { width: 15px; height: 15px; }
+            #tcfs-panel[data-theme] .tcfs-tabs {
+                justify-content: flex-start;
+                gap: 5px;
+                padding: 6px 9px;
+            }
+            #tcfs-panel[data-theme] .tcfs-tabs button {
+                flex: 0 0 auto;
+                min-height: 25px;
+                padding: 4px 13px;
+                border-radius: 6px;
+                font-size: 11px;
+            }
+            #tcfs-panel[data-theme] .tcfs-tools { padding: 6px 9px; }
+            #tcfs-panel[data-theme] .tcfs-tools input,
+            #tcfs-panel[data-theme] .tcfs-tools select {
+                height: 27px;
+                font-size: 11px;
+            }
+            #tcfs-panel[data-theme] .tcfs-summary {
+                min-height: 25px;
+                padding: 5px 10px;
+                font-size: 11px;
+            }
+            #tcfs-panel[data-theme] .tcfs-detail { padding: 8px 10px; }
+            #tcfs-panel[data-theme] .tcfs-detail-actions {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 5px;
+            }
+            #tcfs-panel[data-theme] .tcfs-detail-actions button,
+            #tcfs-panel[data-theme] .tcfs-smallbtn {
+                min-height: 25px;
+                padding: 4px 8px;
+                font-size: 11px;
+            }
+            #tcfs-panel[data-theme] .tcfs-list {
+                flex: 1 1 auto;
+                min-height: 150px;
+                overflow-y: auto;
+                padding: 6px;
+                scrollbar-width: auto;
+                scrollbar-color: var(--tcfs-muted) var(--tcfs-soft);
+            }
+            #tcfs-panel[data-theme] .tcfs-list::-webkit-scrollbar { width: 10px; }
+            #tcfs-panel[data-theme] .tcfs-list::-webkit-scrollbar-track { background: var(--tcfs-soft); }
+            #tcfs-panel[data-theme] .tcfs-list::-webkit-scrollbar-thumb {
+                border: 2px solid var(--tcfs-soft);
+                border-radius: 999px;
+                background: var(--tcfs-muted);
+            }
+            #tcfs-panel[data-theme] .tcfs-row {
+                margin-bottom: 4px;
+                padding: 7px 9px;
+            }
+            #tcfs-panel[data-theme] .tcfs-row.tcfs-has-icon {
+                grid-template-columns: 24px minmax(0, 1fr);
+                gap: 8px;
+                align-items: center;
+            }
+            #tcfs-panel[data-theme] .tcfs-row .tcfs-item-icon {
+                width: 22px;
+                height: 22px;
+                border-radius: 5px;
+                object-fit: contain;
+                background: transparent;
+                border: 0;
+                box-shadow: none;
+            }
+            #tcfs-panel[data-theme] .tcfs-row-name { font-size: 12px; }
+            #tcfs-panel[data-theme] .tcfs-row-meta { margin-top: 2px; font-size: 10px; }
+            #tcfs-panel[data-theme] .tcfs-settings .tcfs-setting-row:first-child {
+                margin-bottom: 9px;
+                padding-bottom: 8px;
+                border-bottom: 1px solid var(--tcfs-border);
+            }
+            #tcfs-panel[data-theme].tcfs-settings-mode .tcfs-tabs,
+            #tcfs-panel[data-theme].tcfs-settings-mode .tcfs-tools,
+            #tcfs-panel[data-theme].tcfs-settings-mode .tcfs-summary,
+            #tcfs-panel[data-theme].tcfs-settings-mode .tcfs-detail,
+            #tcfs-panel[data-theme].tcfs-settings-mode .tcfs-list {
+                display: none !important;
+            }
+            #tcfs-panel[data-theme].tcfs-settings-mode .tcfs-settings {
+                flex: 1 1 auto;
+                overflow-y: auto;
+                border-bottom: 0;
+            }
+            @keyframes tcfs-new-find-pulse {
+                0% { box-shadow: inset 0 1px rgba(255,255,255,.12), 0 2px 8px rgba(0,0,0,.58), 0 0 0 0 rgba(231,155,46,.48); }
+                58% { box-shadow: inset 0 1px rgba(255,255,255,.12), 0 2px 8px rgba(0,0,0,.58), 0 0 0 9px rgba(231,155,46,0); }
+                100% { box-shadow: inset 0 1px rgba(255,255,255,.12), 0 2px 8px rgba(0,0,0,.58), 0 0 0 0 rgba(231,155,46,0); }
+            }
+            #tcfs-fab.tcfs-new-find-pulse {
+                animation: tcfs-new-find-pulse 1.25s ease-out 2;
+            }
+
             @media (hover: none) {
                 #tcfs-fab:hover:not(.tcfs-open) {
-                    width: 46px;
+                    width: 30px;
                     gap: 0;
                     transform: none;
                 }
@@ -1011,6 +1479,9 @@
                 #tcfs-fab::before,
                 #tcfs-fab .cfc-label {
                     transition: none;
+                }
+                #tcfs-fab.tcfs-new-find-pulse {
+                    animation: none;
                 }
             }
             @media (max-width: 520px) {
@@ -1041,19 +1512,20 @@
         fab = document.createElement('button');
         fab.id = 'tcfs-fab';
         fab.type = 'button';
-        fab.title = 'City Finds';
+        fab.title = 'City Find / Collect';
         fab.setAttribute('aria-label', 'Open City Finds');
         fab.setAttribute('aria-controls', 'tcfs-panel');
         fab.setAttribute('aria-expanded', 'false');
         
         fab.innerHTML = `
             <div class="cfc-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M18 10c0 4.7-6 10.5-6 10.5S6 14.7 6 10a6 6 0 1 1 12 0Z" />
-                    <circle cx="12" cy="10" r="2.25" />
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="6.2" />
+                    <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none" />
+                    <path d="M12 2.2v3.2M12 18.6v3.2M2.2 12h3.2M18.6 12h3.2" />
                 </svg>
             </div>
-            <span class="cfc-label">City Finds</span>
+            <span class="cfc-label">Find / Collect</span>
             <span class="tcfs-badge" aria-label="0 active finds"></span>
         `;
         document.body.appendChild(fab);
@@ -1061,19 +1533,30 @@
 
         panel = document.createElement('div');
         panel.id = 'tcfs-panel';
+        panel.dataset.theme = settings.theme;
         panel.setAttribute('role', 'dialog');
         panel.setAttribute('aria-label', 'City Finds');
         panel.innerHTML = `
             <div class="tcfs-head">
-                <div class="tcfs-title">City Finder <span>v${VERSION}</span></div>
+                <div class="tcfs-brandmark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="6.2"/><circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/>
+                        <path d="M12 2.2v3.2M12 18.6v3.2M2.2 12h3.2M18.6 12h3.2"/>
+                    </svg>
+                </div>
+                <div class="tcfs-title">City Finder <span>v${VERSION}</span><div class="tcfs-head-status">Scanner ready</div></div>
+                <button class="tcfs-iconbtn" type="button" data-action="theme" title="Use dark theme" aria-label="Use dark theme">
+                    <svg class="tcfs-theme-icon tcfs-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8a8.5 8.5 0 1 0 11.6 11.6Z"/></svg>
+                    <svg class="tcfs-theme-icon tcfs-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+                </button>
                 <button class="tcfs-iconbtn" type="button" data-action="settings" title="Settings">&#9881;</button>
                 <button class="tcfs-iconbtn" type="button" data-action="refresh" title="Refresh">&#8635;</button>
                 <button class="tcfs-iconbtn" type="button" data-action="close" title="Close">x</button>
             </div>
             <div class="tcfs-settings"></div>
-            <div class="tcfs-tabs">
-                <button type="button" data-tab="active">Active</button>
-                <button type="button" data-tab="history">History</button>
+            <div class="tcfs-tabs" role="tablist" aria-label="Find views">
+                <button type="button" data-tab="active" role="tab">Active</button>
+                <button type="button" data-tab="history" role="tab">History</button>
             </div>
             <div class="tcfs-tools">
                 <input type="search" data-role="search" placeholder="Search items" autocomplete="off">
@@ -1093,13 +1576,11 @@
         settingsEl = panel.querySelector('.tcfs-settings');
         listEl = panel.querySelector('.tcfs-list');
         detailEl = panel.querySelector('.tcfs-detail');
+        applyTheme();
 
-        makeFabDraggable();
-        placeFab(
-            settings.fabX == null ? window.innerWidth - 62 : settings.fabX,
-            settings.fabY == null ? window.innerHeight - 80 : settings.fabY,
-            true
-        );
+        fab.addEventListener('click', () => togglePanel());
+        positionHeaderFab();
+        [250, 1000, 3000].forEach((delay) => setTimeout(positionHeaderFab, delay));
 
         panel.addEventListener('click', onPanelClick);
         panel.querySelector('[data-role="search"]').addEventListener('input', (event) => {
@@ -1112,9 +1593,10 @@
             saveSettings();
             render();
         });
+        document.addEventListener('keydown', onDocumentKeydown);
 
         window.addEventListener('resize', () => {
-            placeFab(settings.fabX, settings.fabY, true);
+            positionHeaderFab();
             if (panel.classList.contains('tcfs-open')) anchorPanel();
         });
 
@@ -1124,11 +1606,49 @@
         if (settings.panelOpen) togglePanel(true);
     }
 
+    function isTypingTarget(target) {
+        const element = target && target.nodeType === 1 ? target : null;
+        if (!element) return false;
+        const tagName = element.tagName ? element.tagName.toLowerCase() : '';
+        return tagName === 'input' ||
+            tagName === 'textarea' ||
+            tagName === 'select' ||
+            element.isContentEditable;
+    }
+
+    function focusSearchShortcut() {
+        if (!panel || !fab) return;
+        if (!panel.classList.contains('tcfs-open')) togglePanel(true);
+        if (settingsEl) settingsEl.classList.remove('tcfs-open');
+        panel.classList.remove('tcfs-settings-mode');
+        const searchInput = panel.querySelector('[data-role="search"]');
+        if (searchInput) {
+            searchInput.focus();
+            searchInput.select();
+        }
+    }
+
+    function onDocumentKeydown(event) {
+        if (!panel || event.ctrlKey || event.metaKey || event.altKey) return;
+
+        if (event.key === 'Escape' && panel.classList.contains('tcfs-open')) {
+            event.preventDefault();
+            togglePanel(false);
+            return;
+        }
+
+        if (event.key === '/' && !isTypingTarget(event.target)) {
+            event.preventDefault();
+            focusSearchShortcut();
+        }
+    }
+
     function onPanelClick(event) {
-        const tab = event.target.closest('[data-tab]');
-        if (tab) {
-            settings.tab = tab.dataset.tab;
+        const tabEl = event.target.closest('[data-tab]');
+        if (tabEl) {
+            settings.tab = tabEl.dataset.tab === 'history' ? 'history' : 'active';
             saveSettings();
+            selectedKey = null;
             render();
             return;
         }
@@ -1140,7 +1660,15 @@
         const key = actionEl.closest('[data-key]') ? actionEl.closest('[data-key]').dataset.key : selectedKey;
 
         if (action === 'settings') {
-            settingsEl.classList.toggle('tcfs-open');
+            const open = !settingsEl.classList.contains('tcfs-open');
+            settingsEl.classList.toggle('tcfs-open', open);
+            panel.classList.toggle('tcfs-settings-mode', open);
+            return;
+        }
+        if (action === 'theme') {
+            settings.theme = settings.theme === 'dark' ? 'light' : 'dark';
+            saveSettings();
+            applyTheme();
             return;
         }
         if (action === 'refresh') {
@@ -1173,10 +1701,6 @@
             restoreRecord(key);
             return;
         }
-        if (action === 'clear-history') {
-            clearGoneHistory();
-            return;
-        }
         if (action === 'open-api') {
             window.open('https://www.torn.com/preferences.php#tab=api', '_blank', 'noopener');
             return;
@@ -1191,14 +1715,25 @@
         }
     }
 
+    function applyTheme() {
+        if (!panel) return;
+        panel.dataset.theme = settings.theme;
+        const button = panel.querySelector('[data-action="theme"]');
+        if (button) {
+            const label = settings.theme === 'dark' ? 'Use light theme' : 'Use dark theme';
+            button.title = label;
+            button.setAttribute('aria-label', label);
+        }
+    }
+
     function renderSettings() {
         if (!settingsEl) return;
 
         settingsEl.innerHTML = `
             <div class="tcfs-setting-row">
-                <label>
+                <label title="Show small item icons in the list instead of text-only rows.">
                     <input type="checkbox" data-setting="showImages" ${settings.showImages ? 'checked' : ''}>
-                    Show item images in list
+                    Show compact item icons
                 </label>
             </div>
             <div class="tcfs-setting-row">
@@ -1219,15 +1754,6 @@
                     <br><button class="tcfs-smallbtn" type="button" data-action="refresh-meta" style="margin-top:5px;" ${busyMeta ? 'disabled' : ''}>Force Update Now</button>
                 </div>
             </div>
-            <div class="tcfs-setting-row">
-                <label style="flex: initial;">Max history logs:</label>
-                <select data-setting="historyLimit" style="width: 80px; height:26px; padding:0 3px;">
-                    <option value="100" ${Number(settings.historyLimit) === 100 ? 'selected' : ''}>100</option>
-                    <option value="250" ${Number(settings.historyLimit) === 250 ? 'selected' : ''}>250</option>
-                    <option value="500" ${Number(settings.historyLimit) === 500 ? 'selected' : ''}>500</option>
-                    <option value="1000" ${Number(settings.historyLimit) === 1000 ? 'selected' : ''}>1000</option>
-                </select>
-            </div>
         `;
 
         settingsEl.querySelectorAll('input[type="checkbox"]').forEach((box) => {
@@ -1240,18 +1766,10 @@
                     document.getElementById('tcfs-api-block').style.display = settings.apiEnabled ? 'block' : 'none';
                     if (settings.apiEnabled && !itemMetaFetchedAt) fetchItemMetadata(false);
                 }
-                if (name === 'showImages') renderMapPins();
                 render();
             });
         });
 
-        settingsEl.querySelector('select[data-setting="historyLimit"]').addEventListener('change', (event) => {
-            settings.historyLimit = Math.max(50, parseInt(event.target.value, 10) || 500);
-            saveSettings();
-            trimHistory();
-            saveHistory();
-            render();
-        });
     }
 
     function saveApiSettings() {
@@ -1282,9 +1800,89 @@
             anchorPanel();
         } else {
             panel.classList.remove('tcfs-open');
+            if (settingsEl) settingsEl.classList.remove('tcfs-open');
+            panel.classList.remove('tcfs-settings-mode');
         }
         settings.panelOpen = next;
         saveSettings();
+    }
+
+    function isVisibleAnchor(element) {
+        if (!element || !element.isConnected) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < 90;
+    }
+
+    function firstVisible(selectors) {
+        for (const selector of selectors) {
+            try {
+                const matches = document.querySelectorAll(selector);
+                for (const element of matches) {
+                    if (isVisibleAnchor(element)) return element;
+                }
+            } catch (_) {}
+        }
+        return null;
+    }
+
+    function exactTextAnchor(label) {
+        const wanted = label.toUpperCase();
+        const candidates = document.querySelectorAll('a, button, [role="button"], li, span');
+        for (const element of candidates) {
+            if (cleanText(element.textContent).toUpperCase() === wanted && isVisibleAnchor(element)) {
+                return element.closest('a, button, [role="button"], li') || element;
+            }
+        }
+        return null;
+    }
+
+    function positionHeaderFab() {
+        if (!fab) return;
+
+        const toolAnchor = firstVisible([
+            '[title*="Torn Tools" i]',
+            '[aria-label*="Torn Tools" i]',
+            'img[alt*="Torn Tools" i]',
+            'a[href*="torn.tools" i]',
+            '[id*="torntools" i]',
+            '[class*="torntools" i]'
+        ]);
+        const bustrAnchor = firstVisible([
+            '[title*="BUSTR" i]',
+            '[aria-label*="BUSTR" i]',
+            'a[href*="bustr" i]',
+            '[id*="bustr" i]',
+            '[class*="bustr" i]'
+        ]) || exactTextAnchor('BUSTR+');
+
+        const buttonWidth = 30;
+        let left;
+        let top;
+
+        if (toolAnchor) {
+            const toolRect = toolAnchor.getBoundingClientRect();
+            left = toolRect.right + 14;
+            top = toolRect.top + (toolRect.height - buttonWidth) / 2;
+
+            if (bustrAnchor) {
+                const bustrRect = bustrAnchor.getBoundingClientRect();
+                left = Math.min(left, bustrRect.left - buttonWidth - 14);
+            }
+        } else if (bustrAnchor) {
+            const bustrRect = bustrAnchor.getBoundingClientRect();
+            left = bustrRect.left - buttonWidth - 18;
+            top = bustrRect.top + (bustrRect.height - buttonWidth) / 2;
+        } else {
+            left = window.innerWidth - buttonWidth - 250;
+            top = 8;
+        }
+
+        left = Math.max(10, Math.min(window.innerWidth - buttonWidth - 10, left));
+        top = Math.max(4, Math.min(52, Number.isFinite(top) ? top : 8));
+        fab.style.left = Math.round(left) + 'px';
+        fab.style.top = Math.round(top) + 'px';
+
+        if (panel && panel.classList.contains('tcfs-open')) anchorPanel();
     }
 
     function placeFab(left, top, persist) {
@@ -1537,15 +2135,12 @@
 
     function getImageUrl(itemId) {
         if (!itemId) return '';
-        return `https://www.torn.com/images/items/${itemId}/medium.png`;
+        return `https://www.torn.com/images/items/${itemId}/small.png`;
     }
 
     function buildRowToken(itemId, title) {
-        if (settings.showImages && itemId) {
-            return `<img src="${getImageUrl(itemId)}" alt="Item" loading="lazy">`;
-        }
-        const token = cleanText(title).slice(0, 2);
-        return `<div class="tcfs-token">${escapeHtml(token)}</div>`;
+        if (!settings.showImages || !itemId) return '';
+        return `<img class="tcfs-item-icon" src="${escapeAttr(getImageUrl(itemId))}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
     }
 
     function matchFilter(record, searchLow) {
@@ -1558,10 +2153,9 @@
 
     function getSortedRecords() {
         const searchLow = cleanText(settings.search).toLowerCase();
-        const records = Object.values(historyMap).filter((r) => {
-            if (settings.tab === 'active') return r.status === 'active';
-            return r.status === 'gone' || r.status === 'picked';
-        }).filter((r) => matchFilter(r, searchLow));
+        const records = Object.values(historyMap)
+            .filter((r) => settings.tab === 'history' ? r.status !== 'active' : r.status === 'active')
+            .filter((r) => matchFilter(r, searchLow));
 
         const mode = settings.sort;
         records.sort((a, b) => {
@@ -1594,11 +2188,12 @@
             }
         });
 
-        const countStr = `${records.length} ${settings.tab === 'active' ? 'active lookups' : 'logged tracks'}`;
+        const isHistory = settings.tab === 'history';
+        const countStr = isHistory
+            ? `${records.length} past ${records.length === 1 ? 'item' : 'items'}`
+            : `${records.length} active ${records.length === 1 ? 'find' : 'finds'}`;
         const valStr = hasVal ? ` &middot; Total Value: <span class="tcfs-pill">${formatMoney(totalVal)}</span>` : '';
-        const clearBtn = settings.tab === 'history' && records.length > 0 ? `<button class="tcfs-smallbtn" type="button" data-action="clear-history" style="margin-left:auto; height:24px; padding:0 6px;">Clear Archive</button>` : '';
-
-        summaryEl.innerHTML = `<div>${countStr}${valStr}</div>${clearBtn}`;
+        summaryEl.innerHTML = `<div>${countStr}${valStr}</div>`;
     }
 
     function renderDetailBlock() {
@@ -1623,12 +2218,11 @@
             : `<button type="button" data-action="restore" title="Restore back into active tracking metrics">Restore Item</button><div></div>`;
 
         detailEl.innerHTML = `
-            ${buildRowToken(record.itemId, record.title)}
             <div>
                 <div class="tcfs-detail-name" title="${escapeAttr(record.title)}">${escapeHtml(record.title)}</div>
                 <div class="tcfs-detail-meta">
-                    Loc: [${record.x}, ${record.y}] &middot; ${escapeHtml(cat)}
-                    <br>${val !== null ? `<span class="tcfs-pill tcfs-teal">${formatMoney(val)}</span>` : '<span class="tcfs-pill">Value unknown</span>'} &middot; ${statusLine}
+                    ${escapeHtml(cat)} &middot; ${statusLine}
+                    <br>${val !== null ? `<span class="tcfs-pill tcfs-teal">${formatMoney(val)}</span>` : '<span class="tcfs-pill">Value unknown</span>'}
                 </div>
             </div>
             <div class="tcfs-detail-actions">
@@ -1642,8 +2236,10 @@
     function render() {
         if (!panel || !panel.classList.contains('tcfs-open')) return;
 
-        panel.querySelectorAll('[data-tab]').forEach((btn) => {
-            btn.classList.toggle('tcfs-active', btn.dataset.tab === settings.tab);
+        panel.querySelectorAll('[data-tab]').forEach((button) => {
+            const active = button.dataset.tab === settings.tab;
+            button.classList.toggle('tcfs-active', active);
+            button.setAttribute('aria-selected', String(active));
         });
 
         const searchInput = panel.querySelector('[data-role="search"]');
@@ -1656,7 +2252,10 @@
         renderDetailBlock();
 
         if (records.length === 0) {
-            listEl.innerHTML = `<div class="tcfs-empty">${settings.search ? 'No search results found matching filters.' : 'No tracked item context matching this category.'}</div>`;
+            const emptyText = settings.search
+                ? 'No search results found matching filters.'
+                : (settings.tab === 'history' ? 'No past items logged yet.' : 'No active finds right now.');
+            listEl.innerHTML = `<div class="tcfs-empty">${emptyText}</div>`;
             return;
         }
 
@@ -1664,13 +2263,19 @@
             const isSel = r.key === selectedKey;
             const val = getRecordValue(r);
             const cat = getRecordCategory(r);
+            const token = buildRowToken(r.itemId, r.title);
 
-            let subText = `[${r.x}, ${r.y}] &middot; ${escapeHtml(cat)}`;
-            if (val !== null) subText += ` &middot; <span style="color:#ffe1a0; font-weight:700;">${formatMoney(val)}</span>`;
+            let subText = escapeHtml(cat);
+            if (val !== null) subText += ` &middot; <span class="tcfs-value">${formatMoney(val)}</span>`;
+            if (settings.tab === 'history') {
+                const statusText = r.status === 'picked' ? 'Collected' : 'Vanished';
+                const statusTime = r.status === 'picked' ? r.pickedAt : r.goneAt;
+                subText += ` &middot; ${statusText}: ${formatShortTime(statusTime)}`;
+            }
 
             return `
-                <div class="tcfs-row ${isSel ? 'tcfs-selected' : ''}" data-key="${escapeAttr(r.key)}" data-action="select" style="cursor:pointer;">
-                    ${buildRowToken(r.itemId, r.title)}
+                <div class="tcfs-row ${token ? 'tcfs-has-icon' : ''} ${isSel ? 'tcfs-selected' : ''}" data-key="${escapeAttr(r.key)}" data-action="select" style="cursor:pointer;">
+                    ${token}
                     <div class="tcfs-row-main">
                         <div class="tcfs-row-name" title="${escapeAttr(r.title)}">${escapeHtml(r.title)}</div>
                         <div class="tcfs-row-meta">${subText}</div>
@@ -1703,6 +2308,25 @@
             badge.innerText = '';
             badge.style.display = 'none';
         }
+
+        const status = panel && panel.querySelector('.tcfs-head-status');
+        if (status) {
+            status.textContent = count > 0
+                ? `${count} active ${count === 1 ? 'find' : 'finds'} · ready to collect`
+                : 'Scanner ready · no active finds';
+        }
+    }
+
+    function pulseNewFind(count) {
+        if (!fab || !count) return;
+        clearTimeout(newFindPulseTimer);
+        fab.classList.remove('tcfs-new-find-pulse');
+        requestAnimationFrame(() => {
+            fab.classList.add('tcfs-new-find-pulse');
+            newFindPulseTimer = setTimeout(() => {
+                if (fab) fab.classList.remove('tcfs-new-find-pulse');
+            }, 2600);
+        });
     }
 
     function clearMarkers() {
@@ -1732,10 +2356,7 @@
             const isSel = item.key === selectedKey;
             const labelHtml = escapeHtml(item.title);
 
-            let pinInner = escapeHtml(item.title.slice(0, 2));
-            if (settings.showImages && item.itemId) {
-                pinInner = `<img src="${getImageUrl(item.itemId)}" alt="Pin" loading="lazy">`;
-            }
+            const pinInner = escapeHtml(item.title.slice(0, 2));
 
             const html = `
                 <div class="tcfs-map-pin" data-key="${escapeAttr(item.key)}">
@@ -1805,8 +2426,9 @@
 
         activeItems = freshItems;
 
-        updateHistory(freshItems, true);
+        const newCount = updateHistory(freshItems, true);
         updateFabCounter();
+        pulseNewFind(newCount);
         if (getTorn().map.lmap !== markerMap || markerSignature() !== lastRenderedItemSignature) renderMapPins();
         render();
 
