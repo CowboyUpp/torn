@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.0.1
+// @version      1.0.2
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
 // @author       cowboyup
 // @license      MIT
@@ -19,7 +19,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -51,9 +51,11 @@
     availableBusts: null,
     lastFetchMs: 0,
     lastLocalBustMs: 0,
+    lastLocalBustSignature: '',
     lastBustActionClickMs: 0,
     lastBustActionHref: '',
     loadBustDataPromise: null,
+    navStatsPending: false,
     hardnessRendering: false,
     hardnessRenderTimer: null,
     refreshTimerId: null,
@@ -840,6 +842,8 @@
   }
 
   async function renderNavStats() {
+    if (state.navStatsPending) return;
+    state.navStatsPending = true;
     try {
       const jailNav = await waitFor('#nav-jail', 5000);
       const anchor = jailNav.querySelector('a') || jailNav;
@@ -861,7 +865,10 @@
         }
         pill.textContent = formatAvailable();
       }
-    } catch (err) {}
+    } catch (err) {
+    } finally {
+      state.navStatsPending = false;
+    }
   }
 
   function renderColorClass() {
@@ -1098,21 +1105,39 @@
     }, 150);
   }
 
+  function recordLocalBustSuccess(sourceText) {
+    if (window.location.pathname !== '/jailview.php') return false;
+    const match = String(sourceText || '').match(/You busted\s+(.+?)\s+out of jail/i);
+    if (!match) return false;
+    const signature = `${match[1].trim().toLowerCase()}|${state.lastBustActionHref || ''}`;
+    if (signature === state.lastLocalBustSignature) return false;
+    if (Date.now() - state.lastLocalBustMs < 750 && state.lastLocalBustSignature) return false;
+    state.lastLocalBustMs = Date.now();
+    state.lastLocalBustSignature = signature;
+    state.penaltyScore += state.settings.freshBustScore;
+    state.availableBusts = state.penaltyThreshold > 0
+      ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
+      : null;
+    saveStats();
+    renderAll();
+    return true;
+  }
+
+  function scanExistingBustSuccesses() {
+    if (window.location.pathname !== '/jailview.php') return;
+    const text = document.querySelector('#mainContainer')?.textContent || '';
+    recordLocalBustSuccess(text);
+  }
+
   function startObservers() {
     if (!state.observerStarted) {
       state.observerStarted = true;
       const target = document.querySelector('#mainContainer') || document.body;
       new MutationObserver((mutations) => {
-        const success = mutations.some((mutation) => /You busted /i.test(mutation.target?.textContent || ''));
-        if (!success) return;
-        if (Date.now() - state.lastLocalBustMs < 5000) return;
-        state.lastLocalBustMs = Date.now();
-        state.penaltyScore += state.settings.freshBustScore;
-        state.availableBusts = state.penaltyThreshold > 0
-          ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
-          : null;
-        saveStats();
-        renderAll();
+        if (window.location.pathname !== '/jailview.php') return;
+        for (const mutation of mutations) {
+          if (recordLocalBustSuccess(mutation.target?.textContent || '')) return;
+        }
       }).observe(target, { childList: true, subtree: true });
     }
 
@@ -1146,6 +1171,7 @@
     renderApiKeyGenerator();
     await loadBustData(false);
     renderAll();
+    scanExistingBustSuccesses();
     if (!state.apiKey && window.location.hash.includes('bustrPlus=openSettings')) renderPanel(true);
     startBustConfirmSkipper();
     startObservers();
