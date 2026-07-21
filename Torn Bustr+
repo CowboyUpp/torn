@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.0.2
+// @version      1.0.5
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
 // @author       cowboyup
 // @license      MIT
@@ -19,7 +19,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.5';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -163,7 +163,7 @@
         --bustr-danger-border: #a94b3f;
         --bustr-danger-fg: #fff;
         --bustr-muted: #aaa;
-        position: fixed; z-index: 99999; right: 14px; top: 62px; width: min(420px, calc(100vw - 28px));
+        position: fixed; z-index: 99999; right: 14px; top: 62px; width: min(470px, calc(100vw - 28px));
         max-height: min(680px, calc(100vh - 92px));
         overflow: hidden;
         background: var(--bustr-bg); color: var(--bustr-fg); border: 1px solid var(--bustr-border); border-radius: 8px;
@@ -194,7 +194,8 @@
       #bustr-plus-panel input { box-sizing: border-box; width: 100%; padding: 3px 7px; }
       #bustr-plus-panel .body { padding: 9px 11px 10px; display: grid; gap: 7px; max-height: calc(min(680px, calc(100vh - 92px)) - 47px); overflow-y: auto; }
       #bustr-plus-panel .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
-      #bustr-plus-panel .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+      #bustr-plus-panel .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 10px; row-gap: 8px; align-items: end; }
+      #bustr-plus-panel .grid label { display: grid; grid-template-rows: 30px auto; min-width: 0; }
       #bustr-plus-panel .toggles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
       #bustr-plus-panel .toggles label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
       #bustr-plus-panel .toggles span { margin: 0; line-height: 1.15; }
@@ -235,12 +236,13 @@
       }
       #bustr-plus-panel .actions { position: sticky; bottom: -10px; padding-top: 6px; background: var(--bustr-bg); }
       #bustr-plus-panel label span { display: block; color: var(--bustr-muted); margin-bottom: 1px; }
-      #bustr-plus-panel .label-line { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+      #bustr-plus-panel .label-line { display: flex; align-items: flex-end; align-content: flex-end; gap: 4px; min-width: 0; min-height: 25px; line-height: 1.15; flex-wrap: wrap; overflow: hidden; }
       #bustr-plus-panel .help-dot {
         display: inline-grid;
         place-items: center;
         width: 14px;
         height: 14px;
+        margin-bottom: 1px;
         color: #5489c9;
         font-size: 12px;
         line-height: 1;
@@ -438,8 +440,8 @@
           ${numberField('hardnessLimit', 'Hardness ceiling', s.hardnessLimit)}
           ${numberField('customPenaltyThreshold', 'Manual penalty cap', s.customPenaltyThreshold)}
           ${numberField('refreshSeconds', 'Refresh seconds', s.refreshSeconds)}
-          ${numberField('decayDivisorHours', 'Decay divisor hours', s.decayDivisorHours)}
-          ${numberField('decayWindowHours', 'Decay window hours', s.decayWindowHours)}
+          ${numberField('decayDivisorHours', 'Decay rate hrs', s.decayDivisorHours)}
+          ${numberField('decayWindowHours', 'Decay window hrs', s.decayWindowHours)}
           ${numberField('greenLimit', 'Green at busts', s.greenLimit)}
         </div>
         <div class="toggles">
