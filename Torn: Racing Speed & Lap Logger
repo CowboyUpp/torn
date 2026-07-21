@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn: Racing Speed & Lap Logger
+// @name         Torn: Racing Speed & Lap Logger (PDA Friendly)
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.28
-// @description  Split UI: Top Speed + Top Lap panels.
+// @version      2.7.29-pda
+// @description  Touch-friendly PDA edition: responsive race controls, speed records, and lap records.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
 // @run-at       document-start
@@ -14,14 +14,13 @@
 // @grant        unsafeWindow
 // @connect      api.torn.com
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/582091/Torn%3A%20Racing%20Speed%20%20Lap%20Logger.user.js
-// @updateURL https://update.greasyfork.org/scripts/582091/Torn%3A%20Racing%20Speed%20%20Lap%20Logger.meta.js
 // ==/UserScript==
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.28';
-const $ = (...args) => unsafeWindow.$(...args);
+const SCRIPT_VERSION = '2.7.29-pda';
+const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+const $ = (...args) => pageWindow.$(...args);
 
 // Detect Torn PDA / in-app WebViews where Blob-download anchors and
 // GM_setClipboard are unreliable or unavailable. Same heuristic used by
@@ -29,6 +28,19 @@ const $ = (...args) => unsafeWindow.$(...args);
 function isPdaWebView() {
     return /TornPDA|wv;|; wv|FBAN|FBAV|Line\/|Instagram/i.test(navigator.userAgent);
 }
+
+// Use the compact interface in Torn PDA, other touch WebViews, and narrow
+// browser windows. Keeping this as a class also lets the layout react when a
+// phone rotates without rebuilding the logger.
+function applyPdaModeClass() {
+    if (!document.documentElement) return;
+    const compactScreen = typeof window.matchMedia === 'function'
+        && window.matchMedia('(max-width: 700px), (pointer: coarse)').matches;
+    document.documentElement.classList.toggle('rslogPdaMode', isPdaWebView() || compactScreen);
+}
+
+applyPdaModeClass();
+window.addEventListener('resize', applyPdaModeClass, { passive: true });
 
 // ─── Torn AJAX hook ────────────────────────────────────────────────────────────
 function isRacingResponse(data) {
@@ -93,7 +105,7 @@ function captureNativeRacingText(responseText) {
 
 function installNativeRaceCapture() {
     try {
-        const XHR = unsafeWindow.XMLHttpRequest;
+        const XHR = pageWindow.XMLHttpRequest;
         if (!XHR?.prototype?.send || XHR.prototype.__rslogCaptureInstalled) return;
         const nativeSend = XHR.prototype.send;
         Object.defineProperty(XHR.prototype, '__rslogCaptureInstalled', { value: true });
@@ -670,6 +682,111 @@ GM_addStyle(`
         background: #1a1a1a; border: 1px solid #fff200; border-radius: 4px; color: #ccc; font-size: 10px;
         line-height: 1.4; box-shadow: 0 4px 12px rgba(0,0,0,.5); font-family: "Courier New", Courier, monospace;
     }
+
+    /* ── PDA / narrow touch layout ─────────────────────────────────────────── */
+    .rslogPdaMode #rslogWrapper {
+        display: block; width: 100%; margin: 6px 0; padding: 8px;
+        box-sizing: border-box; font-size: 12px; overflow: hidden;
+    }
+    .rslogPdaMode #rslogSpeedPanel,
+    .rslogPdaMode #rslogLapPanel { width: 100%; min-width: 0; }
+    .rslogPdaMode #rslogLapPanel { margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; }
+    .rslogPdaMode #rslogSpeedRow {
+        display: grid; grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center; gap: 7px 10px;
+    }
+    .rslogPdaMode #rslogSpeed { min-width: 0; font-size: 25px; line-height: 1.15; }
+    .rslogPdaMode #rslogSessionTop,
+    .rslogPdaMode #rslogPbCompare { font-size: 11px; }
+    .rslogPdaMode #rslogNewRecord { grid-column: 1 / -1; font-size: 24px; text-align: center; }
+    .rslogPdaMode #rslogSpeedToggle { margin-left: 0; }
+    .rslogPdaMode .rslogToggle,
+    .rslogPdaMode #rslogLiveModeBtn,
+    .rslogPdaMode #rslogLobbyBtn,
+    .rslogPdaMode .rslogCsvBtn,
+    .rslogPdaMode .rslogClearBtn,
+    .rslogPdaMode #rslogRaceToolbar button,
+    .rslogPdaMode #rslogCsvModal button,
+    .rslogPdaMode #rslogRsModal button,
+    .rslogPdaMode #rslogWarpModal button {
+        min-height: 38px; box-sizing: border-box; padding: 8px 10px;
+        font-size: 11px; line-height: 18px; touch-action: manipulation;
+    }
+    .rslogPdaMode .rslogToggle {
+        display: inline-flex; align-items: center; justify-content: center;
+        border: 1px solid #555; border-radius: 5px; background: #191919;
+        color: #ddd; text-decoration: none;
+    }
+    .rslogPdaMode .rslogInfoIcon {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 38px; height: 38px; margin: 0; font-size: 16px; touch-action: manipulation;
+    }
+    .rslogPdaMode .rslogPanel { margin-top: 8px; padding-top: 8px; -webkit-overflow-scrolling: touch; }
+    .rslogPdaMode .rslogPanel table { min-width: 430px; font-size: 11px; }
+    .rslogPdaMode .rslogPanel th,
+    .rslogPdaMode .rslogPanel td { padding: 7px 6px; }
+    .rslogPdaMode .rslogRowDelete { width: 38px; height: 38px; font-size: 20px; line-height: 36px; }
+    .rslogPdaMode .rslogActionCell { width: 42px; }
+    .rslogPdaMode .rslogCsvBtn,
+    .rslogPdaMode .rslogClearBtn { margin: 8px 4px 0 0; }
+
+    .rslogPdaMode #rslogRaceToolbar {
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px; padding: 7px; font-size: 11px;
+    }
+    .rslogPdaMode #rslogToolbarStatus { justify-self: start; min-height: 28px; }
+    .rslogPdaMode #rslogToolbarLiveWrap,
+    .rslogPdaMode #rslogToolbarTopWrap,
+    .rslogPdaMode #rslogToolbarSkillWrap { white-space: normal; line-height: 1.35; }
+    .rslogPdaMode #rslogParticipantRsBtn { width: 100%; }
+    .rslogPdaMode #rslogRaceToolbar .rslogToolbarActions {
+        grid-column: 1 / -1; display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
+    }
+    .rslogPdaMode #rslogRaceToolbar .rslogToolbarActions button { width: 100%; white-space: normal; }
+    .rslogPdaMode #rslogWarpBtn { display: none; }
+
+    .rslogPdaMode #rslogLobbyBtn { width: calc(100% - 16px); margin: 7px 8px 3px; }
+    .rslogPdaMode #rslogLobbyVersion { display: block; margin: 0 10px 5px; text-align: right; }
+    .rslogPdaMode #rslogLobbyPanel { margin: 3px 0 7px; padding: 8px; overflow: hidden; font-size: 12px; }
+    .rslogPdaMode #rslogLobbyPanel > div:first-child { display: block !important; }
+    .rslogPdaMode #rslogLobbyPanel > div:first-child > div {
+        min-width: 0 !important; padding: 0 0 10px !important;
+        border-right: 0 !important; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    }
+    .rslogPdaMode #rslogLobbyPanel > div:first-child > div + div {
+        margin-top: 8px; padding-top: 8px !important; border-top: 1px solid #333;
+    }
+    .rslogPdaMode #rslogLobbyPanel table { min-width: 430px; font-size: 11px; }
+    .rslogPdaMode #rslogLobbyPanel th,
+    .rslogPdaMode #rslogLobbyPanel td { padding: 7px 6px; }
+    .rslogPdaMode #rslogLobbyFooter { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .rslogPdaMode #rslogLobbyFooter > * { width: 100%; margin: 0; text-align: center; }
+    .rslogPdaMode #rslogLobbyClearBtn { grid-column: 1 / -1; }
+
+    .rslogPdaMode #rslogCsvModal .rslogCsvPanel,
+    .rslogPdaMode #rslogRsModal .rslogRsPanel,
+    .rslogPdaMode #rslogWarpModal .rslogWarpPanel {
+        width: auto; max-width: none; left: max(6px, env(safe-area-inset-left));
+        right: max(6px, env(safe-area-inset-right)); box-sizing: border-box;
+    }
+    .rslogPdaMode #rslogCsvModal .rslogCsvPanel {
+        top: max(6px, env(safe-area-inset-top)); bottom: max(6px, env(safe-area-inset-bottom));
+    }
+    .rslogPdaMode #rslogCsvModal .rslogCsvHeader { display: block; padding: 10px; }
+    .rslogPdaMode #rslogCsvModal .rslogCsvActions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 8px; }
+    .rslogPdaMode #rslogCsvModal .rslogCsvActions button { margin: 0; padding: 7px 4px; }
+    .rslogPdaMode #rslogCsvModal .rslogCsvBody { margin: 8px; padding: 8px; font-size: 12px; }
+    .rslogPdaMode #rslogRsModal .rslogRsPanel,
+    .rslogPdaMode #rslogWarpModal .rslogWarpPanel { max-height: calc(100vh - 12px); overflow-y: auto; }
+    .rslogPdaMode #rslogRsModal .rslogRsKeyRow { align-items: stretch; }
+    .rslogPdaMode #rslogRsApiKeyInput { min-height: 42px; font-size: 16px; }
+    .rslogPdaMode #rslogRsKeyReveal { width: 60px; }
+    .rslogPdaMode .rslogInfoPopover {
+        max-width: calc(100vw - 32px); box-sizing: border-box;
+        padding: 12px; font-size: 12px; line-height: 1.5;
+    }
+    .rslogPdaMode .rslogFinalResult { display: block; margin: 2px 0 0; white-space: normal; font-size: 10px; }
 `);
 
 // ─── UI Helpers ────────────────────────────────────────────────────────────────
@@ -1708,6 +1825,9 @@ function downloadLapCsv() {
 
 // ─── Firework ──────────────────────────────────────────────────────────────────
 function launchFirework() {
+    // Canvas fireworks are expensive in mobile WebViews and can cover Torn's
+    // race controls, so the PDA edition keeps the record banner only.
+    if (document.documentElement.classList.contains('rslogPdaMode')) return;
     const el = document.getElementById('rslogNewRecord');
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -2305,7 +2425,8 @@ function init() {
 }
 
 function bootstrapWhenReady() {
-    if (typeof unsafeWindow.$ !== 'function' || !document.body) {
+    applyPdaModeClass();
+    if (typeof pageWindow.$ !== 'function' || !document.body) {
         setTimeout(bootstrapWhenReady, 50);
         return;
     }
