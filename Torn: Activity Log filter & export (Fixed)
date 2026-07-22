@@ -1,172 +1,1041 @@
 // ==UserScript==
-// @name         Torn: Activity Log filter, export & reverse
-// @namespace    lugburz.activity_log_filter_export
-// @version      0.6.0
-// @description  Export only visually filtered items and reverse the layout view on the Torn Log Page
-// @author       Lugburz & Community
-// @match        https://www.torn.com/*
+// @name         Torn: Activity Log Filter & CSV
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      1.1.3
+// @description  Desktop search, date filters, reverse view, and CSV export for currently loaded Torn activity logs
+// @author       cowboyup [1496324]
+// @license      MIT
+// @match        https://www.torn.com/page.php?sid=log*
 // @run-at       document-start
-// @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
 // ==/UserScript==
 
-var exportAll = false;
-var logpageLogs = [];
+(() => {
+    'use strict';
 
-function addInterceptor() {
-    if (unsafeWindow.__logInterceptorAdded) return;
-    unsafeWindow.__logInterceptorAdded = true;
+    if (new URL(location.href).searchParams.get('sid') !== 'log') return;
 
-    const originalFetch = unsafeWindow.fetch;
-    unsafeWindow.fetch = async function(...args) {
-        const response = await originalFetch.apply(this, args);
-        const url = args[0] ? (typeof args[0] === 'string' ? args[0] : args[0].url) : '';
+    const ROOT_SELECTOR = '#activity-log-root';
+    const UI_ID = 'cowboyup-activity-log-ui';
+    const SEARCH_ID = 'cowboyup-log-search';
+    const STYLE_ID = 'cowboyup-activity-log-styles';
+    const STORAGE_KEY = 'cowboyup.activityLogFilter.lite.v1';
+    const DESKTOP_QUERY = '(min-width: 1100px)';
+    const SCRIPT_VERSION = '1.1.3';
 
-        if (url && url.indexOf('page.php?sid=activityLogUserData') > -1) {
-            try {
-                const text = await response.clone().text();
-                const json = JSON.parse(text);
-                if (json && json.log) {
-                    for (const l of json.log) {
-                        if (!logpageLogs.some(existing => existing.ID === l.ID)) {
-                            logpageLogs.push(l);
-                        }
-                    }
-                    setTimeout(addScriptButtons, 300);
-                }
-            } catch (e) { console.error(e); }
-        }
-        return response;
+    const state = {
+        query: '',
+        from: '',
+        to: '',
+        dateLabel: 'All time',
+        categories: new Set(),
+        sort: 'newest',
+        theme: ''
     };
-}
 
-function downloadCsv(csv) {
-    const myblob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
-    const myurl = window.URL.createObjectURL(myblob);
-    const ancorTag = document.createElement('a');
-    ancorTag.href = myurl;
-    ancorTag.download = 'filtered_activity_log.csv';
-    document.body.appendChild(ancorTag);
-    ancorTag.click();
-    document.body.removeChild(ancorTag);
-}
+    let renderScheduled = false;
+    let controlStyleCache = null;
+    let pageObserver = null;
+    let interactionsBound = false;
+    const desktopMedia = matchMedia(DESKTOP_QUERY);
 
-function scrapeVisiblePageLogs() {
-    if (typeof $ === 'undefined') return '';
-    let csv = 'time,category,text\n';
+    function isLogPage() {
+        return new URL(location.href).searchParams.get('sid') === 'log';
+    }
 
-    const logRows = $('#activity-log-root').find('tr, [class*=logRow___], [class*=row___]');
+    function localDateValue(date) {
+        return [
+            date.getUTCFullYear(),
+            String(date.getUTCMonth() + 1).padStart(2, '0'),
+            String(date.getUTCDate()).padStart(2, '0')
+        ].join('-');
+    }
 
-    logRows.each((index, el) => {
-        if ($(el).is(':hidden') || $(el).attr('class')?.includes('title')) return;
+    function parseDateValue(value, endOfDay = false) {
+        if (!value) return null;
+        const parts = value.split('-').map(Number);
+        if (parts.length !== 3 || parts.some(Number.isNaN)) return null;
+        return new Date(Date.UTC(
+            parts[0], parts[1] - 1, parts[2],
+            endOfDay ? 23 : 0,
+            endOfDay ? 59 : 0,
+            endOfDay ? 59 : 0,
+            endOfDay ? 999 : 0
+        ));
+    }
 
-        const timeEl = $(el).find('td[class^=time], [class*=time___]');
-        const textEl = $(el).find('span.log-text, [class*=text___]');
+    function validUtcDate(year, month, day, hour = 0, minute = 0, second = 0) {
+        const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+        return date.getUTCFullYear() === year
+            && date.getUTCMonth() === month - 1
+            && date.getUTCDate() === day
+            && date.getUTCHours() === hour
+            && date.getUTCMinutes() === minute
+            && date.getUTCSeconds() === second
+            ? date
+            : null;
+    }
 
-        if (textEl.length > 0) {
-            let id = textEl.attr('id') ? textEl.attr('id').replace('text-', '') : null;
-            let category = "Filtered Log";
+    function parseDisplayedDate(text) {
+        if (!text) return null;
+        const normalized = String(text).trim();
+        const yearFirst = normalized.match(
+            /(\d{4})[/. -](\d{1,2})[/. -](\d{1,2})(?:\D+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/
+        );
+        if (yearFirst) {
+            return validUtcDate(
+                Number(yearFirst[1]), Number(yearFirst[2]), Number(yearFirst[3]),
+                Number(yearFirst[4] || 0), Number(yearFirst[5] || 0), Number(yearFirst[6] || 0)
+            );
+        }
+        const match = normalized.match(
+            /(\d{1,2})[/. -](\d{1,2})[/. -](\d{2,4})(?:\D+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/
+        );
+        if (match) {
+            let year = Number(match[3]);
+            if (year < 100) year += 2000;
+            return validUtcDate(
+                year, Number(match[2]), Number(match[1]),
+                Number(match[4] || 0), Number(match[5] || 0), Number(match[6] || 0)
+            );
+        }
+        const parsed = new Date(normalized);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
 
-            if (id) {
-                const networkMatch = logpageLogs.find(log => log.ID === id);
-                if (networkMatch) {
-                    category = networkMatch.category;
+    function parseSemanticDateValue(value) {
+        if (value == null) return null;
+        const normalized = String(value).trim();
+        if (!normalized) return null;
+        if (/^\d{10}(?:\d{3})?$/.test(normalized)) {
+            const milliseconds = Number(normalized) * (normalized.length === 10 ? 1000 : 1);
+            const date = new Date(milliseconds);
+            return Number.isNaN(date.getTime()) ? null : date;
+        }
+        if (!/^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$/.test(normalized)) return null;
+        const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
+        const isoValue = normalized.replace(' ', 'T') + (hasTimezone ? '' : 'Z');
+        const date = new Date(isoValue);
+        return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    function findSemanticDate(row, timeElement) {
+        const selector = '[datetime],[data-timestamp],[data-time],[data-date],[data-created],[data-unix]';
+        const candidates = new Set([
+            timeElement,
+            timeElement?.matches(selector) ? timeElement : null,
+            timeElement?.querySelector(selector),
+            row.querySelector(selector)
+        ]);
+        const attributes = ['datetime', 'data-timestamp', 'data-time', 'data-date', 'data-created', 'data-unix'];
+        for (const element of candidates) {
+            if (!element) continue;
+            for (const attribute of attributes) {
+                const date = parseSemanticDateValue(element.getAttribute(attribute));
+                if (date) return date;
+            }
+        }
+        return null;
+    }
+
+    function formatRangeLabel(fromValue, toValue) {
+        const from = parseDateValue(fromValue);
+        const to = parseDateValue(toValue);
+        const format = (date, options) => date.toLocaleDateString(undefined, {
+            ...options,
+            timeZone: 'UTC'
+        });
+
+        if (from && to) {
+            const sameYear = from.getUTCFullYear() === to.getUTCFullYear();
+            const sameMonth = sameYear && from.getUTCMonth() === to.getUTCMonth();
+            if (sameMonth) {
+                return from.getUTCDate() + '–' + format(to, {
+                    day: 'numeric', month: 'short', year: 'numeric'
+                });
+            }
+            if (sameYear) {
+                return format(from, { day: 'numeric', month: 'short' }) + ' – '
+                    + format(to, { day: 'numeric', month: 'short', year: 'numeric' });
+            }
+            return format(from, { day: 'numeric', month: 'short', year: 'numeric' }) + ' – '
+                + format(to, { day: 'numeric', month: 'short', year: 'numeric' });
+        }
+        if (from) return 'From ' + format(from, { day: 'numeric', month: 'short', year: 'numeric' });
+        if (to) return 'Until ' + format(to, { day: 'numeric', month: 'short', year: 'numeric' });
+        return 'All time';
+    }
+
+    function loadState() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+            state.query = typeof saved.query === 'string' ? saved.query : '';
+            state.from = typeof saved.from === 'string' ? saved.from : '';
+            state.to = typeof saved.to === 'string' ? saved.to : '';
+            state.dateLabel = typeof saved.dateLabel === 'string' ? saved.dateLabel : 'All time';
+            state.categories = new Set(Array.isArray(saved.categories) ? saved.categories : []);
+            state.sort = saved.sort === 'oldest' ? 'oldest' : 'newest';
+            state.theme = saved.theme === 'light' || saved.theme === 'dark' ? saved.theme : '';
+        } catch (error) {
+            console.warn('[Activity Log Filter] Could not restore saved filters.', error);
+        }
+    }
+
+    function saveState() {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                query: state.query,
+                from: state.from,
+                to: state.to,
+                dateLabel: state.dateLabel,
+                categories: [...state.categories],
+                sort: state.sort,
+                theme: state.theme
+            }));
+        } catch (error) {
+            console.warn('[Activity Log Filter] Could not save filters.', error);
+        }
+    }
+
+    function detectedTornTheme(startNode) {
+        const classHint = (document.documentElement.className + ' ' + document.body.className).toLowerCase();
+        if (classHint.includes('dark')) return 'dark';
+        if (classHint.includes('light')) return 'light';
+
+        let node = startNode;
+        while (node) {
+            const color = getComputedStyle(node).backgroundColor;
+            const match = color?.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/);
+            if (match && (match[4] == null || Number(match[4]) > 0.05)) {
+                const luminance = (Number(match[1]) * 0.2126 + Number(match[2]) * 0.7152 + Number(match[3]) * 0.0722) / 255;
+                return luminance > 0.55 ? 'light' : 'dark';
+            }
+            node = node.parentElement;
+        }
+        return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    function applyTheme(ui) {
+        ui.classList.toggle('alf-light', state.theme === 'light');
+        ui.classList.toggle('alf-dark', state.theme === 'dark');
+        const button = ui.querySelector('.alf-theme-button');
+        if (!button) return;
+        const dark = state.theme === 'dark';
+        button.textContent = dark ? '☀' : '☾';
+        button.title = dark ? 'Use light interface' : 'Use dark interface';
+        button.setAttribute('aria-label', button.title);
+    }
+
+    function findTornControlSample(root) {
+        const labels = new Set(['all categories', 'all logs', 'all time']);
+        return [...root.querySelectorAll('button,a,[role="button"],div')]
+            .filter((element) => {
+                if (element.closest('#' + UI_ID)) return false;
+                if (!labels.has(element.textContent.trim().toLowerCase())) return false;
+                const rect = element.getBoundingClientRect();
+                if (rect.width < 90 || rect.height < 30 || rect.height > 70) return false;
+                const style = getComputedStyle(element);
+                return style.backgroundImage !== 'none'
+                    || style.backgroundColor !== 'rgba(0, 0, 0, 0)'
+                    || parseFloat(style.borderTopWidth) > 0;
+            })
+            .sort((a, b) => {
+                const first = a.getBoundingClientRect();
+                const second = b.getBoundingClientRect();
+                return first.width * first.height - second.width * second.height;
+            })[0] || null;
+    }
+
+    function syncTornControlStyle(ui, root, force = false) {
+        if (force || !controlStyleCache || controlStyleCache.root !== root
+            || (controlStyleCache.sample && !controlStyleCache.sample.isConnected)) {
+            const sample = findTornControlSample(root);
+            if (!sample) {
+                controlStyleCache = { root, sample: null, values: null };
+                return;
+            }
+            const style = getComputedStyle(sample);
+            const rect = sample.getBoundingClientRect();
+            controlStyleCache = {
+                root,
+                sample,
+                values: {
+                    height: Math.round(rect.height) + 'px',
+                    fontSize: style.fontSize,
+                    fontFamily: style.fontFamily,
+                    fontWeight: style.fontWeight,
+                    borderRadius: style.borderRadius,
+                    pageTheme: detectedTornTheme(root),
+                    backgroundColor: style.backgroundColor,
+                    backgroundImage: style.backgroundImage,
+                    border: [style.borderTopWidth, style.borderTopStyle, style.borderTopColor].join(' '),
+                    boxShadow: style.boxShadow,
+                    color: style.color
                 }
-            }
-
-            const timeText = timeEl.text().trim() || "N/A";
-            const logText = textEl.text().trim().replace(/\n/g, ' ').replace(/"/g, '""');
-
-            csv += [`"${timeText}"`, category, `"${logText}"`].join(',') + '\n';
+            };
         }
-    });
-    return csv;
-}
+        const values = controlStyleCache?.values;
+        if (!values) return;
 
-function exportActivityLog() {
-    if (!exportAll) {
-        const scrapedCsv = scrapeVisiblePageLogs();
-        const rowCount = scrapedCsv.split('\n').length - 2;
+        ui.style.setProperty('--alf-native-height', values.height);
+        ui.style.setProperty('--alf-native-font-size', values.fontSize);
+        ui.style.setProperty('--alf-native-font-family', values.fontFamily);
+        ui.style.setProperty('--alf-native-font-weight', values.fontWeight);
+        ui.style.setProperty('--alf-native-radius', values.borderRadius);
 
-        if (rowCount > 0) {
-            downloadCsv(scrapedCsv);
+        const colorProperties = [
+            '--alf-native-bg-color', '--alf-native-bg-image', '--alf-native-control-border',
+            '--alf-native-control-shadow', '--alf-native-control-color'
+        ];
+        if (state.theme !== values.pageTheme) {
+            colorProperties.forEach((property) => ui.style.removeProperty(property));
+            return;
+        }
+
+        ui.style.setProperty('--alf-native-bg-color', values.backgroundColor);
+        ui.style.setProperty('--alf-native-bg-image', values.backgroundImage);
+        ui.style.setProperty('--alf-native-control-border', values.border);
+        ui.style.setProperty('--alf-native-control-shadow', values.boxShadow);
+        ui.style.setProperty('--alf-native-control-color', values.color);
+    }
+
+    function installStyles() {
+        if (document.getElementById(STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.textContent = `
+            #${UI_ID}{
+                --alf-bg:#161819;--alf-raised:#202224;--alf-panel:#1b1d1f;
+                --alf-border:#34383b;--alf-soft:rgba(255,255,255,.075);
+                --alf-text:#d6d6d6;--alf-muted:#969b9f;--alf-red:#b9433e;
+                --alf-input:#111315;--alf-control:#191b1d;--alf-control-hover:#272a2c;
+                --alf-placeholder:#858a8e;--alf-label:#b8bbbd;--alf-note:#7f8589;
+                --alf-chip-text:#f0f0f0;--alf-chip-bg:rgba(185,63,59,.22);--alf-chip-border:rgba(201,69,64,.65);
+                --alf-field:#141618;--alf-shadow:0 2px 7px rgba(0,0,0,.28);
+                --alf-native-height:40px;--alf-native-font-size:13px;--alf-native-font-family:Arial,sans-serif;
+                --alf-native-font-weight:400;--alf-native-radius:5px;--alf-native-bg-color:var(--alf-control);
+                --alf-native-bg-image:linear-gradient(180deg,var(--alf-control-hover),var(--alf-control));
+                --alf-native-control-border:1px solid var(--alf-border);--alf-native-control-shadow:inset 0 1px rgba(255,255,255,.04);
+                --alf-native-control-color:var(--alf-text);
+                position:relative;box-sizing:border-box;margin:14px 0 16px;padding:15px;
+                color:var(--alf-text);background:linear-gradient(180deg,var(--alf-raised),var(--alf-bg));
+                border:1px solid var(--alf-border);border-radius:6px;
+                box-shadow:var(--alf-shadow);font:13px Arial,sans-serif;z-index:20
+            }
+            #${UI_ID}.alf-light{
+                --alf-bg:#e7e7e7;--alf-raised:#fafafa;--alf-panel:#f3f3f3;
+                --alf-border:#c6c6c6;--alf-soft:rgba(0,0,0,.10);
+                --alf-text:#4d4d4d;--alf-muted:#777;--alf-red:#b63e3a;
+                --alf-input:#f7f7f7;--alf-control:#ededed;--alf-control-hover:#fff;
+                --alf-placeholder:#888;--alf-label:#555;--alf-note:#777;
+                --alf-chip-text:#6b2825;--alf-chip-bg:#f1d9d8;--alf-chip-border:#c97773;
+                --alf-field:#fff;--alf-shadow:0 2px 6px rgba(0,0,0,.18)
+            }
+            #${UI_ID} *,#${UI_ID} *::before,#${UI_ID} *::after{box-sizing:border-box}
+            #${UI_ID} .alf-toolbar{width:100%;display:grid;grid-template-columns:minmax(220px,1fr) minmax(160px,240px) auto auto auto;gap:8px;align-items:center}
+            #${UI_ID} button,#${UI_ID} input{font-family:var(--alf-native-font-family);font-size:var(--alf-native-font-size);font-weight:var(--alf-native-font-weight)}
+            #${UI_ID} .alf-search-wrap{position:relative;min-width:0}
+            #${UI_ID} .alf-search-icon{position:absolute;left:12px;top:50%;translate:0 -50%;color:var(--alf-muted);font-size:17px;pointer-events:none}
+            #${SEARCH_ID}{width:100%;height:var(--alf-native-height);padding:0 38px;color:var(--alf-native-control-color);background-color:var(--alf-native-bg-color);background-image:var(--alf-native-bg-image);border:var(--alf-native-control-border);border-radius:var(--alf-native-radius);outline:0;box-shadow:var(--alf-native-control-shadow)}
+            #${SEARCH_ID}:focus{border-color:#b54843;box-shadow:0 0 0 2px rgba(185,63,59,.18)}
+            #${SEARCH_ID}::placeholder{color:var(--alf-placeholder)}
+            #${UI_ID} .alf-clear-search{position:absolute;right:8px;top:50%;translate:0 -50%;width:24px;height:24px;padding:0;border:0;color:var(--alf-muted);background:transparent;cursor:pointer;font-size:18px}
+            #${UI_ID} .alf-control{min-width:0;height:var(--alf-native-height);padding:0 12px;display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap;color:var(--alf-native-control-color);background-color:var(--alf-native-bg-color);background-image:var(--alf-native-bg-image);border:var(--alf-native-control-border);border-radius:var(--alf-native-radius);cursor:pointer;box-shadow:var(--alf-native-control-shadow)}
+            #${UI_ID} .alf-control:hover,#${UI_ID} .alf-control[aria-expanded="true"]{background:var(--alf-control-hover)}
+            #${UI_ID} .alf-date-button{width:100%;overflow:hidden}
+            #${UI_ID} .alf-date-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            #${UI_ID} .alf-count-badge{min-width:20px;height:20px;padding:0 6px;display:inline-grid;place-items:center;color:#fff;background:var(--alf-red);border-radius:10px;font-size:11px}
+            #${UI_ID} .alf-reverse-button{min-width:132px}
+            #${UI_ID} .alf-secondary{min-height:28px;margin-top:9px;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+            #${UI_ID} .alf-chips{min-width:0;display:flex;flex-wrap:wrap;gap:6px}
+            #${UI_ID} .alf-chip{max-width:320px;height:26px;padding:0 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--alf-chip-text);background:var(--alf-chip-bg);border:1px solid var(--alf-chip-border);border-radius:4px;cursor:pointer}
+            #${UI_ID} .alf-clear-all{border:0;color:var(--alf-muted);background:transparent;cursor:pointer;padding:5px 7px}
+            #${UI_ID} .alf-meta{margin-left:auto;color:var(--alf-muted);white-space:nowrap}
+            #${UI_ID} .alf-footer{margin-top:6px;display:flex;align-items:center;gap:8px;color:var(--alf-note);font-size:11px}
+            #${UI_ID} .alf-footer-left{display:flex;align-items:center;gap:6px;white-space:nowrap}
+            #${UI_ID} .alf-theme-button{width:25px;height:25px;padding:0;display:inline-grid;place-items:center;color:var(--alf-text);background:var(--alf-control);border:1px solid var(--alf-border);border-radius:4px;cursor:pointer;line-height:1}
+            #${UI_ID} .alf-theme-button:hover{background:var(--alf-control-hover)}
+            #${UI_ID} .alf-version{color:var(--alf-muted)}
+            #${UI_ID} .alf-scope{margin-left:auto;text-align:right}
+            #${UI_ID} .alf-popover{position:absolute;top:61px;right:15px;display:none;color:var(--alf-text);background:var(--alf-panel);border:1px solid var(--alf-border);border-radius:6px;box-shadow:0 12px 32px rgba(0,0,0,.38);z-index:100}
+            #${UI_ID} .alf-popover.alf-open{display:block}
+            #${UI_ID} .alf-date-popover{width:650px;right:226px}
+            #${UI_ID} .alf-date-layout{display:grid;grid-template-columns:180px 1fr;min-height:320px}
+            #${UI_ID} .alf-quick-ranges{padding:14px 10px;border-right:1px solid var(--alf-soft)}
+            #${UI_ID} .alf-eyebrow{padding:0 9px 9px;color:var(--alf-muted);font-size:11px;font-weight:bold;letter-spacing:.09em}
+            #${UI_ID} .alf-quick{width:100%;padding:8px 9px;text-align:left;color:var(--alf-text);background:transparent;border:0;border-radius:4px;cursor:pointer}
+            #${UI_ID} .alf-quick:hover{color:var(--alf-text);background:var(--alf-chip-bg)}
+            #${UI_ID} .alf-time-note{margin:12px 9px 0;color:var(--alf-note);font-size:11px}
+            #${UI_ID} .alf-date-main{display:flex;flex-direction:column;min-width:0}
+            #${UI_ID} .alf-tabs{height:46px;display:flex;border-bottom:1px solid var(--alf-soft)}
+            #${UI_ID} .alf-tab{flex:1;color:var(--alf-muted);background:transparent;border:0;border-bottom:2px solid transparent;cursor:pointer}
+            #${UI_ID} .alf-tab.alf-active{color:#ef625c;border-bottom-color:#ef5751}
+            #${UI_ID} .alf-date-panel{display:none;flex:1;padding:24px}
+            #${UI_ID} .alf-date-panel.alf-active{display:block}
+            #${UI_ID} .alf-field-row{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+            #${UI_ID} label{display:block;color:var(--alf-label)}
+            #${UI_ID} input[type="date"],#${UI_ID} input[type="month"],#${UI_ID} input[type="number"]{width:100%;height:40px;margin-top:7px;padding:0 11px;color:var(--alf-text);color-scheme:dark;background:var(--alf-field);border:1px solid var(--alf-border);border-radius:4px;outline:0}
+            #${UI_ID}.alf-light input[type="date"],#${UI_ID}.alf-light input[type="month"],#${UI_ID}.alf-light input[type="number"]{color-scheme:light}
+            #${UI_ID} .alf-large-picker{max-width:290px;margin:24px auto}
+            #${UI_ID} .alf-panel-help{margin:18px 0 0;color:var(--alf-note);line-height:1.5}
+            #${UI_ID} .alf-popover-footer{padding:12px 14px;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--alf-soft)}
+            #${UI_ID} .alf-btn{height:34px;padding:0 14px;color:var(--alf-text);background:var(--alf-control);border:1px solid var(--alf-border);border-radius:4px;cursor:pointer}
+            #${UI_ID} .alf-primary{color:#fff;background:#8f3431;border-color:#c14c47}
+            #${UI_ID} .alf-filter-popover{width:320px;right:130px;padding:15px}
+            #${UI_ID} .alf-filter-title{margin-bottom:12px;font-size:14px;font-weight:bold}
+            #${UI_ID} .alf-category-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:220px;overflow:auto}
+            #${UI_ID} .alf-check{padding:7px;display:flex;align-items:center;gap:8px;background:var(--alf-input);border:1px solid var(--alf-soft);border-radius:4px;cursor:pointer}
+            #${UI_ID} .alf-check input{accent-color:var(--alf-red)}
+            #${UI_ID} .alf-check:has(input:disabled){opacity:.55;cursor:not-allowed}
+            #${UI_ID} .alf-category-warning{margin-bottom:12px;padding:9px 10px;color:#d9a19e;background:rgba(185,67,62,.13);border:1px solid rgba(185,67,62,.4);border-radius:4px;font-size:11px;line-height:1.45}
+            #${UI_ID} [hidden]{display:none!important}
+            #${UI_ID} .alf-filter-help{margin-top:13px;padding-top:12px;color:var(--alf-note);border-top:1px solid var(--alf-soft);font-size:11px;line-height:1.55}
+            #${UI_ID} code{color:var(--alf-red)}
+            .alf-hidden{display:none!important}
+            .alf-native-search-hidden{display:none!important}
+        `;
+        document.head.append(style);
+    }
+
+    function markup() {
+        return `
+            <div class="alf-toolbar">
+                <div class="alf-search-wrap">
+                    <span class="alf-search-icon">⌕</span>
+                    <input id="${SEARCH_ID}" type="search" autocomplete="off" placeholder="Search currently loaded logs…">
+                    <button class="alf-clear-search" type="button" title="Clear search">×</button>
+                </div>
+                <button class="alf-control alf-date-button" type="button" aria-expanded="false">▣ <span class="alf-date-label">All time</span>⌄</button>
+                <button class="alf-control alf-filter-button" type="button" aria-expanded="false">▽ Filters <span class="alf-count-badge">0</span></button>
+                <button class="alf-control alf-reverse-button" type="button">↕ Reverse View</button>
+                <button class="alf-control alf-export-button" type="button">⇩ Export CSV</button>
+            </div>
+            <div class="alf-secondary">
+                <div class="alf-chips"></div>
+                <button class="alf-clear-all" type="button">Clear all</button>
+                <span class="alf-meta">0 of 0 currently loaded</span>
+            </div>
+            <div class="alf-footer">
+                <div class="alf-footer-left"><button class="alf-theme-button" type="button">☀</button><span class="alf-version">v${SCRIPT_VERSION}</span></div>
+                <div class="alf-scope">Searches currently loaded entries only. Load more with Torn’s own controls if needed.</div>
+            </div>
+            <div class="alf-popover alf-date-popover">
+                <div class="alf-date-layout">
+                    <div class="alf-quick-ranges">
+                        <div class="alf-eyebrow">QUICK RANGE</div>
+                        <button class="alf-quick" data-range="today" type="button">Today</button>
+                        <button class="alf-quick" data-range="yesterday" type="button">Yesterday</button>
+                        <button class="alf-quick" data-range="7days" type="button">Last 7 days</button>
+                        <button class="alf-quick" data-range="30days" type="button">Last 30 days</button>
+                        <button class="alf-quick" data-range="90days" type="button">Last 90 days</button>
+                        <button class="alf-quick" data-range="thismonth" type="button">This month</button>
+                        <button class="alf-quick" data-range="lastmonth" type="button">Last month</button>
+                        <button class="alf-quick" data-range="thisyear" type="button">This year</button>
+                        <button class="alf-quick" data-range="all" type="button">All time</button>
+                        <div class="alf-time-note">◷ Dates use Torn time</div>
+                    </div>
+                    <div class="alf-date-main">
+                        <div class="alf-tabs">
+                            <button class="alf-tab alf-active" data-tab="day" type="button">Day</button>
+                            <button class="alf-tab" data-tab="range" type="button">Range</button>
+                            <button class="alf-tab" data-tab="month" type="button">Month</button>
+                            <button class="alf-tab" data-tab="year" type="button">Year</button>
+                        </div>
+                        <div class="alf-date-panel alf-active" data-panel="day">
+                            <label class="alf-large-picker">Choose day<input class="alf-day" type="date"></label>
+                            <p class="alf-panel-help">Selecting a date applies that single day immediately.</p>
+                        </div>
+                        <div class="alf-date-panel" data-panel="range">
+                            <div class="alf-field-row"><label>From<input class="alf-from" type="date"></label><label>To<input class="alf-to" type="date"></label></div>
+                            <p class="alf-panel-help">Choose From and To separately, then click Apply.</p>
+                        </div>
+                        <div class="alf-date-panel" data-panel="month">
+                            <label class="alf-large-picker">Choose month<input class="alf-month" type="month"></label>
+                            <p class="alf-panel-help">Show loaded entries from the selected month.</p>
+                        </div>
+                        <div class="alf-date-panel" data-panel="year">
+                            <label class="alf-large-picker">Choose year<input class="alf-year" type="number" min="2004" max="2100" step="1"></label>
+                            <p class="alf-panel-help">Show loaded entries from the selected year.</p>
+                        </div>
+                        <div class="alf-popover-footer"><button class="alf-btn alf-date-clear" type="button">Clear</button><button class="alf-btn alf-primary alf-date-apply" type="button">Apply</button></div>
+                    </div>
+                </div>
+            </div>
+            <div class="alf-popover alf-filter-popover">
+                <div class="alf-filter-title">Loaded categories</div>
+                <div class="alf-category-warning" role="status" hidden>Torn's category labels could not be read reliably. Category filters are temporarily bypassed.</div>
+                <div class="alf-category-list"></div>
+                <div class="alf-filter-help">Search tips: <code>"exact phrase"</code>, <code>-excluded</code>, <code>category:combat</code>, <code>has:money</code>.</div>
+            </div>
+        `;
+    }
+
+    function findNativeSearch(root) {
+        return [...root.querySelectorAll('input[type="search"],input[type="text"]')].find((input) => {
+            if (input.id === SEARCH_ID || input.closest('#' + UI_ID)) return false;
+            const hint = (input.placeholder || input.getAttribute('aria-label') || '').toLowerCase();
+            return hint.includes('search') || hint.includes('filter');
+        });
+    }
+
+    function concealNativeSearch(root) {
+        findNativeSearch(root)?.classList.add('alf-native-search-hidden');
+    }
+
+    function findRows(root) {
+        const preferred = [...root.querySelectorAll('tr,[class*="logRow___"]')];
+        const candidates = preferred.length ? preferred : [...root.querySelectorAll('[class*="row___"]')];
+        return [...new Set(candidates)].filter((row) =>
+            !row.closest('#' + UI_ID) &&
+            !String(row.className || '').toLowerCase().includes('title') &&
+            row.querySelector('span.log-text,[id^="text-"],[class*="text___"]')
+        );
+    }
+
+    function rowInfo(row) {
+        const textElement = row.querySelector('span.log-text,[id^="text-"],[class*="text___"]');
+        const timeElement = row.querySelector('td[class^="time"],[class*="time___"],time');
+        const categoryElement = row.querySelector('[class*="category"],[class*="type___"],.category');
+        const text = textElement?.textContent?.trim() || '';
+        const timeText = timeElement?.textContent?.trim() || '';
+        const categoryText = categoryElement?.textContent?.trim() || '';
+        return {
+            row,
+            text,
+            timeText,
+            date: findSemanticDate(row, timeElement) || parseDisplayedDate(timeText),
+            category: categoryText || 'Other',
+            categoryDetected: Boolean(categoryText)
+        };
+    }
+
+    function categoriesAreReliable(infos) {
+        if (infos.length < 5) return true;
+        const detected = infos.filter((info) => info.categoryDetected).length;
+        return detected / infos.length >= 0.2;
+    }
+
+    function parseQuery(query) {
+        const result = { includes: [], excludes: [], categories: [], has: [] };
+        const matcher = /"([^"]+)"|(\S+)/g;
+        let match;
+        while ((match = matcher.exec(query))) {
+            let token = match[1] ?? match[2];
+            const quoted = match[1] != null;
+            if (!quoted && token.startsWith('-') && token.length > 1) {
+                result.excludes.push(token.slice(1).toLowerCase());
+                continue;
+            }
+            const operator = !quoted && token.match(/^([a-z]+):(.*)$/i);
+            if (operator?.[1].toLowerCase() === 'category') result.categories.push(operator[2].toLowerCase());
+            else if (operator?.[1].toLowerCase() === 'has') result.has.push(operator[2].toLowerCase());
+            else result.includes.push(token.toLowerCase());
+        }
+        return result;
+    }
+
+    function matchesHas(info, filter) {
+        const text = info.text.toLowerCase();
+        const category = info.category.toLowerCase();
+        if (filter === 'money') return /[$£€]\s*[\d,.]+/.test(info.text) || category.includes('money');
+        if (filter === 'item') return category.includes('item') || /\bused\b|\bbought\b|\bpurchased\b|\breceived\b/.test(text);
+        if (filter === 'link') return Boolean(info.row.querySelector('a[href]'));
+        return text.includes(filter) || category.includes(filter);
+    }
+
+    function rowMatches(info, query, categoriesReliable = true) {
+        const haystack = (info.text + ' ' + info.category + ' ' + info.timeText).toLowerCase();
+        if (query.includes.some((term) => !haystack.includes(term))) return false;
+        if (query.excludes.some((term) => haystack.includes(term))) return false;
+        if (categoriesReliable && query.categories.length && !query.categories.some((term) => info.category.toLowerCase().includes(term))) return false;
+        if (query.has.some((filter) => !matchesHas(info, filter))) return false;
+        if (categoriesReliable && state.categories.size && ![...state.categories].some((category) => category.toLowerCase() === info.category.toLowerCase())) return false;
+
+        const from = parseDateValue(state.from);
+        const to = parseDateValue(state.to, true);
+        if ((from || to) && !info.date) return false;
+        if (from && info.date < from) return false;
+        if (to && info.date > to) return false;
+        return true;
+    }
+
+    function sortRows(infos, direction = state.sort) {
+        const groups = new Map();
+        for (const info of infos) {
+            const parent = info.row.parentElement;
+            if (!parent) continue;
+            if (!groups.has(parent)) groups.set(parent, []);
+            groups.get(parent).push(info);
+        }
+        for (const [container, group] of groups) {
+            const dated = group.filter((info) => info.date);
+            if (dated.length < 2) continue;
+            const desired = dated.map((info, index) => ({ info, index })).sort((a, b) =>
+                (direction === 'oldest' ? a.info.date - b.info.date : b.info.date - a.info.date)
+                    || a.index - b.index
+            ).map((entry) => entry.info);
+            if (desired.every((info, index) => info.row === dated[index].row)) continue;
+            const children = [...container.children];
+            const indexes = dated.map((info) => children.indexOf(info.row));
+            if (indexes.some((index) => index < 0)) continue;
+            indexes.forEach((childIndex, index) => { children[childIndex] = desired[index].row; });
+            container.replaceChildren(...children);
+        }
+    }
+
+    function refreshCategories(ui, infos, categoriesReliable) {
+        ui.querySelector('.alf-category-warning').hidden = categoriesReliable;
+        const categories = [...new Set([
+            ...state.categories,
+            ...infos.filter((info) => info.categoryDetected).map((info) => info.category)
+        ])].sort((a, b) => a.localeCompare(b));
+        const list = ui.querySelector('.alf-category-list');
+        const signature = categories.join('\u0000') + '|' + String(categoriesReliable);
+        if (list.dataset.signature === signature) {
+            list.querySelectorAll('input').forEach((input) => {
+                input.checked = state.categories.has(input.value);
+                input.disabled = !categoriesReliable;
+            });
+            return;
+        }
+        list.dataset.signature = signature;
+        list.replaceChildren();
+        for (const category of categories) {
+            const label = document.createElement('label');
+            label.className = 'alf-check';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.value = category;
+            checkbox.checked = state.categories.has(category);
+            checkbox.disabled = !categoriesReliable;
+            const text = document.createElement('span');
+            text.textContent = category;
+            label.append(checkbox, text);
+            list.append(label);
+        }
+        if (!categories.length && categoriesReliable) {
+            const empty = document.createElement('span');
+            empty.textContent = 'Categories appear when logs load.';
+            empty.style.color = '#888';
+            list.append(empty);
+        }
+    }
+
+    function renderChips(ui) {
+        const chips = ui.querySelector('.alf-chips');
+        const entries = [];
+        if (state.query) entries.push({ type: 'query', value: '', label: 'Search: ' + state.query });
+        if (state.dateLabel !== 'All time') entries.push({ type: 'date', value: '', label: state.dateLabel });
+        state.categories.forEach((category) => entries.push({ type: 'category', value: category, label: category }));
+        const signature = JSON.stringify(entries);
+        if (chips.dataset.signature === signature) {
+            ui.querySelector('.alf-clear-all').hidden = entries.length === 0;
+            ui.querySelector('.alf-count-badge').textContent = String(state.categories.size);
+            return;
+        }
+        chips.dataset.signature = signature;
+        chips.replaceChildren();
+        for (const entry of entries) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'alf-chip';
+            button.dataset.chipType = entry.type;
+            button.dataset.chipValue = entry.value;
+            button.textContent = entry.label + ' ×';
+            chips.append(button);
+        }
+        ui.querySelector('.alf-clear-all').hidden = entries.length === 0;
+        ui.querySelector('.alf-count-badge').textContent = String(state.categories.size);
+    }
+
+    function applyFilters() {
+        renderScheduled = false;
+        if (!matchMedia(DESKTOP_QUERY).matches) return;
+        const root = document.querySelector(ROOT_SELECTOR);
+        const ui = document.getElementById(UI_ID);
+        if (!root || !ui) return;
+
+        applyTheme(ui);
+        syncTornControlStyle(ui, root);
+        concealNativeSearch(root);
+        const search = ui.querySelector('#' + SEARCH_ID);
+        if (search.value !== state.query) search.value = state.query;
+        ui.querySelector('.alf-date-label').textContent = state.dateLabel;
+        const datePopover = ui.querySelector('.alf-date-popover');
+        const editingRange = datePopover.classList.contains('alf-open')
+            && ui.querySelector('.alf-tab.alf-active')?.dataset.tab === 'range';
+        if (!editingRange) {
+            ui.querySelector('.alf-from').value = state.from;
+            ui.querySelector('.alf-to').value = state.to;
+        }
+        ui.querySelector('.alf-reverse-button').textContent = state.sort === 'oldest' ? '↕ Restore View' : '↕ Reverse View';
+        if (!ui.querySelector('.alf-month').value) ui.querySelector('.alf-month').value = localDateValue(new Date()).slice(0, 7);
+        if (!ui.querySelector('.alf-year').value) ui.querySelector('.alf-year').value = String(new Date().getUTCFullYear());
+        if (!ui.querySelector('.alf-day').value) {
+            ui.querySelector('.alf-day').value = state.from && state.from === state.to
+                ? state.from
+                : localDateValue(new Date());
+        }
+
+        const query = parseQuery(state.query);
+        const infos = findRows(root).map(rowInfo);
+        const categoriesReliable = categoriesAreReliable(infos);
+        let visible = 0;
+        for (const info of infos) {
+            const matches = rowMatches(info, query, categoriesReliable);
+            info.row.classList.toggle('alf-hidden', !matches);
+            if (matches) visible += 1;
+        }
+        sortRows(infos);
+        refreshCategories(ui, infos, categoriesReliable);
+        renderChips(ui);
+        ui.querySelector('.alf-meta').textContent = visible + ' of ' + infos.length + ' currently loaded';
+    }
+
+    function scheduleRender() {
+        if (renderScheduled) return;
+        renderScheduled = true;
+        requestAnimationFrame(applyFilters);
+    }
+
+    function commitFilters() {
+        saveState();
+        closePopovers();
+        scheduleRender();
+    }
+
+    function clearAll() {
+        state.query = '';
+        state.from = '';
+        state.to = '';
+        state.dateLabel = 'All time';
+        state.categories.clear();
+        commitFilters();
+    }
+
+    function closePopovers(except) {
+        const ui = document.getElementById(UI_ID);
+        if (!ui) return;
+        ui.querySelectorAll('.alf-popover').forEach((popover) => {
+            if (popover !== except) popover.classList.remove('alf-open');
+        });
+        ui.querySelectorAll('[aria-expanded="true"]').forEach((button) => {
+            const expected = button.classList.contains('alf-date-button') ? 'alf-date-popover' : 'alf-filter-popover';
+            if (!except?.classList.contains(expected)) button.setAttribute('aria-expanded', 'false');
+        });
+    }
+
+    function togglePopover(button, popover) {
+        const opening = !popover.classList.contains('alf-open');
+        closePopovers(opening ? popover : null);
+        popover.classList.toggle('alf-open', opening);
+        button.setAttribute('aria-expanded', String(opening));
+    }
+
+    function setQuickRange(range) {
+        const now = new Date();
+        let from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+        let to = new Date(from);
+        let label = 'All time';
+        if (range === 'all') {
+            state.from = '';
+            state.to = '';
+            state.dateLabel = label;
+            commitFilters();
+            return;
+        }
+        if (range === 'yesterday') {
+            from.setUTCDate(from.getUTCDate() - 1);
+            to = new Date(from);
+            label = 'Yesterday';
+        } else if (/^\d+days$/.test(range)) {
+            const days = Number(range.replace('days', ''));
+            from.setUTCDate(from.getUTCDate() - days + 1);
+            label = 'Last ' + days + ' days';
+        } else if (range === 'thismonth') {
+            from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+            to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
+            label = 'This month';
+        } else if (range === 'lastmonth') {
+            from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+            to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+            label = 'Last month';
+        } else if (range === 'thisyear') {
+            from = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+            to = new Date(Date.UTC(now.getUTCFullYear(), 11, 31));
+            label = 'This year';
         } else {
-            alert("No visible logs found. Please make sure you are on the Log page and logs are currently displayed.");
+            label = 'Today';
         }
-        return;
+        state.from = localDateValue(from);
+        state.to = localDateValue(to);
+        state.dateLabel = label;
+        commitFilters();
     }
 
-    if (logpageLogs.length === 0) {
-        alert("Please wait for the Log Page data to finish loading.");
-        return;
+    function applyDatePanel(ui) {
+        const mode = ui.querySelector('.alf-tab.alf-active')?.dataset.tab || 'day';
+        if (mode === 'day') {
+            const value = ui.querySelector('.alf-day').value;
+            if (!value) return;
+            const date = parseDateValue(value);
+            state.from = value;
+            state.to = value;
+            state.dateLabel = date.toLocaleDateString(undefined, {
+                day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC'
+            });
+        } else if (mode === 'month') {
+            const value = ui.querySelector('.alf-month').value;
+            if (!value) return;
+            const parts = value.split('-').map(Number);
+            const from = new Date(Date.UTC(parts[0], parts[1] - 1, 1));
+            const to = new Date(Date.UTC(parts[0], parts[1], 0));
+            state.from = localDateValue(from);
+            state.to = localDateValue(to);
+            state.dateLabel = from.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+        } else if (mode === 'year') {
+            const year = Number(ui.querySelector('.alf-year').value);
+            if (!year || year < 2004 || year > 2100) return;
+            state.from = year + '-01-01';
+            state.to = year + '-12-31';
+            state.dateLabel = String(year);
+        } else {
+            state.from = ui.querySelector('.alf-from').value;
+            state.to = ui.querySelector('.alf-to').value;
+            state.dateLabel = formatRangeLabel(state.from, state.to);
+        }
+        commitFilters();
     }
-    let csv = 'time,category,text\n';
-    for (const l of logpageLogs) {
-        const time = new Date(l.time * 1000);
-        csv += [`"${time.toUTCString()}"`, l.category, `"${l.text.replace(/\n/g, ' ').replace(/"/g, '""')}"`].join(',') + '\n';
-    }
-    downloadCsv(csv);
-}
 
-function reverseLogView() {
-    if (typeof $ === 'undefined') return;
-
-    // Find the container holding the rows (works for both old tables and modern list dividers)
-    const container = $('#activity-log-root').find('tbody, [class*=logWrapper___]');
-
-    if (container.length > 0) {
-        const rows = container.children('tr, [class*=logRow___], [class*=row___]').not('[class*=title]');
-        container.append(rows.get().reverse());
-    }
-}
-
-function addScriptButtons() {
-    if (typeof $ === 'undefined' || $('#exportLogsBtn').length > 0) return;
-
-    let buttonClass = 'button___37oQ0';
-    let wrapper = $('#activity-log-root').find('[class*=buttonsWrapper], [class*=filterWrapper], [class*=container___]');
-
-    if (!wrapper.length) {
-        wrapper = $('#activity-log-root').find('h4').first();
+    function csvCell(value) {
+        let text = value == null ? '' : String(value).replace(/\r?\n/g, ' ');
+        if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+        return '"' + text.replace(/"/g, '""') + '"';
     }
 
-    // Export Button
-    const exportBtn = `<button id="exportLogsBtn" class="${buttonClass}" style="line-height: 24px; padding: 0 12px; background-color: var(--default-blue-color, #337ab7); color: #fff; border: none; border-radius: 4px; margin-left: 10px; cursor: pointer;" title="Export filtered logs as CSV" type="button">Export Filtered CSV</button>`;
+    function exportCsv() {
+        const root = document.querySelector(ROOT_SELECTOR);
+        if (!root) return;
+        const rows = findRows(root)
+            .filter((row) => !row.classList.contains('alf-hidden') && getComputedStyle(row).display !== 'none')
+            .map(rowInfo);
+        if (!rows.length) {
+            alert('No currently visible activity-log entries are available to export.');
+            return;
+        }
+        const csv = '\uFEFF' + [
+            ['time', 'category', 'text'],
+            ...rows.map((row) => [row.timeText || 'N/A', row.category, row.text])
+        ].map((line) => line.map(csvCell).join(',')).join('\r\n') + '\r\n';
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = 'filtered_activity_log.csv';
+        anchor.hidden = true;
+        document.documentElement.append(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
 
-    // Reverse Button
-    const reverseBtn = `<button id="reverseLogsBtn" class="${buttonClass}" style="line-height: 24px; padding: 0 12px; background-color: #4caf50; color: #fff; border: none; border-radius: 4px; margin-left: 10px; cursor: pointer;" title="Reverse log order layout" type="button">Reverse View</button>`;
+    function bindUi(ui) {
+        const search = ui.querySelector('#' + SEARCH_ID);
+        search.value = state.query;
+        search.addEventListener('input', () => {
+            state.query = search.value;
+            saveState();
+            scheduleRender();
+        });
+        ui.querySelector('.alf-clear-search').addEventListener('click', () => {
+            state.query = '';
+            commitFilters();
+            search.focus();
+        });
+        ui.querySelector('.alf-clear-all').addEventListener('click', clearAll);
+        ui.querySelector('.alf-reverse-button').addEventListener('click', () => {
+            state.sort = state.sort === 'oldest' ? 'newest' : 'oldest';
+            saveState();
+            scheduleRender();
+        });
+        ui.querySelector('.alf-export-button').addEventListener('click', exportCsv);
+        ui.querySelector('.alf-theme-button').addEventListener('click', () => {
+            state.theme = state.theme === 'dark' ? 'light' : 'dark';
+            saveState();
+            applyTheme(ui);
+            const root = document.querySelector(ROOT_SELECTOR);
+            if (root) syncTornControlStyle(ui, root, true);
+        });
 
-    wrapper.append(exportBtn);
-    wrapper.append(reverseBtn);
+        const dateButton = ui.querySelector('.alf-date-button');
+        const datePopover = ui.querySelector('.alf-date-popover');
+        dateButton.addEventListener('click', () => togglePopover(dateButton, datePopover));
+        const filterButton = ui.querySelector('.alf-filter-button');
+        const filterPopover = ui.querySelector('.alf-filter-popover');
+        filterButton.addEventListener('click', () => togglePopover(filterButton, filterPopover));
 
-    $('#exportLogsBtn').on('click', () => {
-        exportActivityLog();
-    });
-
-    $('#reverseLogsBtn').on('click', () => {
-        reverseLogView();
-    });
-}
-
-addInterceptor();
-
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-} else {
-    init();
-}
-
-function init() {
-    if (typeof $ !== 'undefined') {
-        GM_registerMenuCommand('Export Filtered Logs', exportActivityLog);
-        GM_registerMenuCommand('Reverse Log View', reverseLogView);
-
-        setInterval(() => {
-            if ($('#activity-log-root').length && !$('#exportLogsBtn').length) {
-                addScriptButtons();
+        ui.querySelectorAll('.alf-tab').forEach((tab) => {
+            tab.addEventListener('click', () => {
+                ui.querySelectorAll('.alf-tab').forEach((item) => item.classList.toggle('alf-active', item === tab));
+                ui.querySelectorAll('.alf-date-panel').forEach((panel) => panel.classList.toggle('alf-active', panel.dataset.panel === tab.dataset.tab));
+                if (tab.dataset.tab === 'range') {
+                    const fromInput = ui.querySelector('.alf-from');
+                    const toInput = ui.querySelector('.alf-to');
+                    fromInput.value = state.from;
+                    toInput.value = state.from && state.from === state.to ? '' : state.to;
+                }
+            });
+        });
+        ui.querySelector('.alf-date-apply').addEventListener('click', () => applyDatePanel(ui));
+        ui.querySelector('.alf-date-clear').addEventListener('click', () => setQuickRange('all'));
+        ui.querySelector('.alf-day').addEventListener('change', (event) => {
+            if (!event.target.value) return;
+            const date = parseDateValue(event.target.value);
+            state.from = event.target.value;
+            state.to = event.target.value;
+            state.dateLabel = date.toLocaleDateString(undefined, {
+                day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC'
+            });
+            commitFilters();
+        });
+        ui.querySelector('.alf-category-list').addEventListener('change', (event) => {
+            if (event.target.type !== 'checkbox') return;
+            if (event.target.checked) state.categories.add(event.target.value);
+            else state.categories.delete(event.target.value);
+            commitFilters();
+        });
+        ui.addEventListener('click', (event) => {
+            const quick = event.target.closest('[data-range]');
+            if (quick) setQuickRange(quick.dataset.range);
+            const chip = event.target.closest('[data-chip-type]');
+            if (!chip) return;
+            if (chip.dataset.chipType === 'query') state.query = '';
+            else if (chip.dataset.chipType === 'date') {
+                state.from = '';
+                state.to = '';
+                state.dateLabel = 'All time';
+            } else if (chip.dataset.chipType === 'category') {
+                state.categories.delete(chip.dataset.chipValue);
             }
-        }, 1000);
-    } else {
-        setTimeout(init, 300);
+            commitFilters();
+        });
     }
-}
+
+    function ensureUi() {
+        if (!isLogPage() || !desktopMedia.matches || document.getElementById(UI_ID)) return;
+        const root = document.querySelector(ROOT_SELECTOR);
+        if (!root) return;
+        if (!state.theme) state.theme = detectedTornTheme(root);
+        installStyles();
+        const ui = document.createElement('section');
+        ui.id = UI_ID;
+        ui.setAttribute('aria-label', 'Activity log filters');
+        ui.innerHTML = markup();
+        applyTheme(ui);
+        const nativeToolbar = root.querySelector('[class*="filterWrapper"],[class*="buttonsWrapper"]');
+        if (nativeToolbar) nativeToolbar.insertAdjacentElement('afterend', ui);
+        else root.prepend(ui);
+        bindUi(ui);
+        concealNativeSearch(root);
+        scheduleRender();
+    }
+
+    function onDocumentClick(event) {
+        const ui = document.getElementById(UI_ID);
+        if (ui && !ui.contains(event.target)) closePopovers();
+    }
+
+    function onDocumentKeydown(event) {
+        if (event.key === 'Escape') closePopovers();
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+            const search = document.getElementById(SEARCH_ID);
+            if (search) {
+                event.preventDefault();
+                search.focus();
+            }
+        }
+    }
+
+    function bindInteractions() {
+        if (interactionsBound) return;
+        interactionsBound = true;
+        document.addEventListener('click', onDocumentClick);
+        document.addEventListener('keydown', onDocumentKeydown);
+    }
+
+    function unbindInteractions() {
+        if (!interactionsBound) return;
+        interactionsBound = false;
+        document.removeEventListener('click', onDocumentClick);
+        document.removeEventListener('keydown', onDocumentKeydown);
+    }
+
+    function teardownUi() {
+        const root = document.querySelector(ROOT_SELECTOR);
+        if (root) {
+            const infos = findRows(root).map(rowInfo);
+            infos.forEach((info) => info.row.classList.remove('alf-hidden'));
+            sortRows(infos, 'newest');
+        }
+        document.querySelectorAll('.alf-native-search-hidden').forEach((element) => {
+            element.classList.remove('alf-native-search-hidden');
+        });
+        document.getElementById(UI_ID)?.remove();
+        document.getElementById(STYLE_ID)?.remove();
+        controlStyleCache = null;
+        renderScheduled = false;
+    }
+
+    function updatePageLifecycle() {
+        if (!isLogPage() || !desktopMedia.matches) {
+            teardownUi();
+            unbindInteractions();
+            return;
+        }
+        bindInteractions();
+        ensureUi();
+        scheduleRender();
+    }
+
+    function onViewportChange() {
+        updatePageLifecycle();
+        if (!desktopMedia.matches) return;
+        const ui = document.getElementById(UI_ID);
+        const root = document.querySelector(ROOT_SELECTOR);
+        if (ui && root) syncTornControlStyle(ui, root, true);
+    }
+
+    function init() {
+        loadState();
+        GM_registerMenuCommand('Focus Activity Log Search', () => {
+            ensureUi();
+            document.getElementById(SEARCH_ID)?.focus();
+        });
+        GM_registerMenuCommand('Export Visible Logs as CSV', exportCsv);
+        GM_registerMenuCommand('Clear Activity Log Filters', clearAll);
+        pageObserver = new MutationObserver((mutations) => {
+            if (!isLogPage() || !desktopMedia.matches) {
+                updatePageLifecycle();
+                return;
+            }
+            const externalMutation = mutations.some((mutation) =>
+                !mutation.target.closest?.('#' + UI_ID)
+            );
+            if (!externalMutation) return;
+            updatePageLifecycle();
+            if (!controlStyleCache?.sample) {
+                const ui = document.getElementById(UI_ID);
+                const root = document.querySelector(ROOT_SELECTOR);
+                if (ui && root) syncTornControlStyle(ui, root, true);
+            }
+        });
+        pageObserver.observe(document.body, { childList: true, subtree: true });
+        desktopMedia.addEventListener('change', onViewportChange);
+        window.addEventListener('popstate', updatePageLifecycle);
+        window.addEventListener('hashchange', updatePageLifecycle);
+        updatePageLifecycle();
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
+    else init();
+})();
