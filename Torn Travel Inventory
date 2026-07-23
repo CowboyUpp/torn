@@ -1,0 +1,2328 @@
+// ==UserScript==
+// @name         Torn: Travel Inventory
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      1.4.0
+// @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
+// @author       cowboyup [1496324]
+// @license      MIT
+// @match        https://www.torn.com/*
+// @connect      api.torn.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
+// @run-at       document-idle
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  const APP_ID = "tti";
+  const SCRIPT_VERSION = "1.4.0";
+  const API_URL = "https://api.torn.com/v2/user/inventory";
+  const API_COMMENT = "TornTravelInventory";
+  const KEY_STORE = "tti_api_key";
+  const THEME_STORE = "tti_theme";
+  const API_KEY_URL =
+    "https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Travel%20Inventory&user=inventory";
+  const PAGE_SIZE = 250;
+  const DEFAULT_CATEGORY = "Medical";
+
+  const CATEGORIES = [
+    "Medical",
+    "Drug",
+    "Booster",
+    "Energy Drink",
+    "Candy",
+    "Alcohol",
+    "Temporary",
+    "Primary",
+    "Secondary",
+    "Melee",
+    "Defensive",
+    "Clothing",
+    "Flower",
+    "Plushie",
+    "Supply Pack",
+    "Enhancer",
+    "Book",
+    "Special",
+    "Tool",
+    "Material",
+    "Car",
+    "Jewelry",
+    "Artifact",
+    "Collectible",
+    "Other",
+  ];
+
+  const CATEGORY_ICONS = {
+    Medical: "✚",
+    Drug: "◆",
+    Booster: "▲",
+    "Energy Drink": "ϟ",
+    Candy: "●",
+    Alcohol: "♜",
+    Temporary: "◈",
+    Primary: "▰",
+    Secondary: "▪",
+    Melee: "†",
+    Defensive: "⬟",
+    Clothing: "♟",
+    Flower: "✿",
+    Plushie: "★",
+    "Supply Pack": "▣",
+    Enhancer: "↑",
+    Book: "▤",
+    Special: "✦",
+    Tool: "⌁",
+    Material: "▧",
+    Car: "▱",
+    Jewelry: "◇",
+    Artifact: "♢",
+    Collectible: "◉",
+    Other: "•••",
+  };
+
+  const state = {
+    open: false,
+    settingsOpen: false,
+    category: DEFAULT_CATEGORY,
+    offset: 0,
+    items: [],
+    total: 0,
+    timestamp: null,
+    loading: false,
+    error: "",
+    query: "",
+    requestToken: 0,
+    theme: String(gmGet(THEME_STORE, "light")) === "dark" ? "dark" : "light",
+  };
+
+  let root;
+  let panel;
+  let keyInput;
+  let navigationObserver;
+  let navigationTimer;
+
+  function gmGet(key, fallback = "") {
+    try {
+      if (typeof GM_getValue === "function") return GM_getValue(key, fallback);
+      return localStorage.getItem(key) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function gmSet(key, value) {
+    try {
+      if (typeof GM_setValue === "function") GM_setValue(key, value);
+      else localStorage.setItem(key, value);
+    } catch {
+      // Storage errors are reported when the saved value is read back.
+    }
+  }
+
+  function gmDelete(key) {
+    try {
+      if (typeof GM_deleteValue === "function") GM_deleteValue(key);
+      else localStorage.removeItem(key);
+    } catch {
+      // The user can overwrite an inaccessible value with a new key.
+    }
+  }
+
+  function getApiKey() {
+    return String(gmGet(KEY_STORE, "")).trim();
+  }
+
+  function detectDarkTheme() {
+    const themeClasses = `${document.documentElement.className} ${document.body?.className || ""}`.toLowerCase();
+    if (/(^|\s|[-_])(dark|night)(\s|[-_]|$)/.test(themeClasses)) return true;
+    if (/(^|\s|[-_])light(\s|[-_]|$)/.test(themeClasses)) return false;
+
+    const candidates = [
+      document.querySelector("#mainContainer"),
+      document.querySelector('[class*="content-wrapper"]'),
+      document.querySelector("main"),
+      document.body,
+      document.documentElement,
+    ].filter(Boolean);
+
+    for (const element of candidates) {
+      const color = getComputedStyle(element).backgroundColor;
+      const match = color.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i);
+      if (!match || color.endsWith(", 0)") || color.endsWith("/ 0)")) continue;
+      const [, red, green, blue] = match.map(Number);
+      const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+      return luminance < 0.48;
+    }
+
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+  }
+
+  function syncTheme() {
+    if (!root) return;
+    const dark = state.theme === "dark";
+    root.classList.toggle(`${APP_ID}-theme-dark`, dark);
+    root.classList.toggle(`${APP_ID}-theme-light`, !dark);
+  }
+
+  function syncNativeControlStyle() {
+    const pageTheme = detectDarkTheme() ? "dark" : "light";
+    const properties = [
+      "--tti-native-height",
+      "--tti-native-font-family",
+      "--tti-native-radius",
+    ];
+    if (!root || state.theme !== pageTheme) {
+      properties.forEach((property) => root?.style.removeProperty(property));
+      return;
+    }
+
+    const sample = [...document.querySelectorAll("button, a[role='button'], [role='button']")]
+      .filter((element) => {
+        if (element.closest(`#${APP_ID}-root`)) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width >= 55 && rect.height >= 26 && rect.height <= 48 && getComputedStyle(element).display !== "none";
+      })
+      .sort((first, second) => {
+        const a = first.getBoundingClientRect();
+        const b = second.getBoundingClientRect();
+        return a.width * a.height - b.width * b.height;
+      })[0];
+    if (!sample) return;
+
+    const style = getComputedStyle(sample);
+    const rect = sample.getBoundingClientRect();
+    root.style.setProperty("--tti-native-height", `${Math.round(rect.height)}px`);
+    root.style.setProperty("--tti-native-font-family", style.fontFamily);
+    root.style.setProperty("--tti-native-radius", style.borderRadius);
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function formatNumber(value) {
+    return new Intl.NumberFormat().format(Number(value) || 0);
+  }
+
+  function formatTime(timestamp) {
+    if (!timestamp) return "Not loaded";
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      day: "2-digit",
+      month: "short",
+    }).format(new Date(timestamp * 1000));
+  }
+
+  function apiRequest(url, apiKey) {
+    return new Promise((resolve, reject) => {
+      const headers = {
+        Authorization: `ApiKey ${apiKey}`,
+        Accept: "application/json",
+      };
+
+      if (typeof GM_xmlhttpRequest === "function") {
+        GM_xmlhttpRequest({
+          method: "GET",
+          url,
+          headers,
+          timeout: 20000,
+          onload: (response) => {
+            try {
+              resolve(JSON.parse(response.responseText));
+            } catch {
+              reject(new Error("Torn returned an unreadable response."));
+            }
+          },
+          onerror: () => reject(new Error("Could not reach the Torn API.")),
+          ontimeout: () => reject(new Error("The Torn API request timed out.")),
+        });
+        return;
+      }
+
+      fetch(url, { headers })
+        .then((response) => response.json())
+        .then(resolve)
+        .catch(() => reject(new Error("Could not reach the Torn API.")));
+    });
+  }
+
+  async function loadInventory({ force = false } = {}) {
+    const apiKey = getApiKey();
+    if (!apiKey) {
+      state.settingsOpen = true;
+      state.error = "";
+      render();
+      setTimeout(() => keyInput?.focus(), 0);
+      return;
+    }
+
+    const token = ++state.requestToken;
+    state.loading = true;
+    state.error = "";
+    render();
+
+    const params = new URLSearchParams({
+      cat: state.category,
+      limit: String(PAGE_SIZE),
+      offset: String(state.offset),
+      comment: API_COMMENT,
+    });
+    if (force) params.set("timestamp", String(Math.floor(Date.now() / 1000)));
+
+    try {
+      const data = await apiRequest(`${API_URL}?${params}`, apiKey);
+      if (token !== state.requestToken) return;
+
+      if (data?.error) {
+        const code = data.error.code ? ` (${data.error.code})` : "";
+        throw new Error(`${data.error.error || "Torn API error"}${code}`);
+      }
+
+      const inventory = data?.inventory;
+      if (!inventory || !Array.isArray(inventory.items)) {
+        throw new Error("The inventory response did not have the expected format.");
+      }
+
+      state.items = inventory.items;
+      state.timestamp = inventory.timestamp || null;
+      state.total = Number(data?._metadata?.total ?? inventory.items.length);
+    } catch (error) {
+      if (token !== state.requestToken) return;
+      state.items = [];
+      state.total = 0;
+      state.timestamp = null;
+      state.error = error instanceof Error ? error.message : "Could not load inventory.";
+    } finally {
+      if (token === state.requestToken) {
+        state.loading = false;
+        render();
+      }
+    }
+  }
+
+  function filteredItems() {
+    const query = state.query.trim().toLowerCase();
+    if (!query) return state.items;
+    return state.items.filter((item) =>
+      `${item.name} ${item.id} ${item.uid ?? ""}`.toLowerCase().includes(query),
+    );
+  }
+
+  function renderCategoryOptions() {
+    return CATEGORIES.map(
+      (category) =>
+        `<option value="${escapeHtml(category)}"${category === state.category ? " selected" : ""}>${escapeHtml(category)}</option>`,
+    ).join("");
+  }
+
+  function renderCards() {
+    if (state.loading) {
+      return Array.from(
+        { length: 8 },
+        (_, index) => `
+          <div class="${APP_ID}-card ${APP_ID}-skeleton" style="--delay:${index * 45}ms">
+            <span></span><span></span><span></span>
+          </div>`,
+      ).join("");
+    }
+
+    if (state.error) {
+      return `
+        <div class="${APP_ID}-empty ${APP_ID}-error">
+          <div class="${APP_ID}-empty-icon">!</div>
+          <h3>Inventory unavailable</h3>
+          <p>${escapeHtml(state.error)}</p>
+          <button type="button" class="${APP_ID}-primary" data-action="retry">Try again</button>
+        </div>`;
+    }
+
+    const items = filteredItems();
+    if (!items.length) {
+      return `
+        <div class="${APP_ID}-empty">
+          <div class="${APP_ID}-empty-icon">${state.query ? "⌕" : CATEGORY_ICONS[state.category]}</div>
+          <h3>${state.query ? "No matching items" : `No ${escapeHtml(state.category)} items`}</h3>
+          <p>${state.query ? "Try a different name or item ID." : "Nothing in this category was returned by the API."}</p>
+        </div>`;
+    }
+
+    return items
+      .map((item) => {
+        const badges = [
+          item.equipped ? `<span class="${APP_ID}-badge is-equipped">Equipped</span>` : "",
+          item.faction_owned ? `<span class="${APP_ID}-badge">Faction</span>` : "",
+        ].join("");
+        const itemRef = item.uid ? `UID ${formatNumber(item.uid)}` : `ID ${formatNumber(item.id)}`;
+
+        return `
+          <article class="${APP_ID}-card">
+            <div class="${APP_ID}-item-icon">
+              <img
+                src="https://www.torn.com/images/items/${encodeURIComponent(item.id)}/large.png"
+                alt=""
+                loading="lazy"
+                referrerpolicy="same-origin"
+              />
+            </div>
+            <div class="${APP_ID}-item-copy">
+              <h3 title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</h3>
+              <div class="${APP_ID}-item-meta">
+                <span>${itemRef}</span>
+                ${badges}
+              </div>
+            </div>
+            <div class="${APP_ID}-amount" title="Quantity">
+              <small>QTY</small>
+              <strong>${formatNumber(item.amount)}</strong>
+            </div>
+          </article>`;
+      })
+      .join("");
+  }
+
+  function renderSettings() {
+    if (!state.settingsOpen) return "";
+    const hasKey = Boolean(getApiKey());
+
+    return `
+      <div class="${APP_ID}-settings" role="region" aria-label="API settings">
+        <div class="${APP_ID}-settings-head">
+          <div>
+            <span class="${APP_ID}-eyebrow">PRIVATE CONNECTION</span>
+            <div class="${APP_ID}-settings-title">Connect your Torn API key</div>
+          </div>
+          ${hasKey ? `<button class="${APP_ID}-icon-button" type="button" data-action="close-settings" aria-label="Close settings">×</button>` : ""}
+        </div>
+        <p class="${APP_ID}-settings-intro">
+          Create a <strong>Limited</strong> key, or a custom key with access only to
+          <strong>User → Inventory</strong>. Never enter your Torn password here.
+        </p>
+        <a class="${APP_ID}-create-key ${APP_ID}-primary" href="${API_KEY_URL}" target="_blank" rel="noopener noreferrer">
+          + Create custom Inventory API key
+        </a>
+        <label class="${APP_ID}-key-label" for="${APP_ID}-key-input">API key</label>
+        <div class="${APP_ID}-key-row">
+          <input
+            id="${APP_ID}-key-input"
+            type="password"
+            inputmode="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste your API key"
+            value="${escapeHtml(getApiKey())}"
+          />
+          <button class="${APP_ID}-reveal" type="button" data-action="reveal-key">Show</button>
+        </div>
+        <div class="${APP_ID}-privacy">
+          <div><span>Storage</span><strong>API key: this browser only</strong></div>
+          <div><span>Sharing</span><strong>Nobody</strong></div>
+          <div><span>Purpose</span><strong>Read-only personal inventory</strong></div>
+          <div><span>Sent to</span><strong>api.torn.com only</strong></div>
+        </div>
+        <div class="${APP_ID}-settings-actions">
+          ${hasKey ? `<button class="${APP_ID}-danger" type="button" data-action="remove-key">Remove key</button>` : "<span></span>"}
+          <button class="${APP_ID}-primary" type="button" data-action="save-key">Save and connect</button>
+        </div>
+      </div>`;
+  }
+
+  function render() {
+    if (!panel) return;
+    const items = filteredItems();
+    const pageStart = state.total ? state.offset + 1 : 0;
+    const pageEnd = Math.min(state.offset + state.items.length, state.total);
+    const totalQuantity = items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    const hasPrevious = state.offset > 0;
+    const hasNext = state.offset + state.items.length < state.total;
+    const hasPagination = hasPrevious || hasNext;
+
+    panel.classList.toggle("is-open", state.open);
+    panel.setAttribute("aria-hidden", String(!state.open));
+
+    if (state.settingsOpen) {
+      panel.innerHTML = `
+        <div class="${APP_ID}-shell ${APP_ID}-settings-shell">
+          ${renderSettings()}
+        </div>`;
+      keyInput = panel.querySelector(`#${APP_ID}-key-input`);
+      return;
+    }
+
+    panel.innerHTML = `
+      <div class="${APP_ID}-shell">
+        <header class="${APP_ID}-header">
+          <div class="${APP_ID}-brand">
+            <div class="${APP_ID}-mark" aria-hidden="true">T</div>
+            <div>
+              <span class="${APP_ID}-eyebrow">TRAVEL COMPANION</span>
+              <div class="${APP_ID}-title">Personal Inventory</div>
+            </div>
+          </div>
+          <div class="${APP_ID}-header-actions">
+            <span class="${APP_ID}-readonly"><i></i> Read-only</span>
+            <button class="${APP_ID}-icon-button ${APP_ID}-theme-button" type="button" data-action="theme" aria-label="${state.theme === "dark" ? "Use light interface" : "Use dark interface"}" title="${state.theme === "dark" ? "Use light interface" : "Use dark interface"}">${state.theme === "dark" ? "☀" : "☾"}</button>
+            <button class="${APP_ID}-icon-button" type="button" data-action="settings" aria-label="API settings">⚙</button>
+            <button class="${APP_ID}-icon-button" type="button" data-action="close" aria-label="Close inventory">×</button>
+          </div>
+        </header>
+
+        <section class="${APP_ID}-toolbar">
+          <label class="${APP_ID}-search">
+            <span aria-hidden="true">⌕</span>
+            <input type="search" placeholder="Search this category…" value="${escapeHtml(state.query)}" />
+            <kbd>/</kbd>
+          </label>
+          <label class="${APP_ID}-category-control">
+            <span class="${APP_ID}-sr-only">Item category</span>
+            <select class="${APP_ID}-category-select" aria-label="Item category">
+              ${renderCategoryOptions()}
+            </select>
+          </label>
+          <button class="${APP_ID}-refresh" type="button" data-action="refresh" ${state.loading ? "disabled" : ""}>
+            <span class="${state.loading ? "is-spinning" : ""}" aria-hidden="true">↻</span>
+            Refresh
+          </button>
+        </section>
+
+        <section class="${APP_ID}-status" aria-live="polite">
+          <div>
+            <strong>${escapeHtml(state.category)}</strong>
+            <span>${state.loading ? "Loading inventory…" : `${formatNumber(items.length)} entries · ${formatNumber(totalQuantity)} items shown`}</span>
+          </div>
+          <div class="${APP_ID}-cache">
+            <span>API snapshot</span>
+            <strong>${formatTime(state.timestamp)}</strong>
+          </div>
+        </section>
+
+        <main class="${APP_ID}-content">
+          <div class="${APP_ID}-grid">${renderCards()}</div>
+        </main>
+
+        <footer class="${APP_ID}-footer">
+          <span>
+            ${state.total ? `Showing ${formatNumber(pageStart)}–${formatNumber(pageEnd)} of ${formatNumber(state.total)}` : "Official Torn API v2"}
+            <small class="${APP_ID}-version">v${SCRIPT_VERSION} · cowboyup [1496324]</small>
+          </span>
+          ${
+            hasPagination
+              ? `<div class="${APP_ID}-pager" aria-label="Inventory pages">
+                  <button type="button" data-action="previous" ${!hasPrevious || state.loading ? "disabled" : ""}>← Previous 250</button>
+                  <button type="button" data-action="next" ${!hasNext || state.loading ? "disabled" : ""}>Next 250 →</button>
+                </div>`
+              : ""
+          }
+        </footer>
+      </div>`;
+
+    keyInput = panel.querySelector(`#${APP_ID}-key-input`);
+  }
+
+  function openPanel() {
+    syncTheme();
+    syncNativeControlStyle();
+    state.open = true;
+    document.documentElement.classList.add(`${APP_ID}-no-scroll`);
+    render();
+    if (!getApiKey()) {
+      state.settingsOpen = true;
+      render();
+      setTimeout(() => keyInput?.focus(), 0);
+    } else if (!state.items.length && !state.loading && !state.error) {
+      loadInventory();
+    }
+  }
+
+  function closePanel() {
+    state.open = false;
+    state.settingsOpen = false;
+    document.documentElement.classList.remove(`${APP_ID}-no-scroll`);
+    render();
+  }
+
+  function handleClick(event) {
+    const target = event.target.closest("[data-action], [data-category]");
+    if (!target) return;
+
+    if (target.dataset.category) {
+      state.category = target.dataset.category;
+      state.offset = 0;
+      state.query = "";
+      state.items = [];
+      state.total = 0;
+      loadInventory();
+      return;
+    }
+
+    switch (target.dataset.action) {
+      case "close":
+        closePanel();
+        break;
+      case "settings":
+        state.settingsOpen = true;
+        render();
+        setTimeout(() => keyInput?.focus(), 0);
+        break;
+      case "theme":
+        state.theme = state.theme === "dark" ? "light" : "dark";
+        gmSet(THEME_STORE, state.theme);
+        syncTheme();
+        syncNativeControlStyle();
+        render();
+        break;
+      case "close-settings":
+        state.settingsOpen = false;
+        render();
+        break;
+      case "reveal-key":
+        if (keyInput) {
+          keyInput.type = keyInput.type === "password" ? "text" : "password";
+          target.textContent = keyInput.type === "password" ? "Show" : "Hide";
+        }
+        break;
+      case "save-key": {
+        const value = keyInput?.value.trim() || "";
+        if (value.length < 8) {
+          keyInput?.setCustomValidity("Please enter a valid Torn API key.");
+          keyInput?.reportValidity();
+          return;
+        }
+        keyInput?.setCustomValidity("");
+        gmSet(KEY_STORE, value);
+        state.settingsOpen = false;
+        state.offset = 0;
+        state.items = [];
+        state.error = "";
+        loadInventory();
+        break;
+      }
+      case "remove-key":
+        gmDelete(KEY_STORE);
+        state.items = [];
+        state.total = 0;
+        state.timestamp = null;
+        state.error = "";
+        render();
+        setTimeout(() => keyInput?.focus(), 0);
+        break;
+      case "refresh":
+      case "retry":
+        loadInventory({ force: true });
+        break;
+      case "previous":
+        state.offset = Math.max(0, state.offset - PAGE_SIZE);
+        state.query = "";
+        loadInventory();
+        break;
+      case "next":
+        state.offset += PAGE_SIZE;
+        state.query = "";
+        loadInventory();
+        break;
+      default:
+        break;
+    }
+  }
+
+  function installStyles() {
+    const style = document.createElement("style");
+    style.textContent = `
+      :root {
+        --tti-red: #c83232;
+        --tti-red-bright: #e14343;
+        --tti-red-dark: #8d2020;
+        --tti-ink: #0f1012;
+        --tti-panel: #17191c;
+        --tti-card: #202327;
+        --tti-card-hover: #262a2f;
+        --tti-line: rgba(255,255,255,.09);
+        --tti-muted: #8f969f;
+        --tti-text: #eef0f2;
+        --tti-success: #69ba84;
+      }
+      html.${APP_ID}-no-scroll { overflow: hidden !important; }
+      #${APP_ID}-root, #${APP_ID}-root * { box-sizing: border-box; }
+      #${APP_ID}-root {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646;
+        pointer-events: none;
+        color: var(--tti-text);
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+      }
+      .${APP_ID}-launcher {
+        pointer-events: auto;
+        position: fixed;
+        right: max(18px, env(safe-area-inset-right));
+        bottom: max(18px, env(safe-area-inset-bottom));
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 46px;
+        padding: 0 17px 0 12px;
+        border: 1px solid rgba(255,255,255,.16);
+        border-radius: 8px;
+        color: #fff;
+        background: linear-gradient(145deg, #b52828, #8d1e1e);
+        box-shadow: 0 9px 24px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.12);
+        cursor: pointer;
+        font: 700 13px/1 Inter, "Segoe UI", sans-serif;
+        letter-spacing: .02em;
+        transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
+      }
+      .${APP_ID}-launcher:hover {
+        transform: translateY(-2px);
+        filter: brightness(1.1);
+        box-shadow: 0 12px 28px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.12);
+      }
+      .${APP_ID}-launcher:active { transform: translateY(0); }
+      .${APP_ID}-launcher-icon {
+        display: grid;
+        place-items: center;
+        width: 25px;
+        height: 25px;
+        border-radius: 5px;
+        background: rgba(0,0,0,.22);
+        font-size: 16px;
+      }
+      .${APP_ID}-panel {
+        pointer-events: none;
+        position: absolute;
+        inset: 0;
+        padding: clamp(8px, 2vw, 24px);
+        display: grid;
+        place-items: center;
+        background: rgba(4,5,6,.74);
+        backdrop-filter: blur(10px);
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity .22s ease, visibility .22s;
+      }
+      .${APP_ID}-panel.is-open {
+        pointer-events: auto;
+        opacity: 1;
+        visibility: visible;
+      }
+      .${APP_ID}-shell {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        width: min(1180px, 100%);
+        height: min(850px, calc(100vh - clamp(16px, 4vw, 48px)));
+        max-height: 100%;
+        overflow: hidden;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 12px;
+        background:
+          radial-gradient(circle at 86% -10%, rgba(200,50,50,.14), transparent 30%),
+          linear-gradient(180deg, #1a1c1f, #121416);
+        box-shadow: 0 28px 80px rgba(0,0,0,.66), inset 0 1px rgba(255,255,255,.04);
+        transform: translateY(12px) scale(.99);
+        transition: transform .25s cubic-bezier(.2,.7,.2,1);
+      }
+      .${APP_ID}-panel.is-open .${APP_ID}-shell { transform: none; }
+      .${APP_ID}-header {
+        flex: 0 0 auto;
+        min-height: 76px;
+        padding: 15px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--tti-line);
+        background: rgba(12,13,15,.5);
+      }
+      .${APP_ID}-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+      .${APP_ID}-mark {
+        display: grid;
+        place-items: center;
+        width: 42px;
+        height: 42px;
+        border: 1px solid rgba(255,255,255,.14);
+        border-radius: 8px;
+        background: linear-gradient(145deg, var(--tti-red-bright), var(--tti-red-dark));
+        box-shadow: inset 0 1px rgba(255,255,255,.2), 0 5px 15px rgba(0,0,0,.25);
+        color: #fff;
+        font: italic 900 22px/1 Georgia, serif;
+      }
+      .${APP_ID}-eyebrow {
+        display: block;
+        margin-bottom: 3px;
+        color: #b6bbc1;
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: .18em;
+      }
+      .${APP_ID}-brand h1, .${APP_ID}-settings h2 {
+        margin: 0;
+        color: #f3f4f5;
+        font-size: 20px;
+        line-height: 1.15;
+        font-weight: 750;
+        letter-spacing: -.02em;
+      }
+      .${APP_ID}-header-actions { display: flex; align-items: center; gap: 8px; }
+      .${APP_ID}-readonly {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-right: 4px;
+        padding: 7px 10px;
+        border: 1px solid rgba(105,186,132,.18);
+        border-radius: 999px;
+        color: #a9cfb6;
+        background: rgba(105,186,132,.07);
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .${APP_ID}-readonly i {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--tti-success);
+        box-shadow: 0 0 8px rgba(105,186,132,.7);
+      }
+      .${APP_ID}-icon-button {
+        display: grid;
+        place-items: center;
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border: 1px solid var(--tti-line);
+        border-radius: 7px;
+        color: #c5c9ce;
+        background: rgba(255,255,255,.035);
+        cursor: pointer;
+        font-size: 19px;
+        line-height: 1;
+        transition: background .16s, color .16s, border-color .16s;
+      }
+      .${APP_ID}-icon-button:hover {
+        color: #fff;
+        border-color: rgba(255,255,255,.2);
+        background: rgba(255,255,255,.08);
+      }
+      .${APP_ID}-toolbar {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 10px;
+        padding: 13px 20px;
+      }
+      .${APP_ID}-search {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 40px;
+        padding: 0 11px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        border: 1px solid var(--tti-line);
+        border-radius: 7px;
+        background: rgba(0,0,0,.22);
+        color: var(--tti-muted);
+      }
+      .${APP_ID}-search:focus-within {
+        border-color: rgba(200,50,50,.65);
+        box-shadow: 0 0 0 3px rgba(200,50,50,.1);
+      }
+      .${APP_ID}-search input {
+        flex: 1;
+        min-width: 0;
+        height: 100%;
+        border: 0;
+        outline: 0;
+        color: var(--tti-text);
+        background: transparent;
+        font: 500 13px/1 inherit;
+      }
+      .${APP_ID}-search input::placeholder { color: #747b84; }
+      .${APP_ID}-search kbd {
+        padding: 3px 6px;
+        border: 1px solid var(--tti-line);
+        border-radius: 4px;
+        color: #777e87;
+        background: rgba(255,255,255,.035);
+        font: 10px/1 inherit;
+      }
+      .${APP_ID}-refresh, .${APP_ID}-primary, .${APP_ID}-danger {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        min-height: 40px;
+        padding: 0 15px;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 7px;
+        color: #e6e8ea;
+        background: linear-gradient(180deg, #31353a, #25282c);
+        box-shadow: inset 0 1px rgba(255,255,255,.06);
+        cursor: pointer;
+        font: 700 12px/1 inherit;
+      }
+      .${APP_ID}-refresh:hover, .${APP_ID}-primary:hover { filter: brightness(1.12); }
+      .${APP_ID}-refresh:disabled { opacity: .55; cursor: wait; }
+      .${APP_ID}-refresh .is-spinning { animation: ${APP_ID}-spin .75s linear infinite; }
+      @keyframes ${APP_ID}-spin { to { transform: rotate(360deg); } }
+      .${APP_ID}-categories {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 7px;
+        overflow-x: auto;
+        padding: 0 20px 13px;
+        scrollbar-width: thin;
+        scrollbar-color: #4b4e52 transparent;
+      }
+      .${APP_ID}-chip {
+        flex: 0 0 auto;
+        height: 30px;
+        padding: 0 10px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--tti-line);
+        border-radius: 6px;
+        color: #9ca2aa;
+        background: rgba(255,255,255,.025);
+        cursor: pointer;
+        font: 650 11px/1 inherit;
+        transition: color .15s, background .15s, border-color .15s;
+      }
+      .${APP_ID}-chip:hover { color: #e5e7e9; background: rgba(255,255,255,.06); }
+      .${APP_ID}-chip.is-active {
+        color: #fff;
+        border-color: rgba(225,67,67,.65);
+        background: linear-gradient(180deg, rgba(200,50,50,.9), rgba(141,32,32,.9));
+        box-shadow: inset 0 1px rgba(255,255,255,.12);
+      }
+      .${APP_ID}-status {
+        flex: 0 0 auto;
+        min-height: 51px;
+        padding: 10px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-top: 1px solid var(--tti-line);
+        border-bottom: 1px solid var(--tti-line);
+        background: rgba(0,0,0,.13);
+      }
+      .${APP_ID}-status > div { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+      .${APP_ID}-status strong { color: #e9ebed; font-size: 13px; }
+      .${APP_ID}-status span { color: var(--tti-muted); font-size: 11px; white-space: nowrap; }
+      .${APP_ID}-cache { text-align: right; }
+      .${APP_ID}-cache strong { color: #aeb4bb; font-size: 11px; }
+      .${APP_ID}-content {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        padding: 16px 20px;
+        scrollbar-width: thin;
+        scrollbar-color: #4b4e52 transparent;
+      }
+      .${APP_ID}-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 10px;
+      }
+      .${APP_ID}-card {
+        min-width: 0;
+        min-height: 76px;
+        padding: 11px;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        border: 1px solid var(--tti-line);
+        border-radius: 8px;
+        background: linear-gradient(145deg, rgba(255,255,255,.045), rgba(255,255,255,.022));
+        box-shadow: inset 0 1px rgba(255,255,255,.025);
+        transition: transform .14s, border-color .14s, background .14s;
+      }
+      .${APP_ID}-card:not(.${APP_ID}-skeleton):hover {
+        transform: translateY(-1px);
+        border-color: rgba(255,255,255,.16);
+        background: linear-gradient(145deg, rgba(255,255,255,.07), rgba(255,255,255,.035));
+      }
+      .${APP_ID}-item-icon {
+        flex: 0 0 50px;
+        display: grid;
+        place-items: center;
+        width: 50px;
+        height: 50px;
+        border: 1px solid rgba(255,255,255,.1);
+        border-radius: 7px;
+        color: #babfc5;
+        background:
+          linear-gradient(135deg, rgba(255,255,255,.07), transparent),
+          #17191c;
+        box-shadow: inset 0 0 18px rgba(0,0,0,.2);
+        font-size: 22px;
+      }
+      .${APP_ID}-item-copy { flex: 1; min-width: 0; }
+      .${APP_ID}-item-copy h3 {
+        overflow: hidden;
+        margin: 0 0 7px;
+        color: #e8eaec;
+        font-size: 13px;
+        line-height: 1.2;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .${APP_ID}-item-meta { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+      .${APP_ID}-item-meta > span:first-child { color: #777e87; font-size: 9px; font-weight: 650; }
+      .${APP_ID}-badge {
+        padding: 3px 5px;
+        border-radius: 3px;
+        color: #aab0b7;
+        background: rgba(255,255,255,.06);
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+      }
+      .${APP_ID}-badge.is-equipped { color: #e99a9a; background: rgba(200,50,50,.15); }
+      .${APP_ID}-amount {
+        flex: 0 0 auto;
+        min-width: 42px;
+        text-align: right;
+      }
+      .${APP_ID}-amount small {
+        display: block;
+        margin-bottom: 2px;
+        color: #6f767e;
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: .12em;
+      }
+      .${APP_ID}-amount strong {
+        color: #f0f1f2;
+        font-size: 15px;
+        font-variant-numeric: tabular-nums;
+      }
+      .${APP_ID}-skeleton { animation: ${APP_ID}-fade-in .3s calc(var(--delay)) both; }
+      .${APP_ID}-skeleton span {
+        display: block;
+        height: 13px;
+        border-radius: 5px;
+        background: linear-gradient(90deg, #272a2e 25%, #303439 50%, #272a2e 75%);
+        background-size: 220% 100%;
+        animation: ${APP_ID}-shimmer 1.25s linear infinite;
+      }
+      .${APP_ID}-skeleton span:nth-child(1) { width: 50px; height: 50px; }
+      .${APP_ID}-skeleton span:nth-child(2) { flex: 1; }
+      .${APP_ID}-skeleton span:nth-child(3) { width: 38px; }
+      @keyframes ${APP_ID}-shimmer { to { background-position: -220% 0; } }
+      @keyframes ${APP_ID}-fade-in { from { opacity: 0; } }
+      .${APP_ID}-empty {
+        grid-column: 1 / -1;
+        min-height: 245px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 30px;
+        text-align: center;
+      }
+      .${APP_ID}-empty-icon {
+        display: grid;
+        place-items: center;
+        width: 54px;
+        height: 54px;
+        margin-bottom: 14px;
+        border: 1px solid var(--tti-line);
+        border-radius: 50%;
+        color: #8f969f;
+        background: rgba(255,255,255,.03);
+        font: 700 23px/1 inherit;
+      }
+      .${APP_ID}-empty h3 { margin: 0 0 7px; font-size: 15px; }
+      .${APP_ID}-empty p { max-width: 430px; margin: 0 0 16px; color: var(--tti-muted); font-size: 12px; line-height: 1.5; }
+      .${APP_ID}-error .${APP_ID}-empty-icon { color: #ee8585; border-color: rgba(200,50,50,.35); background: rgba(200,50,50,.1); }
+      .${APP_ID}-footer {
+        flex: 0 0 auto;
+        min-height: 55px;
+        padding: 10px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-top: 1px solid var(--tti-line);
+        color: #7e858e;
+        background: rgba(0,0,0,.2);
+        font-size: 10px;
+      }
+      .${APP_ID}-pager { display: flex; gap: 7px; }
+      .${APP_ID}-pager button {
+        min-height: 30px;
+        padding: 0 10px;
+        border: 1px solid var(--tti-line);
+        border-radius: 5px;
+        color: #b8bdc3;
+        background: rgba(255,255,255,.035);
+        cursor: pointer;
+        font: 700 10px/1 inherit;
+      }
+      .${APP_ID}-pager button:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.08); }
+      .${APP_ID}-pager button:disabled { opacity: .35; cursor: default; }
+      .${APP_ID}-settings {
+        position: absolute;
+        inset: 0;
+        z-index: 5;
+        overflow: auto;
+        padding: clamp(24px, 7vw, 80px) clamp(20px, 12vw, 150px);
+        background:
+          radial-gradient(circle at 90% 0, rgba(200,50,50,.13), transparent 35%),
+          rgba(18,20,22,.985);
+        animation: ${APP_ID}-settings-in .18s ease both;
+      }
+      @keyframes ${APP_ID}-settings-in { from { opacity: 0; transform: translateY(6px); } }
+      .${APP_ID}-settings-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 15px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid var(--tti-line);
+      }
+      .${APP_ID}-settings h2 { font-size: 24px; }
+      .${APP_ID}-settings-intro {
+        max-width: 660px;
+        margin: 24px 0;
+        color: #aab0b7;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .${APP_ID}-settings-intro strong { color: #e5e7e9; }
+      .${APP_ID}-key-label {
+        display: block;
+        margin-bottom: 7px;
+        color: #c9cdd1;
+        font-size: 11px;
+        font-weight: 750;
+      }
+      .${APP_ID}-key-row {
+        display: flex;
+        min-height: 46px;
+        border: 1px solid var(--tti-line);
+        border-radius: 7px;
+        background: rgba(0,0,0,.25);
+      }
+      .${APP_ID}-key-row:focus-within {
+        border-color: rgba(200,50,50,.7);
+        box-shadow: 0 0 0 3px rgba(200,50,50,.1);
+      }
+      .${APP_ID}-key-row input {
+        flex: 1;
+        min-width: 0;
+        padding: 0 13px;
+        border: 0;
+        outline: 0;
+        color: #eef0f2;
+        background: transparent;
+        font: 600 13px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+        letter-spacing: .06em;
+      }
+      .${APP_ID}-reveal {
+        padding: 0 14px;
+        border: 0;
+        border-left: 1px solid var(--tti-line);
+        color: #a8aeb5;
+        background: transparent;
+        cursor: pointer;
+        font: 700 11px/1 inherit;
+      }
+      .${APP_ID}-privacy {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1px;
+        overflow: hidden;
+        margin-top: 20px;
+        border: 1px solid var(--tti-line);
+        border-radius: 7px;
+        background: var(--tti-line);
+      }
+      .${APP_ID}-privacy > div {
+        min-height: 66px;
+        padding: 13px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        background: #1a1c1f;
+      }
+      .${APP_ID}-privacy span { color: #777e87; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+      .${APP_ID}-privacy strong { color: #cfd3d7; font-size: 11px; }
+      .${APP_ID}-settings-actions {
+        margin-top: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .${APP_ID}-primary {
+        border-color: rgba(225,67,67,.5);
+        color: #fff;
+        background: linear-gradient(180deg, var(--tti-red), var(--tti-red-dark));
+      }
+      .${APP_ID}-danger {
+        border-color: rgba(200,50,50,.22);
+        color: #d77e7e;
+        background: rgba(200,50,50,.06);
+      }
+      .${APP_ID}-danger:hover { background: rgba(200,50,50,.12); }
+      @media (max-width: 640px) {
+        .${APP_ID}-launcher { right: 12px; bottom: 12px; min-height: 43px; padding-right: 13px; }
+        .${APP_ID}-panel { padding: 0; }
+        .${APP_ID}-shell { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; }
+        .${APP_ID}-header { min-height: 66px; padding: 11px 13px; }
+        .${APP_ID}-mark { width: 37px; height: 37px; }
+        .${APP_ID}-brand h1 { font-size: 17px; }
+        .${APP_ID}-readonly { display: none; }
+        .${APP_ID}-toolbar { padding: 10px 12px; }
+        .${APP_ID}-categories { padding: 0 12px 10px; }
+        .${APP_ID}-status { padding: 9px 12px; }
+        .${APP_ID}-cache { display: none !important; }
+        .${APP_ID}-content { padding: 11px 12px; }
+        .${APP_ID}-grid { grid-template-columns: 1fr; }
+        .${APP_ID}-footer { padding: 9px 12px; }
+        .${APP_ID}-settings { padding: 24px 16px; }
+        .${APP_ID}-privacy { grid-template-columns: 1fr; }
+        .${APP_ID}-settings-actions { align-items: stretch; flex-direction: column-reverse; }
+        .${APP_ID}-settings-actions button { width: 100%; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #${APP_ID}-root *, #${APP_ID}-root *::before, #${APP_ID}-root *::after {
+          scroll-behavior: auto !important;
+          animation-duration: .01ms !important;
+          transition-duration: .01ms !important;
+        }
+      }
+    `;
+    document.head.appendChild(style);
+
+    // Torn-native dark treatment. Kept as a final override so the functional
+    // layout remains resilient if Torn changes its surrounding page styles.
+    const nativeStyle = document.createElement("style");
+    nativeStyle.textContent = `
+      #${APP_ID}-root {
+        font-family: Arial, Helvetica, sans-serif;
+      }
+      .${APP_ID}-launcher { display: none !important; }
+      .${APP_ID}-panel {
+        padding: 64px 12px 28px;
+        align-items: start;
+        background: rgba(0, 0, 0, .62);
+        backdrop-filter: none;
+      }
+      .${APP_ID}-shell {
+        width: min(976px, 100%);
+        height: min(760px, calc(100vh - 92px));
+        border: 1px solid #111;
+        border-radius: 5px;
+        background: #242424;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, .75);
+        transform: none;
+      }
+      .${APP_ID}-panel.is-open .${APP_ID}-shell { transform: none; }
+      .${APP_ID}-header {
+        min-height: 39px;
+        padding: 0 8px 0 12px;
+        border-bottom: 1px solid #111;
+        background: linear-gradient(#444, #333);
+        box-shadow: inset 0 1px rgba(255,255,255,.08);
+      }
+      .${APP_ID}-mark, .${APP_ID}-eyebrow { display: none; }
+      .${APP_ID}-brand { gap: 0; }
+      .${APP_ID}-brand h1 {
+        color: #ddd;
+        font-size: 13px;
+        font-weight: bold;
+        letter-spacing: 0;
+        text-shadow: 0 1px #111;
+      }
+      .${APP_ID}-header-actions { gap: 5px; }
+      .${APP_ID}-readonly {
+        margin: 0 4px 0 0;
+        padding: 0;
+        border: 0;
+        color: #aaa;
+        background: transparent;
+        font-size: 10px;
+        font-weight: normal;
+      }
+      .${APP_ID}-readonly i {
+        width: 5px;
+        height: 5px;
+        background: #79a85b;
+        box-shadow: none;
+      }
+      .${APP_ID}-icon-button {
+        width: 27px;
+        height: 25px;
+        border: 1px solid #222;
+        border-radius: 3px;
+        color: #bbb;
+        background: linear-gradient(#4a4a4a, #333);
+        box-shadow: inset 0 1px rgba(255,255,255,.07);
+        font-size: 14px;
+        text-shadow: 0 1px #111;
+      }
+      .${APP_ID}-icon-button:hover {
+        color: #eee;
+        border-color: #111;
+        background: linear-gradient(#555, #393939);
+      }
+      .${APP_ID}-toolbar {
+        gap: 6px;
+        padding: 8px;
+        background: #2b2b2b;
+      }
+      .${APP_ID}-search {
+        height: 30px;
+        padding: 0 8px;
+        gap: 6px;
+        border: 1px solid #151515;
+        border-radius: 3px;
+        color: #888;
+        background: #1b1b1b;
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.6);
+      }
+      .${APP_ID}-search:focus-within {
+        border-color: #555;
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.6);
+      }
+      .${APP_ID}-search input {
+        color: #ccc;
+        font-size: 11px;
+      }
+      .${APP_ID}-search kbd { display: none; }
+      .${APP_ID}-refresh,
+      .${APP_ID}-primary,
+      .${APP_ID}-danger {
+        min-height: 30px;
+        padding: 0 10px;
+        border: 1px solid #151515;
+        border-radius: 3px;
+        color: #ccc;
+        background: linear-gradient(#4a4a4a, #333);
+        box-shadow: inset 0 1px rgba(255,255,255,.07);
+        font-size: 10px;
+        text-shadow: 0 1px #111;
+      }
+      .${APP_ID}-refresh:hover,
+      .${APP_ID}-primary:hover {
+        filter: none;
+        background: linear-gradient(#555, #393939);
+      }
+      .${APP_ID}-categories {
+        gap: 0;
+        padding: 0 8px 8px;
+        background: #2b2b2b;
+      }
+      .${APP_ID}-chip {
+        height: 28px;
+        margin-left: -1px;
+        padding: 0 8px;
+        gap: 4px;
+        border: 1px solid #171717;
+        border-radius: 0;
+        color: #999;
+        background: linear-gradient(#424242, #303030);
+        font-size: 10px;
+        font-weight: normal;
+        text-shadow: 0 1px #111;
+      }
+      .${APP_ID}-chip:first-child { margin-left: 0; border-radius: 3px 0 0 3px; }
+      .${APP_ID}-chip:last-child { border-radius: 0 3px 3px 0; }
+      .${APP_ID}-chip:hover {
+        color: #ccc;
+        background: linear-gradient(#4b4b4b, #353535);
+      }
+      .${APP_ID}-chip.is-active {
+        color: #eee;
+        border-color: #141414;
+        background: linear-gradient(#333, #252525);
+        box-shadow: inset 0 -2px #b52b2b, inset 0 1px rgba(255,255,255,.04);
+      }
+      .${APP_ID}-status {
+        min-height: 34px;
+        padding: 6px 9px;
+        border-top: 1px solid #111;
+        border-bottom: 1px solid #111;
+        background: linear-gradient(#393939, #303030);
+      }
+      .${APP_ID}-status strong { color: #ccc; font-size: 11px; }
+      .${APP_ID}-status span,
+      .${APP_ID}-cache strong { color: #888; font-size: 10px; }
+      .${APP_ID}-content {
+        padding: 8px;
+        background: #202020;
+      }
+      .${APP_ID}-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 5px;
+      }
+      .${APP_ID}-card {
+        min-height: 58px;
+        padding: 6px;
+        gap: 8px;
+        border: 1px solid #111;
+        border-radius: 3px;
+        background: linear-gradient(90deg, #303030, #292929);
+        box-shadow: inset 0 1px rgba(255,255,255,.035);
+      }
+      .${APP_ID}-card:not(.${APP_ID}-skeleton):hover {
+        transform: none;
+        border-color: #111;
+        background: linear-gradient(90deg, #353535, #2d2d2d);
+      }
+      .${APP_ID}-item-icon {
+        flex-basis: 42px;
+        width: 42px;
+        height: 42px;
+        border: 1px solid #151515;
+        border-radius: 2px;
+        color: #aaa;
+        background: linear-gradient(135deg, #3b3b3b, #242424);
+        box-shadow: inset 0 1px rgba(255,255,255,.04);
+        font-size: 17px;
+      }
+      .${APP_ID}-item-copy h3 {
+        margin-bottom: 5px;
+        color: #ccc;
+        font-size: 11px;
+        font-weight: bold;
+      }
+      .${APP_ID}-item-meta > span:first-child {
+        color: #777;
+        font-size: 9px;
+      }
+      .${APP_ID}-badge {
+        padding: 2px 4px;
+        border: 1px solid #171717;
+        border-radius: 2px;
+        color: #999;
+        background: #252525;
+        font-size: 8px;
+        letter-spacing: 0;
+      }
+      .${APP_ID}-badge.is-equipped {
+        color: #c87878;
+        background: #342424;
+      }
+      .${APP_ID}-amount small { color: #777; font-size: 8px; }
+      .${APP_ID}-amount strong { color: #ddd; font-size: 12px; }
+      .${APP_ID}-empty { min-height: 210px; }
+      .${APP_ID}-empty-icon {
+        width: 42px;
+        height: 42px;
+        margin-bottom: 10px;
+        border-color: #151515;
+        color: #888;
+        background: #292929;
+        font-size: 17px;
+      }
+      .${APP_ID}-empty h3 { color: #ccc; font-size: 12px; }
+      .${APP_ID}-empty p { color: #888; font-size: 10px; }
+      .${APP_ID}-footer {
+        min-height: 39px;
+        padding: 5px 8px;
+        border-top: 1px solid #111;
+        color: #777;
+        background: linear-gradient(#353535, #2b2b2b);
+      }
+      .${APP_ID}-pager button {
+        min-height: 26px;
+        border: 1px solid #171717;
+        border-radius: 3px;
+        color: #aaa;
+        background: linear-gradient(#444, #303030);
+        font-size: 9px;
+      }
+      .${APP_ID}-pager button:hover:not(:disabled) {
+        color: #ddd;
+        background: linear-gradient(#4d4d4d, #363636);
+      }
+      .${APP_ID}-settings {
+        padding: 48px max(18px, calc((100% - 640px) / 2));
+        background: #242424;
+      }
+      .${APP_ID}-settings-head {
+        padding: 8px 8px 8px 10px;
+        border: 1px solid #111;
+        background: linear-gradient(#444, #333);
+      }
+      .${APP_ID}-settings h2 {
+        color: #ddd;
+        font-size: 13px;
+        letter-spacing: 0;
+        text-shadow: 0 1px #111;
+      }
+      .${APP_ID}-settings-intro {
+        margin: 14px 0;
+        color: #aaa;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      .${APP_ID}-key-label { color: #bbb; font-size: 10px; }
+      .${APP_ID}-key-row {
+        min-height: 34px;
+        border-color: #111;
+        border-radius: 3px;
+        background: #181818;
+      }
+      .${APP_ID}-key-row:focus-within {
+        border-color: #555;
+        box-shadow: none;
+      }
+      .${APP_ID}-key-row input { color: #ccc; font-size: 11px; }
+      .${APP_ID}-privacy {
+        margin-top: 10px;
+        border-color: #111;
+        border-radius: 3px;
+        background: #111;
+      }
+      .${APP_ID}-privacy > div {
+        min-height: 52px;
+        padding: 9px;
+        background: #2b2b2b;
+      }
+      .${APP_ID}-privacy span { color: #777; font-size: 8px; }
+      .${APP_ID}-privacy strong { color: #aaa; font-size: 10px; }
+      .${APP_ID}-settings-actions { margin-top: 10px; }
+      .${APP_ID}-primary {
+        border-color: #641515;
+        background: linear-gradient(#b53232, #7e1e1e);
+      }
+      .${APP_ID}-danger {
+        border-color: #321717;
+        color: #b46f6f;
+        background: #2e2222;
+      }
+      @media (max-width: 640px) {
+        .${APP_ID}-panel { padding: 0; }
+        .${APP_ID}-shell {
+          width: 100%;
+          height: 100%;
+          border: 0;
+          border-radius: 0;
+        }
+        .${APP_ID}-grid { grid-template-columns: 1fr; }
+        .${APP_ID}-settings { padding: 18px 12px; }
+      }
+
+      /* Torn light theme. Theme is detected from Torn when the viewer opens
+         and whenever the site's theme classes change. */
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-panel {
+        background: rgba(20, 20, 20, .38);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-shell {
+        border-color: #aaa;
+        background: #ededed;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, .38);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-header {
+        border-bottom-color: #aaa;
+        background: linear-gradient(#fafafa, #dedede);
+        box-shadow: inset 0 1px #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-brand h1 {
+        color: #444;
+        text-shadow: 0 1px #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-readonly {
+        color: #666;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-icon-button,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-refresh {
+        border-color: #aaa;
+        color: #555;
+        background: linear-gradient(#fff, #d8d8d8);
+        box-shadow: inset 0 1px #fff;
+        text-shadow: 0 1px #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-icon-button:hover,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-refresh:hover {
+        color: #222;
+        background: linear-gradient(#fff, #e5e5e5);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-toolbar,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-categories {
+        background: #e7e7e7;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-search {
+        border-color: #aaa;
+        color: #777;
+        background: #fff;
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.12);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-search:focus-within {
+        border-color: #888;
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.12);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-search input {
+        color: #444;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-chip {
+        border-color: #aaa;
+        color: #666;
+        background: linear-gradient(#fafafa, #d8d8d8);
+        text-shadow: 0 1px #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-chip:hover {
+        color: #333;
+        background: linear-gradient(#fff, #e3e3e3);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-chip.is-active {
+        color: #333;
+        border-color: #999;
+        background: linear-gradient(#e1e1e1, #cfcfcf);
+        box-shadow: inset 0 -2px #b52b2b, inset 0 1px #f8f8f8;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-status {
+        border-color: #aaa;
+        background: linear-gradient(#f5f5f5, #dedede);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-status strong,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-cache strong {
+        color: #555;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-status span {
+        color: #777;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-content {
+        background: #f2f2f2;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-card {
+        border-color: #bbb;
+        background: linear-gradient(90deg, #fff, #e9e9e9);
+        box-shadow: inset 0 1px #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-card:not(.${APP_ID}-skeleton):hover {
+        border-color: #aaa;
+        background: linear-gradient(90deg, #fff, #f0f0f0);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-item-icon {
+        border-color: #bbb;
+        color: #666;
+        background: linear-gradient(135deg, #fff, #ddd);
+        box-shadow: inset 0 1px #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-item-copy h3,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-amount strong {
+        color: #444;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-item-meta > span:first-child,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-amount small {
+        color: #888;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-badge {
+        border-color: #bbb;
+        color: #666;
+        background: #e4e4e4;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-badge.is-equipped {
+        color: #9e3434;
+        background: #f1dddd;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-skeleton span {
+        background: linear-gradient(90deg, #ddd 25%, #f2f2f2 50%, #ddd 75%);
+        background-size: 220% 100%;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-empty-icon {
+        border-color: #bbb;
+        color: #777;
+        background: #e5e5e5;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-empty h3 {
+        color: #555;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-empty p {
+        color: #777;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-footer {
+        border-color: #aaa;
+        color: #777;
+        background: linear-gradient(#eee, #d7d7d7);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-pager button {
+        border-color: #aaa;
+        color: #555;
+        background: linear-gradient(#fff, #d8d8d8);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-pager button:hover:not(:disabled) {
+        color: #222;
+        background: linear-gradient(#fff, #e6e6e6);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-settings {
+        background: #ededed;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-settings-head {
+        border-color: #aaa;
+        background: linear-gradient(#fafafa, #dedede);
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-settings h2 {
+        color: #444;
+        text-shadow: 0 1px #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-settings-intro,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-key-label {
+        color: #555;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-settings-intro strong {
+        color: #333;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-key-row {
+        border-color: #aaa;
+        background: #fff;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-key-row input {
+        color: #444;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-reveal {
+        border-left-color: #bbb;
+        color: #555;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-privacy {
+        border-color: #bbb;
+        background: #bbb;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-privacy > div {
+        background: #f7f7f7;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-privacy span {
+        color: #777;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-privacy strong {
+        color: #555;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-danger {
+        border-color: #c6a3a3;
+        color: #933;
+        background: #f2e4e4;
+      }
+
+      /* Compact layout and native-control sampling, following the Activity Log
+         Filter pattern. */
+      #${APP_ID}-root {
+        --tti-native-height: 34px;
+        --tti-native-font-size: 12px;
+        --tti-native-font-family: Arial, sans-serif;
+        --tti-native-font-weight: 400;
+        --tti-native-radius: 4px;
+        --tti-native-bg: linear-gradient(#4a4a4a, #333);
+        --tti-native-border: 1px solid #171717;
+        --tti-native-shadow: inset 0 1px rgba(255,255,255,.06);
+        --tti-native-color: #ccc;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light {
+        --tti-native-bg: linear-gradient(#fff, #ddd);
+        --tti-native-border: 1px solid #aaa;
+        --tti-native-shadow: inset 0 1px #fff;
+        --tti-native-color: #555;
+      }
+      .${APP_ID}-panel { padding-top: 82px; }
+      .${APP_ID}-shell {
+        width: min(720px, 100%);
+        height: min(580px, calc(100vh - 112px));
+      }
+      .${APP_ID}-header { min-height: 36px; }
+      .${APP_ID}-toolbar {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) 170px auto;
+        align-items: center;
+        gap: 7px;
+        padding: 8px;
+      }
+      .${APP_ID}-search,
+      .${APP_ID}-category-select,
+      .${APP_ID}-refresh {
+        height: var(--tti-native-height);
+        min-height: var(--tti-native-height);
+        color: var(--tti-native-color);
+        background: var(--tti-native-bg);
+        border: var(--tti-native-border);
+        border-radius: var(--tti-native-radius);
+        box-shadow: var(--tti-native-shadow);
+        font-family: var(--tti-native-font-family);
+        font-size: var(--tti-native-font-size);
+        font-weight: var(--tti-native-font-weight);
+      }
+      .${APP_ID}-search {
+        padding: 0 9px;
+      }
+      .${APP_ID}-search input {
+        font-family: var(--tti-native-font-family);
+        font-size: var(--tti-native-font-size);
+        font-weight: var(--tti-native-font-weight);
+      }
+      .${APP_ID}-category-control { min-width: 0; }
+      .${APP_ID}-category-select {
+        width: 100%;
+        padding: 0 30px 0 10px;
+        outline: 0;
+        cursor: pointer;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-dark .${APP_ID}-category-select {
+        color-scheme: dark;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-category-select {
+        color-scheme: light;
+      }
+      .${APP_ID}-refresh {
+        padding: 0 12px;
+        white-space: nowrap;
+      }
+      .${APP_ID}-categories { display: none !important; }
+      .${APP_ID}-status { min-height: 32px; }
+      .${APP_ID}-content { padding: 7px; }
+      .${APP_ID}-grid { gap: 5px; }
+      .${APP_ID}-card { min-height: 54px; }
+      .${APP_ID}-item-icon {
+        flex-basis: 38px;
+        width: 38px;
+        height: 38px;
+      }
+      .${APP_ID}-footer { min-height: 36px; }
+      .${APP_ID}-icon-button {
+        color: var(--tti-native-color);
+        background: var(--tti-native-bg);
+        border: var(--tti-native-border);
+        border-radius: var(--tti-native-radius);
+        box-shadow: var(--tti-native-shadow);
+      }
+      .${APP_ID}-settings {
+        padding: 28px max(16px, calc((100% - 560px) / 2));
+      }
+      .${APP_ID}-settings-intro { margin-bottom: 10px; }
+      .${APP_ID}-create-key {
+        min-height: var(--tti-native-height);
+        margin: 0 0 13px;
+        padding: 0 11px;
+        display: inline-flex;
+        align-items: center;
+        color: var(--tti-native-color);
+        background: var(--tti-native-bg);
+        border: var(--tti-native-border);
+        border-radius: var(--tti-native-radius);
+        box-shadow: var(--tti-native-shadow);
+        font-family: var(--tti-native-font-family);
+        font-size: var(--tti-native-font-size);
+        font-weight: var(--tti-native-font-weight);
+        text-decoration: none;
+      }
+      .${APP_ID}-create-key:hover { filter: brightness(1.06); }
+      .${APP_ID}-sr-only {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        padding: 0 !important;
+        margin: -1px !important;
+        overflow: hidden !important;
+        clip: rect(0, 0, 0, 0) !important;
+        white-space: nowrap !important;
+        border: 0 !important;
+      }
+      @media (max-width: 640px) {
+        .${APP_ID}-panel { padding: 12px; }
+        .${APP_ID}-shell {
+          width: min(480px, calc(100% - 8px));
+          height: min(430px, calc(100vh - 24px));
+        }
+        .${APP_ID}-toolbar {
+          grid-template-columns: minmax(0, 1fr) 135px auto;
+          gap: 5px;
+        }
+        .${APP_ID}-refresh { padding: 0 9px; }
+        .${APP_ID}-refresh { font-size: 0; }
+        .${APP_ID}-refresh span { font-size: 14px; }
+      }
+
+      /* Final density pass: compact, with Torn-like control radii. */
+      #${APP_ID}-root .${APP_ID}-panel { padding: 28px 12px; }
+      #${APP_ID}-root .${APP_ID}-shell {
+        width: min(600px, calc(100% - 24px));
+        height: min(460px, calc(100vh - 56px));
+      }
+      #${APP_ID}-root .${APP_ID}-shell,
+      #${APP_ID}-root .${APP_ID}-icon-button,
+      #${APP_ID}-root .${APP_ID}-search,
+      #${APP_ID}-root .${APP_ID}-category-select,
+      #${APP_ID}-root .${APP_ID}-refresh,
+      #${APP_ID}-root .${APP_ID}-card,
+      #${APP_ID}-root .${APP_ID}-item-icon,
+      #${APP_ID}-root .${APP_ID}-badge,
+      #${APP_ID}-root .${APP_ID}-pager button,
+      #${APP_ID}-root .${APP_ID}-settings-head,
+      #${APP_ID}-root .${APP_ID}-key-row,
+      #${APP_ID}-root .${APP_ID}-privacy,
+      #${APP_ID}-root .${APP_ID}-privacy > div,
+      #${APP_ID}-root .${APP_ID}-primary,
+      #${APP_ID}-root .${APP_ID}-danger,
+      #${APP_ID}-root .${APP_ID}-create-key {
+        border-radius: var(--tti-native-radius, 5px) !important;
+      }
+      #${APP_ID}-root .${APP_ID}-shell {
+        border-radius: 6px !important;
+      }
+      #${APP_ID}-root .${APP_ID}-header,
+      #${APP_ID}-root .${APP_ID}-settings-head {
+        border-radius: 5px 5px 0 0 !important;
+      }
+      #${APP_ID}-root .${APP_ID}-privacy > div {
+        border-radius: 0 !important;
+      }
+      #${APP_ID}-root .${APP_ID}-header {
+        min-height: 32px;
+        padding-left: 9px;
+      }
+      #${APP_ID}-root .${APP_ID}-title,
+      #${APP_ID}-root .${APP_ID}-settings-title {
+        all: unset;
+        position: static !important;
+        inset: auto !important;
+        display: block;
+        margin: 0;
+        padding: 0;
+        overflow: visible;
+        color: #ddd;
+        font: bold 12px/18px Arial, sans-serif;
+        letter-spacing: 0;
+        text-indent: 0;
+        text-shadow: 0 1px #111;
+        transform: none !important;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-title,
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-settings-title {
+        color: #444;
+        text-shadow: 0 1px #fff;
+      }
+      #${APP_ID}-root .${APP_ID}-icon-button {
+        width: 24px;
+        height: 24px;
+        font-size: 12px;
+      }
+      #${APP_ID}-root .${APP_ID}-toolbar {
+        grid-template-columns: minmax(150px, 1fr) 145px auto;
+        gap: 5px;
+        padding: 6px;
+      }
+      #${APP_ID}-root .${APP_ID}-search,
+      #${APP_ID}-root .${APP_ID}-category-select,
+      #${APP_ID}-root .${APP_ID}-refresh {
+        height: 28px;
+        min-height: 28px;
+        font-size: 11px;
+      }
+      #${APP_ID}-root .${APP_ID}-status {
+        min-height: 28px;
+        padding: 4px 7px;
+      }
+      #${APP_ID}-root .${APP_ID}-content { padding: 5px; }
+      #${APP_ID}-root .${APP_ID}-card {
+        min-height: 46px;
+        padding: 4px 5px;
+      }
+      #${APP_ID}-root .${APP_ID}-item-icon {
+        flex-basis: 34px;
+        width: 34px;
+        height: 34px;
+        font-size: 14px;
+      }
+      #${APP_ID}-root .${APP_ID}-item-copy h3 {
+        margin-bottom: 3px;
+        font-size: 10px;
+      }
+      #${APP_ID}-root .${APP_ID}-footer {
+        min-height: 31px;
+        padding: 3px 6px;
+      }
+      #${APP_ID}-root .${APP_ID}-pager button {
+        min-height: 23px;
+        padding: 0 7px;
+      }
+      #${APP_ID}-root .${APP_ID}-settings {
+        padding: 14px max(12px, calc((100% - 500px) / 2));
+      }
+      #${APP_ID}-root .${APP_ID}-settings-head { padding: 6px 7px; }
+      #${APP_ID}-root .${APP_ID}-settings-title { font-size: 14px; line-height: 20px; }
+      #${APP_ID}-root .${APP_ID}-settings-intro {
+        margin: 9px 0;
+        font-size: 10px;
+      }
+      #${APP_ID}-root .${APP_ID}-create-key {
+        min-height: 28px !important;
+        margin-bottom: 10px;
+        padding: 0 10px;
+        color: #fff !important;
+        background: #8f3431 !important;
+        border: 1px solid #bd4a45 !important;
+        box-shadow: none !important;
+        font-size: 10px;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      #${APP_ID}-root .${APP_ID}-key-label { margin-bottom: 4px; }
+      #${APP_ID}-root .${APP_ID}-key-row { min-height: 29px; }
+      #${APP_ID}-root .${APP_ID}-key-row input { font-size: 10px; }
+      #${APP_ID}-root .${APP_ID}-privacy { margin-top: 8px; }
+      #${APP_ID}-root .${APP_ID}-privacy > div {
+        min-height: 39px;
+        padding: 6px 8px;
+        gap: 3px;
+      }
+      #${APP_ID}-root .${APP_ID}-settings-actions { margin-top: 8px; }
+      #${APP_ID}-root .${APP_ID}-settings-actions button {
+        min-height: 27px;
+        padding: 0 9px;
+        font-size: 10px;
+      }
+      @media (max-width: 640px) {
+        #${APP_ID}-root .${APP_ID}-panel { padding: 12px; }
+        #${APP_ID}-root .${APP_ID}-shell {
+          width: min(480px, calc(100% - 8px));
+          height: min(420px, calc(100vh - 24px));
+        }
+      }
+
+      /* Content-sized utility window: no empty full-height canvas. */
+      #${APP_ID}-root .${APP_ID}-panel {
+        padding: 54px 12px 12px;
+        align-items: start;
+        background: rgba(0, 0, 0, .18);
+      }
+      #${APP_ID}-root .${APP_ID}-shell {
+        width: min(460px, calc(100% - 24px));
+        height: auto;
+        max-height: calc(100vh - 66px);
+      }
+      #${APP_ID}-root .${APP_ID}-content {
+        flex: 0 1 auto;
+        max-height: 310px;
+        overflow: auto;
+      }
+      #${APP_ID}-root .${APP_ID}-empty { min-height: 115px; }
+      #${APP_ID}-root .${APP_ID}-settings-shell {
+        width: min(420px, calc(100% - 24px));
+        height: auto;
+        max-height: calc(100vh - 66px);
+        overflow: auto;
+      }
+      #${APP_ID}-root .${APP_ID}-settings {
+        position: static;
+        inset: auto;
+        overflow: visible;
+        padding: 10px;
+        animation: none;
+      }
+      #${APP_ID}-root .${APP_ID}-settings-head { margin: -10px -10px 8px; }
+      #${APP_ID}-root .${APP_ID}-settings-intro {
+        max-width: none;
+        line-height: 1.4;
+      }
+      #${APP_ID}-root .${APP_ID}-privacy {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      @media (max-width: 520px) {
+        #${APP_ID}-root .${APP_ID}-panel { padding: 12px 6px; }
+        #${APP_ID}-root .${APP_ID}-shell,
+        #${APP_ID}-root .${APP_ID}-settings-shell {
+          width: min(400px, calc(100% - 8px));
+          height: auto;
+          max-height: calc(100vh - 24px);
+        }
+        #${APP_ID}-root .${APP_ID}-toolbar {
+          grid-template-columns: minmax(130px, 1fr) 120px auto;
+        }
+        #${APP_ID}-root .${APP_ID}-grid { grid-template-columns: 1fr; }
+        #${APP_ID}-root .${APP_ID}-content { max-height: 300px; }
+      }
+
+      /* Torn control finish: sampling can report a square radius on some
+         pages, so interactive controls use a stable radius of their own. */
+      #${APP_ID}-root button,
+      #${APP_ID}-root select,
+      #${APP_ID}-root .${APP_ID}-create-key,
+      #${APP_ID}-root .${APP_ID}-key-row {
+        border-radius: 5px !important;
+      }
+      #${APP_ID}-root button,
+      #${APP_ID}-root .${APP_ID}-create-key {
+        text-shadow: none !important;
+      }
+      #${APP_ID}-root .${APP_ID}-danger {
+        color: #8b3030 !important;
+        background: #f7eaea !important;
+        border: 1px solid #d8aaaa !important;
+        box-shadow: none !important;
+        text-decoration: none !important;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-dark .${APP_ID}-danger {
+        color: #e1a0a0 !important;
+        background: #352525 !important;
+        border-color: #734141 !important;
+      }
+      #${APP_ID}-root .${APP_ID}-primary {
+        text-shadow: none !important;
+      }
+
+      /* Stable typography and real Torn item artwork. */
+      #${APP_ID}-root,
+      #${APP_ID}-root * {
+        font-family: Arial, Helvetica, sans-serif !important;
+        font-style: normal;
+      }
+      #${APP_ID}-root button,
+      #${APP_ID}-root input,
+      #${APP_ID}-root select {
+        font-size: 11px !important;
+        font-weight: 400 !important;
+        letter-spacing: 0;
+      }
+      #${APP_ID}-root .${APP_ID}-primary,
+      #${APP_ID}-root .${APP_ID}-create-key {
+        font-weight: 700 !important;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-category-select {
+        color: #444 !important;
+        background: linear-gradient(#fff, #e4e4e4) !important;
+        border-color: #aaa !important;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-dark .${APP_ID}-category-select {
+        color: #d5d5d5 !important;
+        background: linear-gradient(#3b3b3b, #292929) !important;
+        border-color: #151515 !important;
+      }
+      #${APP_ID}-root .${APP_ID}-item-icon {
+        overflow: hidden;
+        padding: 2px;
+      }
+      #${APP_ID}-root .${APP_ID}-item-icon img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        border: 0;
+        border-radius: 0 !important;
+        object-fit: contain;
+      }
+      #${APP_ID}-root .${APP_ID}-item-icon.is-missing {
+        background: transparent;
+      }
+      #${APP_ID}-root .${APP_ID}-version {
+        margin-left: 6px;
+        color: #888;
+        font-size: 9px;
+        white-space: nowrap;
+      }
+      #${APP_ID}-root .${APP_ID}-pager button {
+        min-width: 82px;
+      }
+    `;
+    document.head.appendChild(nativeStyle);
+  }
+
+  function isOfficialItemsLink(anchor) {
+    if (!anchor || anchor.closest(`#${APP_ID}-root`) || anchor.closest(`.${APP_ID}-native-nav`)) {
+      return false;
+    }
+    try {
+      const url = new URL(anchor.href, location.href);
+      const path = url.pathname.toLowerCase();
+      const labels = [
+        anchor.textContent,
+        anchor.getAttribute("aria-label"),
+        anchor.getAttribute("title"),
+        anchor.querySelector("img")?.getAttribute("alt"),
+      ]
+        .filter(Boolean)
+        .map((label) => String(label).replace(/\s+/g, " ").trim());
+      const isNavigationLabel = labels.some((label) => /^items$/i.test(label));
+      return (
+        url.origin === location.origin &&
+        isNavigationLabel &&
+        (path.endsWith("/item.php") ||
+          path.endsWith("/items.php") ||
+          path.endsWith("/inventory.php"))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function replaceNavigationLabel(anchor) {
+    const walker = document.createTreeWalker(anchor, NodeFilter.SHOW_TEXT);
+    let replaced = false;
+    let node;
+    while ((node = walker.nextNode())) {
+      if (/\bitems\b/i.test(node.nodeValue || "")) {
+        node.nodeValue = node.nodeValue.replace(/\bitems\b/i, "Inventory");
+        replaced = true;
+      }
+    }
+
+    if (!replaced) {
+      const label = [...anchor.querySelectorAll("span, div")].find(
+        (element) => element.children.length === 0 && /^items$/i.test(element.textContent.trim()),
+      );
+      if (label) {
+        label.textContent = "Inventory";
+        replaced = true;
+      }
+    }
+
+    if (!replaced) {
+      const label = document.createElement("span");
+      label.textContent = "Inventory";
+      anchor.appendChild(label);
+    }
+
+    anchor.setAttribute("aria-label", "Open travel inventory");
+    anchor.setAttribute("title", "Inventory");
+  }
+
+  function installNavigationButton() {
+    const itemLinks = [...document.querySelectorAll("a[href]")].filter(isOfficialItemsLink);
+
+    for (const itemLink of itemLinks) {
+      const sourceNode = itemLink.parentElement?.tagName === "LI" ? itemLink.parentElement : itemLink;
+      if (sourceNode.nextElementSibling?.classList.contains(`${APP_ID}-native-nav`)) continue;
+
+      const clone = sourceNode.cloneNode(true);
+      clone.classList.add(`${APP_ID}-native-nav`);
+      clone.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
+      clone.querySelectorAll("img").forEach((image) => {
+        image.alt = "";
+        image.setAttribute("aria-hidden", "true");
+      });
+      clone.removeAttribute("id");
+
+      const anchor = clone.matches("a[href]") ? clone : clone.querySelector("a[href]");
+      if (!anchor) continue;
+
+      anchor.href = `#${APP_ID}-inventory`;
+      anchor.removeAttribute("target");
+      anchor.removeAttribute("rel");
+      replaceNavigationLabel(anchor);
+      anchor.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openPanel();
+      });
+
+      sourceNode.insertAdjacentElement("afterend", clone);
+    }
+  }
+
+  function install() {
+    if (document.getElementById(`${APP_ID}-root`)) return;
+
+    installStyles();
+    root = document.createElement("div");
+    root.id = `${APP_ID}-root`;
+    root.innerHTML = `
+      <section class="${APP_ID}-panel" role="dialog" aria-modal="true" aria-label="Personal Inventory" aria-hidden="true"></section>
+    `;
+    document.body.appendChild(root);
+    syncTheme();
+
+    panel = root.querySelector(`.${APP_ID}-panel`);
+    panel.addEventListener("click", (event) => {
+      if (event.target === panel) {
+        closePanel();
+        return;
+      }
+      handleClick(event);
+    });
+    panel.addEventListener("input", (event) => {
+      if (event.target.matches(`.${APP_ID}-search input`)) {
+        state.query = event.target.value;
+        render();
+        requestAnimationFrame(() => {
+          const input = panel.querySelector(`.${APP_ID}-search input`);
+          input?.focus();
+          input?.setSelectionRange(state.query.length, state.query.length);
+        });
+      }
+    });
+    panel.addEventListener("change", (event) => {
+      if (!event.target.matches(`.${APP_ID}-category-select`)) return;
+      state.category = event.target.value;
+      state.offset = 0;
+      state.query = "";
+      state.items = [];
+      state.total = 0;
+      loadInventory();
+    });
+    panel.addEventListener(
+      "error",
+      (event) => {
+        if (!event.target.matches(`.${APP_ID}-item-icon img`)) return;
+        const holder = event.target.closest(`.${APP_ID}-item-icon`);
+        holder?.classList.add("is-missing");
+        event.target.remove();
+      },
+      true,
+    );
+
+    document.addEventListener("keydown", (event) => {
+      if (!state.open && event.altKey && event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        openPanel();
+        return;
+      }
+      if (!state.open) return;
+      if (event.key === "Escape") {
+        if (state.settingsOpen && getApiKey()) {
+          state.settingsOpen = false;
+          render();
+        } else {
+          closePanel();
+        }
+      } else if (
+        event.key === "/" &&
+        !state.settingsOpen &&
+        !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)
+      ) {
+        event.preventDefault();
+        panel.querySelector(`.${APP_ID}-search input`)?.focus();
+      }
+    });
+
+    installNavigationButton();
+
+    navigationObserver = new MutationObserver(() => {
+      clearTimeout(navigationTimer);
+      navigationTimer = setTimeout(() => {
+        installNavigationButton();
+        syncTheme();
+      }, 120);
+    });
+    navigationObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+
+    if (typeof GM_registerMenuCommand === "function") {
+      GM_registerMenuCommand("View travel inventory", openPanel);
+    }
+
+    render();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", install, { once: true });
+  } else {
+    install();
+  }
+})();
