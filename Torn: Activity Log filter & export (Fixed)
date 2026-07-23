@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Activity Log Filter & CSV
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.1.3
+// @version      1.1.5
 // @description  Desktop search, date filters, reverse view, and CSV export for currently loaded Torn activity logs
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -21,14 +21,13 @@
     const STYLE_ID = 'cowboyup-activity-log-styles';
     const STORAGE_KEY = 'cowboyup.activityLogFilter.lite.v1';
     const DESKTOP_QUERY = '(min-width: 1100px)';
-    const SCRIPT_VERSION = '1.1.3';
+    const SCRIPT_VERSION = '1.1.5';
 
     const state = {
         query: '',
         from: '',
         to: '',
         dateLabel: 'All time',
-        categories: new Set(),
         sort: 'newest',
         theme: ''
     };
@@ -37,6 +36,7 @@
     let controlStyleCache = null;
     let pageObserver = null;
     let interactionsBound = false;
+    let uiMounted = false;
     const desktopMedia = matchMedia(DESKTOP_QUERY);
 
     function isLogPage() {
@@ -173,7 +173,6 @@
             state.from = typeof saved.from === 'string' ? saved.from : '';
             state.to = typeof saved.to === 'string' ? saved.to : '';
             state.dateLabel = typeof saved.dateLabel === 'string' ? saved.dateLabel : 'All time';
-            state.categories = new Set(Array.isArray(saved.categories) ? saved.categories : []);
             state.sort = saved.sort === 'oldest' ? 'oldest' : 'newest';
             state.theme = saved.theme === 'light' || saved.theme === 'dark' ? saved.theme : '';
         } catch (error) {
@@ -188,7 +187,6 @@
                 from: state.from,
                 to: state.to,
                 dateLabel: state.dateLabel,
-                categories: [...state.categories],
                 sort: state.sort,
                 theme: state.theme
             }));
@@ -332,7 +330,7 @@
                 --alf-field:#fff;--alf-shadow:0 2px 6px rgba(0,0,0,.18)
             }
             #${UI_ID} *,#${UI_ID} *::before,#${UI_ID} *::after{box-sizing:border-box}
-            #${UI_ID} .alf-toolbar{width:100%;display:grid;grid-template-columns:minmax(220px,1fr) minmax(160px,240px) auto auto auto;gap:8px;align-items:center}
+            #${UI_ID} .alf-toolbar{width:100%;display:grid;grid-template-columns:minmax(220px,1fr) minmax(160px,240px) auto auto;gap:8px;align-items:center}
             #${UI_ID} button,#${UI_ID} input{font-family:var(--alf-native-font-family);font-size:var(--alf-native-font-size);font-weight:var(--alf-native-font-weight)}
             #${UI_ID} .alf-search-wrap{position:relative;min-width:0}
             #${UI_ID} .alf-search-icon{position:absolute;left:12px;top:50%;translate:0 -50%;color:var(--alf-muted);font-size:17px;pointer-events:none}
@@ -344,7 +342,6 @@
             #${UI_ID} .alf-control:hover,#${UI_ID} .alf-control[aria-expanded="true"]{background:var(--alf-control-hover)}
             #${UI_ID} .alf-date-button{width:100%;overflow:hidden}
             #${UI_ID} .alf-date-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-            #${UI_ID} .alf-count-badge{min-width:20px;height:20px;padding:0 6px;display:inline-grid;place-items:center;color:#fff;background:var(--alf-red);border-radius:10px;font-size:11px}
             #${UI_ID} .alf-reverse-button{min-width:132px}
             #${UI_ID} .alf-secondary{min-height:28px;margin-top:9px;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
             #${UI_ID} .alf-chips{min-width:0;display:flex;flex-wrap:wrap;gap:6px}
@@ -381,15 +378,7 @@
             #${UI_ID} .alf-popover-footer{padding:12px 14px;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--alf-soft)}
             #${UI_ID} .alf-btn{height:34px;padding:0 14px;color:var(--alf-text);background:var(--alf-control);border:1px solid var(--alf-border);border-radius:4px;cursor:pointer}
             #${UI_ID} .alf-primary{color:#fff;background:#8f3431;border-color:#c14c47}
-            #${UI_ID} .alf-filter-popover{width:320px;right:130px;padding:15px}
-            #${UI_ID} .alf-filter-title{margin-bottom:12px;font-size:14px;font-weight:bold}
-            #${UI_ID} .alf-category-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:220px;overflow:auto}
-            #${UI_ID} .alf-check{padding:7px;display:flex;align-items:center;gap:8px;background:var(--alf-input);border:1px solid var(--alf-soft);border-radius:4px;cursor:pointer}
-            #${UI_ID} .alf-check input{accent-color:var(--alf-red)}
-            #${UI_ID} .alf-check:has(input:disabled){opacity:.55;cursor:not-allowed}
-            #${UI_ID} .alf-category-warning{margin-bottom:12px;padding:9px 10px;color:#d9a19e;background:rgba(185,67,62,.13);border:1px solid rgba(185,67,62,.4);border-radius:4px;font-size:11px;line-height:1.45}
             #${UI_ID} [hidden]{display:none!important}
-            #${UI_ID} .alf-filter-help{margin-top:13px;padding-top:12px;color:var(--alf-note);border-top:1px solid var(--alf-soft);font-size:11px;line-height:1.55}
             #${UI_ID} code{color:var(--alf-red)}
             .alf-hidden{display:none!important}
             .alf-native-search-hidden{display:none!important}
@@ -406,7 +395,6 @@
                     <button class="alf-clear-search" type="button" title="Clear search">×</button>
                 </div>
                 <button class="alf-control alf-date-button" type="button" aria-expanded="false">▣ <span class="alf-date-label">All time</span>⌄</button>
-                <button class="alf-control alf-filter-button" type="button" aria-expanded="false">▽ Filters <span class="alf-count-badge">0</span></button>
                 <button class="alf-control alf-reverse-button" type="button">↕ Reverse View</button>
                 <button class="alf-control alf-export-button" type="button">⇩ Export CSV</button>
             </div>
@@ -461,12 +449,6 @@
                     </div>
                 </div>
             </div>
-            <div class="alf-popover alf-filter-popover">
-                <div class="alf-filter-title">Loaded categories</div>
-                <div class="alf-category-warning" role="status" hidden>Torn's category labels could not be read reliably. Category filters are temporarily bypassed.</div>
-                <div class="alf-category-list"></div>
-                <div class="alf-filter-help">Search tips: <code>"exact phrase"</code>, <code>-excluded</code>, <code>category:combat</code>, <code>has:money</code>.</div>
-            </div>
         `;
     }
 
@@ -504,32 +486,30 @@
             text,
             timeText,
             date: findSemanticDate(row, timeElement) || parseDisplayedDate(timeText),
-            category: categoryText || 'Other',
-            categoryDetected: Boolean(categoryText)
+            category: categoryText || 'Other'
         };
     }
 
-    function categoriesAreReliable(infos) {
-        if (infos.length < 5) return true;
-        const detected = infos.filter((info) => info.categoryDetected).length;
-        return detected / infos.length >= 0.2;
-    }
-
     function parseQuery(query) {
-        const result = { includes: [], excludes: [], categories: [], has: [] };
+        const result = { includes: [], excludes: [], has: [], notHas: [] };
         const matcher = /"([^"]+)"|(\S+)/g;
         let match;
         while ((match = matcher.exec(query))) {
             let token = match[1] ?? match[2];
             const quoted = match[1] != null;
+            let negated = false;
             if (!quoted && token.startsWith('-') && token.length > 1) {
-                result.excludes.push(token.slice(1).toLowerCase());
-                continue;
+                negated = true;
+                token = token.slice(1);
             }
             const operator = !quoted && token.match(/^([a-z]+):(.*)$/i);
-            if (operator?.[1].toLowerCase() === 'category') result.categories.push(operator[2].toLowerCase());
-            else if (operator?.[1].toLowerCase() === 'has') result.has.push(operator[2].toLowerCase());
-            else result.includes.push(token.toLowerCase());
+            if (operator?.[1].toLowerCase() === 'has' && operator[2]) {
+                (negated ? result.notHas : result.has).push(operator[2].toLowerCase());
+            } else if (negated) {
+                result.excludes.push(token.toLowerCase());
+            } else {
+                result.includes.push(token.toLowerCase());
+            }
         }
         return result;
     }
@@ -543,13 +523,12 @@
         return text.includes(filter) || category.includes(filter);
     }
 
-    function rowMatches(info, query, categoriesReliable = true) {
+    function rowMatches(info, query) {
         const haystack = (info.text + ' ' + info.category + ' ' + info.timeText).toLowerCase();
         if (query.includes.some((term) => !haystack.includes(term))) return false;
         if (query.excludes.some((term) => haystack.includes(term))) return false;
-        if (categoriesReliable && query.categories.length && !query.categories.some((term) => info.category.toLowerCase().includes(term))) return false;
         if (query.has.some((filter) => !matchesHas(info, filter))) return false;
-        if (categoriesReliable && state.categories.size && ![...state.categories].some((category) => category.toLowerCase() === info.category.toLowerCase())) return false;
+        if (query.notHas.some((filter) => matchesHas(info, filter))) return false;
 
         const from = parseDateValue(state.from);
         const to = parseDateValue(state.to, true);
@@ -583,54 +562,14 @@
         }
     }
 
-    function refreshCategories(ui, infos, categoriesReliable) {
-        ui.querySelector('.alf-category-warning').hidden = categoriesReliable;
-        const categories = [...new Set([
-            ...state.categories,
-            ...infos.filter((info) => info.categoryDetected).map((info) => info.category)
-        ])].sort((a, b) => a.localeCompare(b));
-        const list = ui.querySelector('.alf-category-list');
-        const signature = categories.join('\u0000') + '|' + String(categoriesReliable);
-        if (list.dataset.signature === signature) {
-            list.querySelectorAll('input').forEach((input) => {
-                input.checked = state.categories.has(input.value);
-                input.disabled = !categoriesReliable;
-            });
-            return;
-        }
-        list.dataset.signature = signature;
-        list.replaceChildren();
-        for (const category of categories) {
-            const label = document.createElement('label');
-            label.className = 'alf-check';
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.value = category;
-            checkbox.checked = state.categories.has(category);
-            checkbox.disabled = !categoriesReliable;
-            const text = document.createElement('span');
-            text.textContent = category;
-            label.append(checkbox, text);
-            list.append(label);
-        }
-        if (!categories.length && categoriesReliable) {
-            const empty = document.createElement('span');
-            empty.textContent = 'Categories appear when logs load.';
-            empty.style.color = '#888';
-            list.append(empty);
-        }
-    }
-
     function renderChips(ui) {
         const chips = ui.querySelector('.alf-chips');
         const entries = [];
         if (state.query) entries.push({ type: 'query', value: '', label: 'Search: ' + state.query });
         if (state.dateLabel !== 'All time') entries.push({ type: 'date', value: '', label: state.dateLabel });
-        state.categories.forEach((category) => entries.push({ type: 'category', value: category, label: category }));
         const signature = JSON.stringify(entries);
         if (chips.dataset.signature === signature) {
             ui.querySelector('.alf-clear-all').hidden = entries.length === 0;
-            ui.querySelector('.alf-count-badge').textContent = String(state.categories.size);
             return;
         }
         chips.dataset.signature = signature;
@@ -645,12 +584,11 @@
             chips.append(button);
         }
         ui.querySelector('.alf-clear-all').hidden = entries.length === 0;
-        ui.querySelector('.alf-count-badge').textContent = String(state.categories.size);
     }
 
     function applyFilters() {
         renderScheduled = false;
-        if (!matchMedia(DESKTOP_QUERY).matches) return;
+        if (!desktopMedia.matches) return;
         const root = document.querySelector(ROOT_SELECTOR);
         const ui = document.getElementById(UI_ID);
         if (!root || !ui) return;
@@ -679,15 +617,13 @@
 
         const query = parseQuery(state.query);
         const infos = findRows(root).map(rowInfo);
-        const categoriesReliable = categoriesAreReliable(infos);
         let visible = 0;
         for (const info of infos) {
-            const matches = rowMatches(info, query, categoriesReliable);
+            const matches = rowMatches(info, query);
             info.row.classList.toggle('alf-hidden', !matches);
             if (matches) visible += 1;
         }
         sortRows(infos);
-        refreshCategories(ui, infos, categoriesReliable);
         renderChips(ui);
         ui.querySelector('.alf-meta').textContent = visible + ' of ' + infos.length + ' currently loaded';
     }
@@ -709,7 +645,6 @@
         state.from = '';
         state.to = '';
         state.dateLabel = 'All time';
-        state.categories.clear();
         commitFilters();
     }
 
@@ -720,8 +655,7 @@
             if (popover !== except) popover.classList.remove('alf-open');
         });
         ui.querySelectorAll('[aria-expanded="true"]').forEach((button) => {
-            const expected = button.classList.contains('alf-date-button') ? 'alf-date-popover' : 'alf-filter-popover';
-            if (!except?.classList.contains(expected)) button.setAttribute('aria-expanded', 'false');
+            if (!except?.classList.contains('alf-date-popover')) button.setAttribute('aria-expanded', 'false');
         });
     }
 
@@ -870,9 +804,6 @@
         const dateButton = ui.querySelector('.alf-date-button');
         const datePopover = ui.querySelector('.alf-date-popover');
         dateButton.addEventListener('click', () => togglePopover(dateButton, datePopover));
-        const filterButton = ui.querySelector('.alf-filter-button');
-        const filterPopover = ui.querySelector('.alf-filter-popover');
-        filterButton.addEventListener('click', () => togglePopover(filterButton, filterPopover));
 
         ui.querySelectorAll('.alf-tab').forEach((tab) => {
             tab.addEventListener('click', () => {
@@ -898,12 +829,6 @@
             });
             commitFilters();
         });
-        ui.querySelector('.alf-category-list').addEventListener('change', (event) => {
-            if (event.target.type !== 'checkbox') return;
-            if (event.target.checked) state.categories.add(event.target.value);
-            else state.categories.delete(event.target.value);
-            commitFilters();
-        });
         ui.addEventListener('click', (event) => {
             const quick = event.target.closest('[data-range]');
             if (quick) setQuickRange(quick.dataset.range);
@@ -914,15 +839,17 @@
                 state.from = '';
                 state.to = '';
                 state.dateLabel = 'All time';
-            } else if (chip.dataset.chipType === 'category') {
-                state.categories.delete(chip.dataset.chipValue);
             }
             commitFilters();
         });
     }
 
     function ensureUi() {
-        if (!isLogPage() || !desktopMedia.matches || document.getElementById(UI_ID)) return;
+        if (!isLogPage() || !desktopMedia.matches) return;
+        if (document.getElementById(UI_ID)) {
+            uiMounted = true;
+            return;
+        }
         const root = document.querySelector(ROOT_SELECTOR);
         if (!root) return;
         if (!state.theme) state.theme = detectedTornTheme(root);
@@ -935,6 +862,7 @@
         const nativeToolbar = root.querySelector('[class*="filterWrapper"],[class*="buttonsWrapper"]');
         if (nativeToolbar) nativeToolbar.insertAdjacentElement('afterend', ui);
         else root.prepend(ui);
+        uiMounted = true;
         bindUi(ui);
         concealNativeSearch(root);
         scheduleRender();
@@ -971,6 +899,7 @@
     }
 
     function teardownUi() {
+        if (!uiMounted) return;
         const root = document.querySelector(ROOT_SELECTOR);
         if (root) {
             const infos = findRows(root).map(rowInfo);
@@ -984,6 +913,7 @@
         document.getElementById(STYLE_ID)?.remove();
         controlStyleCache = null;
         renderScheduled = false;
+        uiMounted = false;
     }
 
     function updatePageLifecycle() {
