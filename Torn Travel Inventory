@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.4.0
+// @version      1.8.0
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
-// @match        https://www.torn.com/*
+// @match        https://www.torn.com/page.php?sid=travel
+// @match        https://www.torn.com/page.php?sid=travel&*
 // @connect      api.torn.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -13,13 +14,15 @@
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
+// @downloadURL https://update.greasyfork.org/scripts/588262/Torn%3A%20Travel%20Inventory.user.js
+// @updateURL https://update.greasyfork.org/scripts/588262/Torn%3A%20Travel%20Inventory.meta.js
 // ==/UserScript==
 
 (() => {
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.4.0";
+  const SCRIPT_VERSION = "1.8.0";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -30,60 +33,105 @@
   const DEFAULT_CATEGORY = "Medical";
 
   const CATEGORIES = [
-    "Medical",
-    "Drug",
-    "Booster",
-    "Energy Drink",
-    "Candy",
-    "Alcohol",
-    "Temporary",
     "Primary",
     "Secondary",
     "Melee",
+    "Temporary",
     "Defensive",
     "Clothing",
-    "Flower",
-    "Plushie",
+    "Medical",
+    "Drug",
+    "Energy Drink",
+    "Alcohol",
+    "Candy",
     "Supply Pack",
+    "Booster",
     "Enhancer",
-    "Book",
-    "Special",
     "Tool",
     "Material",
-    "Car",
     "Jewelry",
+    "Flower",
     "Artifact",
-    "Collectible",
+    "Book",
+    "Special",
     "Other",
+    "Plushie",
+    "Car",
+    "Collectible",
   ];
 
-  const CATEGORY_ICONS = {
-    Medical: "✚",
-    Drug: "◆",
-    Booster: "▲",
-    "Energy Drink": "ϟ",
-    Candy: "●",
-    Alcohol: "♜",
-    Temporary: "◈",
-    Primary: "▰",
-    Secondary: "▪",
-    Melee: "†",
-    Defensive: "⬟",
-    Clothing: "♟",
-    Flower: "✿",
-    Plushie: "★",
-    "Supply Pack": "▣",
-    Enhancer: "↑",
-    Book: "▤",
-    Special: "✦",
-    Tool: "⌁",
-    Material: "▧",
-    Car: "▱",
-    Jewelry: "◇",
-    Artifact: "♢",
-    Collectible: "◉",
-    Other: "•••",
+  // Torn's item.php uses these category values as the API/internal identifier
+  // (data-info) but shows a different label to the user (data-title) for a
+  // handful of categories. Keep the identifier for API calls, use the label
+  // for anything on-screen.
+  const CATEGORY_LABELS = {
+    Defensive: "Armor",
+    Drug: "Drugs",
+    "Supply Pack": "Supply Packs",
+    Booster: "Boosters",
+    Tool: "Tools",
+    Material: "Materials",
+    Flower: "Flowers",
+    Artifact: "Artifacts",
+    Book: "Books",
+    Other: "Miscellaneous",
+    Plushie: "Plushies",
+    Car: "Cars",
+    Collectible: "Collectibles",
   };
+
+  function categoryLabel(category) {
+    return CATEGORY_LABELS[category] || category;
+  }
+
+  function isTravelPage() {
+    return (
+      location.origin === "https://www.torn.com" &&
+      location.pathname === "/page.php" &&
+      new URLSearchParams(location.search).get("sid") === "travel"
+    );
+  }
+
+  const TORN_CATEGORY_ICON_SPRITE =
+    "https://www.torn.com/images/v2/items/dark_mode/item_icons_n.svg";
+
+  // Exact item.php sprite frames captured from Torn's native category bar.
+  const CATEGORY_SPRITES = {
+    Primary: { x: -2, y: -69, width: 28 },
+    Secondary: { x: -3, y: -103, width: 28 },
+    Melee: { x: -2, y: -35, width: 28 },
+    Temporary: { x: -2, y: -205, width: 28 },
+    Defensive: { x: -3, y: -137, width: 28 },
+    Clothing: { x: -3, y: -647, width: 28 },
+    Medical: { x: -3, y: -171, width: 28 },
+    Drug: { x: -3, y: -307, width: 28 },
+    "Energy Drink": { x: -3, y: -239, width: 28 },
+    Alcohol: { x: -2, y: -375, width: 28 },
+    Candy: { x: -2, y: -273, width: 28 },
+    "Supply Pack": { x: -3, y: -579, width: 27 },
+    Booster: { x: -2, y: -409, width: 27 },
+    Enhancer: { x: -2, y: -341, width: 28 },
+    Tool: { x: -3, y: -919, width: 28 },
+    Material: { x: -3, y: -953, width: 28 },
+    Jewelry: { x: -3, y: -477, width: 28 },
+    Flower: { x: -3, y: -545, width: 28 },
+    Artifact: { x: -2, y: -715, width: 28 },
+    Book: { x: -3, y: -851, width: 28 },
+    Special: { x: -2, y: -783, width: 28 },
+    Other: { x: -2, y: -817, width: 28 },
+    Plushie: { x: -37, y: -749, width: 28 },
+    Car: { x: -37, y: -681, width: 28 },
+    Collectible: { x: -38, y: -613, width: 27 },
+  };
+
+  function categoryIconMarkup(category) {
+    const frame = CATEGORY_SPRITES[category] || CATEGORY_SPRITES.Other;
+    return `<span class="${APP_ID}-native-category-icon" aria-hidden="true" style="width:${frame.width}px;background-image:url('${TORN_CATEGORY_ICON_SPRITE}');background-position:${frame.x}px ${frame.y}px !important"></span>`;
+  }
+
+  // A non-persistent, isolated fallback is safer than exposing the API key
+  // through Torn's page-accessible localStorage if userscript storage fails.
+  const memoryStore = new Map();
 
   const state = {
     open: false,
@@ -92,6 +140,7 @@
     offset: 0,
     items: [],
     total: 0,
+    totalKnown: true,
     timestamp: null,
     loading: false,
     error: "",
@@ -102,34 +151,36 @@
 
   let root;
   let panel;
+  let launcher;
   let keyInput;
   let navigationObserver;
   let navigationTimer;
+  let launcherFallbackTimer;
 
   function gmGet(key, fallback = "") {
     try {
       if (typeof GM_getValue === "function") return GM_getValue(key, fallback);
-      return localStorage.getItem(key) ?? fallback;
+      return memoryStore.has(key) ? memoryStore.get(key) : fallback;
     } catch {
-      return fallback;
+      return memoryStore.has(key) ? memoryStore.get(key) : fallback;
     }
   }
 
   function gmSet(key, value) {
     try {
       if (typeof GM_setValue === "function") GM_setValue(key, value);
-      else localStorage.setItem(key, value);
+      else memoryStore.set(key, value);
     } catch {
-      // Storage errors are reported when the saved value is read back.
+      memoryStore.set(key, value);
     }
   }
 
   function gmDelete(key) {
     try {
       if (typeof GM_deleteValue === "function") GM_deleteValue(key);
-      else localStorage.removeItem(key);
+      else memoryStore.delete(key);
     } catch {
-      // The user can overwrite an inaccessible value with a new key.
+      memoryStore.delete(key);
     }
   }
 
@@ -294,13 +345,16 @@
         throw new Error("The inventory response did not have the expected format.");
       }
 
+      const reportedTotal = Number(data?._metadata?.total);
       state.items = inventory.items;
       state.timestamp = inventory.timestamp || null;
-      state.total = Number(data?._metadata?.total ?? inventory.items.length);
+      state.totalKnown = Number.isFinite(reportedTotal) && reportedTotal >= 0;
+      state.total = state.totalKnown ? reportedTotal : state.offset + inventory.items.length;
     } catch (error) {
       if (token !== state.requestToken) return;
       state.items = [];
       state.total = 0;
+      state.totalKnown = true;
       state.timestamp = null;
       state.error = error instanceof Error ? error.message : "Could not load inventory.";
     } finally {
@@ -322,8 +376,26 @@
   function renderCategoryOptions() {
     return CATEGORIES.map(
       (category) =>
-        `<option value="${escapeHtml(category)}"${category === state.category ? " selected" : ""}>${escapeHtml(category)}</option>`,
+        `<option value="${escapeHtml(category)}"${category === state.category ? " selected" : ""}>${escapeHtml(categoryLabel(category))}</option>`,
     ).join("");
+  }
+
+  function renderCategoryChips() {
+    return CATEGORIES.map((category) => {
+      const isActive = category === state.category;
+      return `
+        <button
+          type="button"
+          class="${APP_ID}-chip${isActive ? " is-active" : ""}"
+          data-category="${escapeHtml(category)}"
+          role="tab"
+          aria-selected="${isActive}"
+          aria-label="${escapeHtml(categoryLabel(category))}"
+          title="${escapeHtml(categoryLabel(category))}"
+        >
+          ${categoryIconMarkup(category)}
+        </button>`;
+    }).join("");
   }
 
   function renderCards() {
@@ -351,8 +423,8 @@
     if (!items.length) {
       return `
         <div class="${APP_ID}-empty">
-          <div class="${APP_ID}-empty-icon">${state.query ? "⌕" : CATEGORY_ICONS[state.category]}</div>
-          <h3>${state.query ? "No matching items" : `No ${escapeHtml(state.category)} items`}</h3>
+          <div class="${APP_ID}-empty-icon">${state.query ? "⌕" : categoryIconMarkup(state.category)}</div>
+          <h3>${state.query ? "No matching items" : `No ${escapeHtml(categoryLabel(state.category))} items`}</h3>
           <p>${state.query ? "Try a different name or item ID." : "Nothing in this category was returned by the API."}</p>
         </div>`;
     }
@@ -419,8 +491,7 @@
             inputmode="text"
             autocomplete="off"
             spellcheck="false"
-            placeholder="Paste your API key"
-            value="${escapeHtml(getApiKey())}"
+            placeholder="${hasKey ? "Key saved - paste a new key to replace it" : "Paste your API key"}"
           />
           <button class="${APP_ID}-reveal" type="button" data-action="reveal-key">Show</button>
         </div>
@@ -432,7 +503,7 @@
         </div>
         <div class="${APP_ID}-settings-actions">
           ${hasKey ? `<button class="${APP_ID}-danger" type="button" data-action="remove-key">Remove key</button>` : "<span></span>"}
-          <button class="${APP_ID}-primary" type="button" data-action="save-key">Save and connect</button>
+          <button class="${APP_ID}-primary" type="button" data-action="save-key">${hasKey ? "Connect" : "Save and connect"}</button>
         </div>
       </div>`;
   }
@@ -444,7 +515,12 @@
     const pageEnd = Math.min(state.offset + state.items.length, state.total);
     const totalQuantity = items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
     const hasPrevious = state.offset > 0;
-    const hasNext = state.offset + state.items.length < state.total;
+    // When the API doesn't report a usable _metadata.total, don't assume
+    // there's nothing more: a full page is a signal there may be another
+    // page, so keep "Next" available rather than silently truncating results.
+    const hasNext = state.totalKnown
+      ? state.offset + state.items.length < state.total
+      : state.items.length >= PAGE_SIZE;
     const hasPagination = hasPrevious || hasNext;
 
     panel.classList.toggle("is-open", state.open);
@@ -466,7 +542,10 @@
             <div class="${APP_ID}-mark" aria-hidden="true">T</div>
             <div>
               <span class="${APP_ID}-eyebrow">TRAVEL COMPANION</span>
-              <div class="${APP_ID}-title">Personal Inventory</div>
+              <div class="${APP_ID}-title">
+                Personal Inventory
+                <small class="${APP_ID}-version">v${SCRIPT_VERSION}</small>
+              </div>
             </div>
           </div>
           <div class="${APP_ID}-header-actions">
@@ -489,15 +568,19 @@
               ${renderCategoryOptions()}
             </select>
           </label>
-          <button class="${APP_ID}-refresh" type="button" data-action="refresh" ${state.loading ? "disabled" : ""}>
+          <button class="${APP_ID}-refresh" type="button" data-action="refresh" ${state.loading ? "disabled" : ""} title="Torn caches inventory data for up to an hour per category, so this may still return the same snapshot shown below.">
             <span class="${state.loading ? "is-spinning" : ""}" aria-hidden="true">↻</span>
-            Refresh
+            Reload
           </button>
         </section>
 
+        <nav class="${APP_ID}-categories" role="tablist" aria-label="Item category shortcuts">
+          ${renderCategoryChips()}
+        </nav>
+
         <section class="${APP_ID}-status" aria-live="polite">
           <div>
-            <strong>${escapeHtml(state.category)}</strong>
+            <strong>${escapeHtml(categoryLabel(state.category))}</strong>
             <span>${state.loading ? "Loading inventory…" : `${formatNumber(items.length)} entries · ${formatNumber(totalQuantity)} items shown`}</span>
           </div>
           <div class="${APP_ID}-cache">
@@ -512,8 +595,7 @@
 
         <footer class="${APP_ID}-footer">
           <span>
-            ${state.total ? `Showing ${formatNumber(pageStart)}–${formatNumber(pageEnd)} of ${formatNumber(state.total)}` : "Official Torn API v2"}
-            <small class="${APP_ID}-version">v${SCRIPT_VERSION} · cowboyup [1496324]</small>
+            ${state.total ? `Showing ${formatNumber(pageStart)}–${formatNumber(pageEnd)} of ${formatNumber(state.total)}${state.totalKnown ? "" : "+"}` : "Official Torn API v2"}
           </span>
           ${
             hasPagination
@@ -593,13 +675,14 @@
         break;
       case "save-key": {
         const value = keyInput?.value.trim() || "";
-        if (value.length < 8) {
+        const savedKey = getApiKey();
+        if ((!value && !savedKey) || (value && value.length < 8)) {
           keyInput?.setCustomValidity("Please enter a valid Torn API key.");
           keyInput?.reportValidity();
           return;
         }
         keyInput?.setCustomValidity("");
-        gmSet(KEY_STORE, value);
+        if (value) gmSet(KEY_STORE, value);
         state.settingsOpen = false;
         state.offset = 0;
         state.items = [];
@@ -687,6 +770,7 @@
         box-shadow: 0 12px 28px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.12);
       }
       .${APP_ID}-launcher:active { transform: translateY(0); }
+      .${APP_ID}-launcher:not(.is-visible) { display: none; }
       .${APP_ID}-launcher-icon {
         display: grid;
         place-items: center;
@@ -877,33 +961,61 @@
       .${APP_ID}-categories {
         flex: 0 0 auto;
         display: flex;
-        gap: 7px;
+        gap: 0;
         overflow-x: auto;
-        padding: 0 20px 13px;
+        background: linear-gradient(180deg, #2c2f33, #222427);
+        border-bottom: 1px solid var(--tti-line);
         scrollbar-width: thin;
         scrollbar-color: #4b4e52 transparent;
       }
       .${APP_ID}-chip {
         flex: 0 0 auto;
-        height: 30px;
-        padding: 0 10px;
+        position: relative;
+        width: 30px;
+        height: 33px;
+        padding: 0;
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        border: 1px solid var(--tti-line);
-        border-radius: 6px;
-        color: #9ca2aa;
-        background: rgba(255,255,255,.025);
+        justify-content: center;
+        border: 0;
+        border-right: 1px solid #1d1d1d;
+        border-radius: 0;
+        background: linear-gradient(#555, #333);
+        box-shadow: inset 0 1px rgba(255,255,255,.08);
         cursor: pointer;
-        font: 650 11px/1 inherit;
-        transition: color .15s, background .15s, border-color .15s;
+        overflow: hidden;
+        transition: filter .12s, background .12s;
       }
-      .${APP_ID}-chip:hover { color: #e5e7e9; background: rgba(255,255,255,.06); }
+      .${APP_ID}-chip::before,
+      .${APP_ID}-chip::after {
+        content: "";
+        position: absolute;
+        pointer-events: none;
+      }
+      .${APP_ID}-chip::before {
+        inset: 0;
+        background: linear-gradient(rgba(255,255,255,0), rgba(255,255,255,.1), rgba(255,255,255,0));
+      }
+      .${APP_ID}-chip::after {
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: 1px;
+        background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.5), rgba(0,0,0,0));
+      }
+      .${APP_ID}-chip:hover { filter: brightness(1.14); }
+      .${APP_ID}-native-category-icon {
+        position: relative;
+        z-index: 1;
+        display: block;
+        height: 33px;
+        flex: 0 0 auto;
+        background-repeat: no-repeat;
+        background-size: auto;
+      }
       .${APP_ID}-chip.is-active {
-        color: #fff;
-        border-color: rgba(225,67,67,.65);
-        background: linear-gradient(180deg, rgba(200,50,50,.9), rgba(141,32,32,.9));
-        box-shadow: inset 0 1px rgba(255,255,255,.12);
+        background: linear-gradient(#393939, #252525);
+        box-shadow: inset 0 -2px var(--tti-red-bright);
       }
       .${APP_ID}-status {
         flex: 0 0 auto;
@@ -1189,7 +1301,6 @@
         .${APP_ID}-brand h1 { font-size: 17px; }
         .${APP_ID}-readonly { display: none; }
         .${APP_ID}-toolbar { padding: 10px 12px; }
-        .${APP_ID}-categories { padding: 0 12px 10px; }
         .${APP_ID}-status { padding: 9px 12px; }
         .${APP_ID}-cache { display: none !important; }
         .${APP_ID}-content { padding: 11px 12px; }
@@ -1217,7 +1328,6 @@
       #${APP_ID}-root {
         font-family: Arial, Helvetica, sans-serif;
       }
-      .${APP_ID}-launcher { display: none !important; }
       .${APP_ID}-panel {
         padding: 64px 12px 28px;
         align-items: start;
@@ -1325,34 +1435,17 @@
         background: linear-gradient(#555, #393939);
       }
       .${APP_ID}-categories {
-        gap: 0;
-        padding: 0 8px 8px;
-        background: #2b2b2b;
+        background: #26282b;
       }
       .${APP_ID}-chip {
-        height: 28px;
-        margin-left: -1px;
-        padding: 0 8px;
-        gap: 4px;
-        border: 1px solid #171717;
-        border-radius: 0;
-        color: #999;
-        background: linear-gradient(#424242, #303030);
-        font-size: 10px;
-        font-weight: normal;
-        text-shadow: 0 1px #111;
+        border-right-color: #171717;
       }
-      .${APP_ID}-chip:first-child { margin-left: 0; border-radius: 3px 0 0 3px; }
-      .${APP_ID}-chip:last-child { border-radius: 0 3px 3px 0; }
       .${APP_ID}-chip:hover {
-        color: #ccc;
-        background: linear-gradient(#4b4b4b, #353535);
+        filter: brightness(1.14);
       }
       .${APP_ID}-chip.is-active {
-        color: #eee;
-        border-color: #141414;
-        background: linear-gradient(#333, #252525);
-        box-shadow: inset 0 -2px #b52b2b, inset 0 1px rgba(255,255,255,.04);
+        background: linear-gradient(#393939, #252525);
+        box-shadow: inset 0 -2px #b52b2b;
       }
       .${APP_ID}-status {
         min-height: 34px;
@@ -1556,9 +1649,11 @@
         color: #222;
         background: linear-gradient(#fff, #e5e5e5);
       }
-      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-toolbar,
-      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-categories {
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-toolbar {
         background: #e7e7e7;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-categories {
+        background: #26282b;
       }
       #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-search {
         border-color: #aaa;
@@ -1574,20 +1669,15 @@
         color: #444;
       }
       #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-chip {
-        border-color: #aaa;
-        color: #666;
-        background: linear-gradient(#fafafa, #d8d8d8);
-        text-shadow: 0 1px #fff;
+        border-right-color: #171717;
+        background: linear-gradient(#555, #333);
       }
       #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-chip:hover {
-        color: #333;
-        background: linear-gradient(#fff, #e3e3e3);
+        filter: brightness(1.14);
       }
       #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-chip.is-active {
-        color: #333;
-        border-color: #999;
-        background: linear-gradient(#e1e1e1, #cfcfcf);
-        box-shadow: inset 0 -2px #b52b2b, inset 0 1px #f8f8f8;
+        background: linear-gradient(#393939, #252525);
+        box-shadow: inset 0 -2px #b52b2b;
       }
       #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-status {
         border-color: #aaa;
@@ -1773,17 +1863,10 @@
         outline: 0;
         cursor: pointer;
       }
-      #${APP_ID}-root.${APP_ID}-theme-dark .${APP_ID}-category-select {
-        color-scheme: dark;
-      }
-      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-category-select {
-        color-scheme: light;
-      }
       .${APP_ID}-refresh {
         padding: 0 12px;
         white-space: nowrap;
       }
-      .${APP_ID}-categories { display: none !important; }
       .${APP_ID}-status { min-height: 32px; }
       .${APP_ID}-content { padding: 7px; }
       .${APP_ID}-grid { gap: 5px; }
@@ -2002,7 +2085,8 @@
         background: rgba(0, 0, 0, .18);
       }
       #${APP_ID}-root .${APP_ID}-shell {
-        width: min(460px, calc(100% - 24px));
+        /* 25 native 30px category tabs, plus the shell's two 1px borders. */
+        width: min(752px, calc(100% - 24px));
         height: auto;
         max-height: calc(100vh - 66px);
       }
@@ -2094,18 +2178,47 @@
         font-weight: 700 !important;
       }
       #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-category-select {
+        color-scheme: light !important;
         color: #444 !important;
         background: linear-gradient(#fff, #e4e4e4) !important;
         border-color: #aaa !important;
       }
       #${APP_ID}-root.${APP_ID}-theme-dark .${APP_ID}-category-select {
+        color-scheme: dark !important;
         color: #d5d5d5 !important;
         background: linear-gradient(#3b3b3b, #292929) !important;
         border-color: #151515 !important;
       }
+      #${APP_ID}-root.${APP_ID}-theme-light {
+        color-scheme: light;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-dark {
+        color-scheme: dark;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-category-select option {
+        color: #444 !important;
+        background-color: #f1f1f1 !important;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-dark .${APP_ID}-category-select option {
+        color: #ddd !important;
+        background-color: #292929 !important;
+      }
       #${APP_ID}-root .${APP_ID}-item-icon {
         overflow: hidden;
         padding: 2px;
+        background-image: none !important;
+      }
+      #${APP_ID}-root .${APP_ID}-item-icon::before,
+      #${APP_ID}-root .${APP_ID}-item-icon::after {
+        content: none !important;
+        display: none !important;
+        background: none !important;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-item-icon {
+        background-color: #e7e7e7 !important;
+      }
+      #${APP_ID}-root.${APP_ID}-theme-dark .${APP_ID}-item-icon {
+        background-color: #292929 !important;
       }
       #${APP_ID}-root .${APP_ID}-item-icon img {
         display: block;
@@ -2114,6 +2227,7 @@
         padding: 0;
         border: 0;
         border-radius: 0 !important;
+        background: transparent !important;
         object-fit: contain;
       }
       #${APP_ID}-root .${APP_ID}-item-icon.is-missing {
@@ -2191,7 +2305,49 @@
     anchor.setAttribute("title", "Inventory");
   }
 
+  function updateLauncherVisibility(navFound) {
+    if (!launcher) return;
+    if (navFound) {
+      clearTimeout(launcherFallbackTimer);
+      launcher.classList.remove("is-visible");
+      return;
+    }
+    // Delay before showing the fallback so a normal page navigation/hydration
+    // doesn't cause a visible flash of the launcher before the native nav
+    // link is found.
+    if (!launcher.classList.contains("is-visible")) {
+      clearTimeout(launcherFallbackTimer);
+      launcherFallbackTimer = setTimeout(() => launcher?.classList.add("is-visible"), 1200);
+    }
+  }
+
+  function deactivateOutsideTravelPage() {
+    document
+      .querySelectorAll(`.${APP_ID}-native-nav`)
+      .forEach((navigationItem) => navigationItem.remove());
+    clearTimeout(launcherFallbackTimer);
+    launcher?.classList.remove("is-visible");
+    if (root) {
+      root.hidden = true;
+      root.style.display = "none";
+    }
+    state.open = false;
+    state.settingsOpen = false;
+    document.documentElement.classList.remove(`${APP_ID}-no-scroll`);
+    panel?.classList.remove("is-open");
+    panel?.setAttribute("aria-hidden", "true");
+  }
+
   function installNavigationButton() {
+    if (!isTravelPage()) {
+      deactivateOutsideTravelPage();
+      return false;
+    }
+
+    if (root) {
+      root.hidden = false;
+      root.style.removeProperty("display");
+    }
     const itemLinks = [...document.querySelectorAll("a[href]")].filter(isOfficialItemsLink);
 
     for (const itemLink of itemLinks) {
@@ -2222,19 +2378,31 @@
 
       sourceNode.insertAdjacentElement("afterend", clone);
     }
+
+    const navFound = itemLinks.length > 0;
+    updateLauncherVisibility(navFound);
+    return navFound;
   }
 
   function install() {
+    if (!isTravelPage()) return;
     if (document.getElementById(`${APP_ID}-root`)) return;
 
     installStyles();
     root = document.createElement("div");
     root.id = `${APP_ID}-root`;
     root.innerHTML = `
+      <button type="button" class="${APP_ID}-launcher" aria-label="Open travel inventory (Alt+I)" title="Travel Inventory (Alt+I)">
+        <span class="${APP_ID}-launcher-icon" aria-hidden="true">🎒</span>
+        Inventory
+      </button>
       <section class="${APP_ID}-panel" role="dialog" aria-modal="true" aria-label="Personal Inventory" aria-hidden="true"></section>
     `;
     document.body.appendChild(root);
     syncTheme();
+
+    launcher = root.querySelector(`.${APP_ID}-launcher`);
+    launcher.addEventListener("click", () => openPanel());
 
     panel = root.querySelector(`.${APP_ID}-panel`);
     panel.addEventListener("click", (event) => {
@@ -2312,6 +2480,13 @@
       childList: true,
       subtree: true,
     });
+
+    const syncPageScope = () => {
+      if (isTravelPage()) installNavigationButton();
+      else deactivateOutsideTravelPage();
+    };
+    window.addEventListener("popstate", syncPageScope);
+    window.addEventListener("hashchange", syncPageScope);
 
     if (typeof GM_registerMenuCommand === "function") {
       GM_registerMenuCommand("View travel inventory", openPanel);
