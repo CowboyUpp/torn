@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.8.0
+// @version      1.8.4
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,7 +22,7 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.8.0";
+  const SCRIPT_VERSION = "1.8.4";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -743,6 +743,11 @@
         pointer-events: none;
         color: var(--tti-text);
         font-family: Inter, "Segoe UI", Arial, sans-serif;
+      }
+      /* On a compact top nav, Inventory takes Traveling's current slot.
+         Desktop keeps both entries in the left-side menu. */
+      @media (max-width: 640px) {
+        .${APP_ID}-travel-source { display: none !important; }
       }
       .${APP_ID}-launcher {
         pointer-events: auto;
@@ -2253,6 +2258,32 @@
     try {
       const url = new URL(anchor.href, location.href);
       const path = url.pathname.toLowerCase();
+      const rawLabels = [
+        anchor.textContent,
+        anchor.getAttribute("aria-label"),
+        anchor.getAttribute("title"),
+        anchor.querySelector("img")?.getAttribute("alt"),
+        anchor.parentElement?.textContent,
+        anchor.closest("li")?.textContent
+      ].filter(Boolean);
+      const labels = rawLabels.map((label) => String(label).replace(/\s+/g, " ").trim().toLowerCase());
+      const isItemsRelated = labels.some((label) => /^items?$/.test(label) || label.includes("inventory") || label.includes("item"));
+      return (
+        url.origin === location.origin &&
+        isItemsRelated &&
+        (path.endsWith("/item.php") || path.endsWith("/items.php") || path.endsWith("/inventory.php") || path.includes("travel"))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function isOfficialTravelLink(anchor) {
+    if (!anchor || anchor.closest(`#${APP_ID}-root`) || anchor.closest(`.${APP_ID}-native-nav`)) {
+      return false;
+    }
+    try {
+      const url = new URL(anchor.href, location.href);
       const labels = [
         anchor.textContent,
         anchor.getAttribute("aria-label"),
@@ -2260,45 +2291,43 @@
         anchor.querySelector("img")?.getAttribute("alt"),
       ]
         .filter(Boolean)
-        .map((label) => String(label).replace(/\s+/g, " ").trim());
-      const isNavigationLabel = labels.some((label) => /^items$/i.test(label));
+        .map((label) => String(label).replace(/\s+/g, " ").trim().toLowerCase());
       return (
         url.origin === location.origin &&
-        isNavigationLabel &&
-        (path.endsWith("/item.php") ||
-          path.endsWith("/items.php") ||
-          path.endsWith("/inventory.php"))
+        labels.some((label) => /^(travel|traveling)$/.test(label)) &&
+        (url.pathname.toLowerCase().endsWith("/travel.php") ||
+          new URLSearchParams(url.search).get("sid") === "travel")
       );
     } catch {
       return false;
     }
   }
 
-  function replaceNavigationLabel(anchor) {
+  function replaceNavigationLabel(anchor, navigationLabel = "Inventory") {
     const walker = document.createTreeWalker(anchor, NodeFilter.SHOW_TEXT);
     let replaced = false;
     let node;
     while ((node = walker.nextNode())) {
-      if (/\bitems\b/i.test(node.nodeValue || "")) {
-        node.nodeValue = node.nodeValue.replace(/\bitems\b/i, "Inventory");
+      if (/\b(items?|travel(?:ing)?)\b/i.test(node.nodeValue || "")) {
+        node.nodeValue = node.nodeValue.replace(/\b(items?|travel(?:ing)?)\b/i, navigationLabel);
         replaced = true;
       }
     }
 
     if (!replaced) {
-      const label = [...anchor.querySelectorAll("span, div")].find(
-        (element) => element.children.length === 0 && /^items$/i.test(element.textContent.trim()),
+      const labelElement = [...anchor.querySelectorAll("span, div")].find(
+        (element) => element.children.length === 0 && /^(items?|travel(?:ing)?)$/i.test(element.textContent.trim()),
       );
-      if (label) {
-        label.textContent = "Inventory";
+      if (labelElement) {
+        labelElement.textContent = navigationLabel;
         replaced = true;
       }
     }
 
     if (!replaced) {
-      const label = document.createElement("span");
-      label.textContent = "Inventory";
-      anchor.appendChild(label);
+      const labelNode = document.createElement("span");
+      labelNode.textContent = navigationLabel;
+      anchor.appendChild(labelNode);
     }
 
     anchor.setAttribute("aria-label", "Open travel inventory");
@@ -2307,18 +2336,11 @@
 
   function updateLauncherVisibility(navFound) {
     if (!launcher) return;
-    if (navFound) {
-      clearTimeout(launcherFallbackTimer);
-      launcher.classList.remove("is-visible");
-      return;
-    }
-    // Delay before showing the fallback so a normal page navigation/hydration
-    // doesn't cause a visible flash of the launcher before the native nav
-    // link is found.
-    if (!launcher.classList.contains("is-visible")) {
-      clearTimeout(launcherFallbackTimer);
-      launcherFallbackTimer = setTimeout(() => launcher?.classList.add("is-visible"), 1200);
-    }
+    // Keep the trigger in Torn's native navigation; a floating button can
+    // overlap the desktop chat controls and the PDA quick-action bar.
+    clearTimeout(launcherFallbackTimer);
+    launcherFallbackTimer = null;
+    launcher.classList.remove("is-visible");
   }
 
   function deactivateOutsideTravelPage() {
@@ -2326,6 +2348,7 @@
       .querySelectorAll(`.${APP_ID}-native-nav`)
       .forEach((navigationItem) => navigationItem.remove());
     clearTimeout(launcherFallbackTimer);
+    launcherFallbackTimer = null;
     launcher?.classList.remove("is-visible");
     if (root) {
       root.hidden = true;
@@ -2349,13 +2372,35 @@
       root.style.removeProperty("display");
     }
     const itemLinks = [...document.querySelectorAll("a[href]")].filter(isOfficialItemsLink);
+    // Torn removes Items once a flight begins. Clone Traveling instead so the
+    // Inventory trigger remains inside the same native desktop/mobile menu.
+    const sourceLinks = itemLinks.length
+      ? itemLinks
+      : [...document.querySelectorAll("a[href]")].filter(isOfficialTravelLink);
+    const usesTravelNavigation = itemLinks.length === 0;
+    const navigationLabel = window.matchMedia?.("(max-width: 640px)").matches ? "Items" : "Inventory";
+    document
+      .querySelectorAll(`.${APP_ID}-travel-source`)
+      .forEach((sourceNode) => sourceNode.classList.remove(`${APP_ID}-travel-source`));
 
-    for (const itemLink of itemLinks) {
-      const sourceNode = itemLink.parentElement?.tagName === "LI" ? itemLink.parentElement : itemLink;
+    for (const sourceLink of sourceLinks) {
+      const sourceNode = sourceLink.parentElement?.tagName === "LI" ? sourceLink.parentElement : sourceLink;
+      if (usesTravelNavigation) sourceNode.classList.add(`${APP_ID}-travel-source`);
       if (sourceNode.nextElementSibling?.classList.contains(`${APP_ID}-native-nav`)) continue;
 
       const clone = sourceNode.cloneNode(true);
       clone.classList.add(`${APP_ID}-native-nav`);
+      [clone, ...clone.querySelectorAll("*")].forEach((element) => {
+        [...element.classList].forEach((className) => {
+          if (/(active|selected|current|hover|focus)/i.test(className)) element.classList.remove(className);
+        });
+        ["aria-current", "aria-selected", "data-active", "data-current", "data-selected"].forEach((attribute) =>
+          element.removeAttribute(attribute),
+        );
+        if (/^(active|selected|current)$/i.test(element.getAttribute("data-state") || "")) {
+          element.removeAttribute("data-state");
+        }
+      });
       clone.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
       clone.querySelectorAll("img").forEach((image) => {
         image.alt = "";
@@ -2369,7 +2414,7 @@
       anchor.href = `#${APP_ID}-inventory`;
       anchor.removeAttribute("target");
       anchor.removeAttribute("rel");
-      replaceNavigationLabel(anchor);
+      replaceNavigationLabel(anchor, navigationLabel);
       anchor.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -2379,7 +2424,7 @@
       sourceNode.insertAdjacentElement("afterend", clone);
     }
 
-    const navFound = itemLinks.length > 0;
+    const navFound = sourceLinks.length > 0;
     updateLauncherVisibility(navFound);
     return navFound;
   }
