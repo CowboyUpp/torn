@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.8.4
+// @version      1.8.5
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,7 +22,7 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.8.4";
+  const SCRIPT_VERSION = "1.8.5";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -744,11 +744,8 @@
         color: var(--tti-text);
         font-family: Inter, "Segoe UI", Arial, sans-serif;
       }
-      /* On a compact top nav, Inventory takes Traveling's current slot.
-         Desktop keeps both entries in the left-side menu. */
-      @media (max-width: 640px) {
-        .${APP_ID}-travel-source { display: none !important; }
-      }
+      /* Inventory takes Traveling's slot in Torn's navigation. */
+      .${APP_ID}-travel-source { display: none !important; }
       .${APP_ID}-launcher {
         pointer-events: auto;
         position: fixed;
