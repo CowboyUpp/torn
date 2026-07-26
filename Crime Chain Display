@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.15
-// @description  Tracks your Crime 2.0 chain by syncing with Torn's native chain badge.
+// @version      4.7.2
+// @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @run-at       document-idle
@@ -16,18 +16,21 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.6.15';
+    const VERSION = '4.7.2';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
     const STORAGE_KEY_LAST_EVENT = 'cct_last_event_v4';
     const STORAGE_KEY_CORRECTION_LOG = 'cct_correction_log_v4';
     const STORAGE_KEY_DIAGNOSTICS = 'cct_diagnostics_v4';
+    const STORAGE_KEY_PROFIT_RECORDS = 'cct_profit_records_v1';
+    const STORAGE_KEY_ITEM_PRICES = 'cct_profit_prices_v1';
     const CORRECTION_LOG_MAX = 15;
     const DIAGNOSTIC_LOG_MAX = 10;
     const CHAIN_CAP_DISPLAY = 100;
     const OUTCOME_DEDUPE_MS = 3500;
     const MAX_REASONABLE_COUNTER_DELTA = 10;
+    const ITEM_PRICE_CACHE_MS = 24 * 60 * 60 * 1000;
 
     // Verified against real API responses, not assumed. See torn/logtypes:
     // 9010 = Crime success, 9150 = Crime fail (new). Critical fails fragment across
@@ -57,6 +60,24 @@
     // Tracked separately from lastResultCounts so that merely seeing a suspicious
     // reading doesn't itself shift the baseline used to detect it.
     let confirmedCriticalFails = null;
+    let profitRecords = readProfitRecords();
+    let itemPriceCache = readItemPriceCache();
+
+    // Nerve capture: there is no confirmed, documented "Nerve outgoing" log
+    // type in Torn's API (torn/logtypes has no such entry, and nerve cost is
+    // set per crime/subcrime rather than logged as its own event) — so unlike
+    // LOG_ID_SUCCESS/LOG_ID_FAIL above, nerve is intentionally NOT sourced from
+    // the log API. Guessing a log ID here would silently produce wrong ratios
+    // with no way to detect it, which breaks this script's "verified against
+    // real responses, not assumed" rule.
+    //
+    // Instead this reads the nerve bar that's actually rendered on the page —
+    // the same "trust only what's rendered" approach captureProfitFromOutcome()
+    // already uses for cash/items — and takes the delta right before each
+    // captured outcome. If the bar element can't be found, nerve simply stays
+    // unknown for that record (rendered as "—"), it never guesses.
+    let nerveTracker = { last: null, pendingSpend: null, pendingAt: 0, warnedMissing: false };
+    const NERVE_PENDING_WINDOW_MS = 15000;
 
     const THEME = {
         dark: {
@@ -316,6 +337,200 @@
             .replace(/\s+/g, ' ')
             .trim()
             .slice(0, 500);
+    }
+
+    function readProfitRecords() {
+        try {
+            const value = JSON.parse(safeGet(STORAGE_KEY_PROFIT_RECORDS, '[]'));
+            return Array.isArray(value) ? value : [];
+        } catch (_) { return []; }
+    }
+
+    function readItemPriceCache() {
+        try {
+            const value = JSON.parse(safeGet(STORAGE_KEY_ITEM_PRICES, '{}'));
+            return value && typeof value === 'object' ? value : {};
+        } catch (_) { return {}; }
+    }
+
+    function saveProfitData() {
+        safeSet(STORAGE_KEY_PROFIT_RECORDS, JSON.stringify(profitRecords));
+        safeSet(STORAGE_KEY_ITEM_PRICES, JSON.stringify(itemPriceCache));
+    }
+
+    function parseCurrency(text) {
+        const found = String(text || '').replace(/,/g, '').match(/\$(\d+(?:\.\d{1,2})?)/);
+        return found ? Number(found[1]) : null;
+    }
+
+    function profitPeriodKey(timestamp, period) {
+        const d = new Date(timestamp);
+        const day = d.toISOString().slice(0, 10);
+        if (period === 'year') return day.slice(0, 4);
+        if (period === 'month') return day.slice(0, 7);
+        if (period === 'week') {
+            const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+            const n = x.getUTCDay() || 7;
+            x.setUTCDate(x.getUTCDate() + 4 - n);
+            const first = new Date(Date.UTC(x.getUTCFullYear(), 0, 1));
+            const week = Math.ceil((((x - first) / 86400000) + 1) / 7);
+            return `${x.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+        }
+        return day;
+    }
+
+    function money(value) {
+        return Number(value || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+    }
+
+    function ratioText(totalWithNerve, nerve) {
+        if (!nerve) return '—';
+        return `$${Math.round(totalWithNerve / nerve).toLocaleString('en-US')}`;
+    }
+
+    // Best-effort locate of the nerve bar Torn renders (sidebar bar widget).
+    // Tried in order of how specific/reliable the match is; the last entry is
+    // a broad fallback. None of these are asserted to be correct — that's why
+    // every read is followed by a sanity check on the parsed number, and a
+    // missing element degrades to "—" everywhere instead of guessing.
+    function findNerveElement() {
+        return document.querySelector('[class*="nerve" i][title*="/"]')
+            || document.querySelector('[class*="nerve" i][aria-label*="/"]')
+            || document.querySelector('.bar-nerve[title]')
+            || document.querySelector('[data-bar="nerve" i]')
+            || document.querySelector('[class*="nerveBar" i]')
+            || document.querySelector('[class*="nerve" i]');
+    }
+
+    function readNerveValue() {
+        const el = findNerveElement();
+        if (!el) return null;
+        const raw = el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '';
+        const match = normalizeText(raw).match(/(\d+)\s*\/\s*\d+/) || normalizeText(raw).match(/^(\d+)$/);
+        if (!match) return null;
+        const value = Number(match[1]);
+        return Number.isFinite(value) && value >= 0 ? value : null;
+    }
+
+    // Polls the nerve bar and records a "spend" only when the value drops
+    // (a rise means regen or a refill, not a crime attempt). The most recent
+    // unclaimed drop is handed to the next captured profit record, then
+    // cleared — see consumeNerveSpend().
+    function pollNerve() {
+        const value = readNerveValue();
+        if (value === null) {
+            if (!nerveTracker.warnedMissing) {
+                nerveTracker.warnedMissing = true;
+                logDiagnostic('nerve-element-not-found', 'Could not locate a nerve bar element on the page — $/nerve will show "—" until this selector is fixed.');
+            }
+            return;
+        }
+        if (nerveTracker.last !== null && value < nerveTracker.last) {
+            nerveTracker.pendingSpend = nerveTracker.last - value;
+            nerveTracker.pendingAt = Date.now();
+        }
+        nerveTracker.last = value;
+    }
+
+    // Consumes (and clears) the most recent nerve-spend reading if it's fresh
+    // enough to plausibly belong to the outcome currently being captured.
+    function consumeNerveSpend() {
+        if (nerveTracker.pendingSpend === null) return null;
+        if (Date.now() - nerveTracker.pendingAt > NERVE_PENDING_WINDOW_MS) {
+            nerveTracker.pendingSpend = null;
+            return null;
+        }
+        const spend = nerveTracker.pendingSpend;
+        nerveTracker.pendingSpend = null;
+        return spend;
+    }
+
+    // Reads only Torn's rendered successful-outcome popup, never the page at large.
+    function captureProfitFromOutcome() {
+        const app = findCrimesApp();
+        if (!app) return false;
+        for (const [id, cached] of Object.entries(itemPriceCache)) {
+            if (!cached || Date.now() - Number(cached.at || 0) > ITEM_PRICE_CACHE_MS) delete itemPriceCache[id];
+        }
+        const panels = app.querySelectorAll('.outcome-content.crimes-outcome-success');
+        if (panels.length !== 1) return false;
+        const panel = panels[0];
+        // React may emit several mutations while rendering one popup. Mark the
+        // actual popup node rather than deduping by reward text: two separate
+        // crimes can legitimately pay the same amount or item combination.
+        if (panel.dataset.cctProfitSeen === '1') return false;
+        const rewards = [...panel.querySelectorAll('[class*="rewards"] > [class*="reward"]')];
+        if (!rewards.length) return false;
+
+        const items = [];
+        let cash = 0;
+        for (const reward of rewards) {
+            const image = reward.querySelector('img[src*="/images/items/"]');
+            if (image) {
+                const id = image.src.match(/\/images\/items\/(\d+)\//)?.[1];
+                const quantity = Number(normalizeText(reward.querySelector('[class*="count"]')?.textContent || '1'));
+                const name = normalizeText(image.alt).replace(/,\s*\d+\s*$/, '');
+                const displayedTotal = parseCurrency(reward.querySelector('.tt-crime-value-text')?.textContent);
+                if (!id || !name || !Number.isInteger(quantity) || quantity < 1 || displayedTotal === null) return false;
+                const unitValue = displayedTotal / quantity;
+                itemPriceCache[id] = { name, value: unitValue, at: Date.now() };
+                items.push({ id, name, quantity, unitValue });
+                continue;
+            }
+            const amounts = normalizeText(reward.textContent).match(/\$[\d,]+(?:\.\d{1,2})?/g) || [];
+            if (amounts.length !== 1) return false;
+            const value = parseCurrency(amounts[0]);
+            if (value === null) return false;
+            cash += value;
+        }
+
+        pollNerve();
+        const nerve = consumeNerveSpend();
+        const itemValue = items.reduce((total, item) => total + (item.unitValue * item.quantity), 0);
+        const id = `profit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        profitRecords.unshift({ id, ts: new Date().toISOString(), cash, itemValue, total: cash + itemValue, items, nerve });
+        panel.dataset.cctProfitSeen = '1';
+        saveProfitData();
+        renderProfitPopover();
+        return true;
+    }
+
+    function profitRows(period) {
+        const grouped = new Map();
+        for (const record of profitRecords) {
+            const key = profitPeriodKey(record.ts, period);
+            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0 };
+            row.cash += record.cash; row.itemValue += record.itemValue; row.total += record.total; row.count += 1;
+            // Only records with a matched nerve reading contribute to the ratio,
+            // on both sides of the division — an unmatched record (nerve bar
+            // wasn't found, or it's an older record from before this feature)
+            // is left out of the ratio entirely rather than treated as 0 nerve,
+            // which would otherwise silently inflate $/nerve.
+            if (typeof record.nerve === 'number' && record.nerve > 0) {
+                row.nerve += record.nerve;
+                row.totalWithNerve += record.total;
+            }
+            grouped.set(key, row);
+        }
+        return [...grouped.values()].sort((a, b) => b.key.localeCompare(a.key));
+    }
+
+    function renderProfitPopover() {
+        const popover = document.querySelector('#cct-profit-popover');
+        if (!popover) return;
+        const period = popover.dataset.period || 'day';
+        const rows = profitRows(period);
+        const totals = rows.reduce((sum, row) => ({
+            cash: sum.cash + row.cash,
+            itemValue: sum.itemValue + row.itemValue,
+            total: sum.total + row.total,
+            count: sum.count + row.count,
+            nerve: sum.nerve + row.nerve,
+            totalWithNerve: sum.totalWithNerve + row.totalWithNerve,
+        }), { cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0 });
+        popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
+        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? rows.map((row) => `<div class="cct-profit-row"><b>${escapeHTML(row.key)}</b><span>${money(row.cash)} cash · ${money(row.itemValue)} items · ${ratioText(row.totalWithNerve, row.nerve)}/N</span></div>`).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
+        popover.querySelectorAll('[data-profit-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.profitPeriod === period));
     }
 
     function hashText(text) {
@@ -1023,6 +1238,34 @@
                 opacity: 0.4;
                 text-align: right;
             }
+            #cct-profit-popover {
+                display: none;
+                position: absolute;
+                top: calc(100% + 6px);
+                right: 0;
+                z-index: 9999;
+                width: 400px;
+                max-height: min(68vh, 620px);
+                overflow: auto;
+                padding: 10px 12px;
+                border-radius: 8px;
+                box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+                font-size: 12px;
+            }
+            #cct-profit-popover.cct-open { display: block; }
+            #cct-profit-title { font-size: 13px; font-weight: 700; }
+            #cct-profit-periods { display: flex; gap: 5px; margin: 9px 0; }
+            .cct-profit-period { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 0; font-size: 11px; opacity: 0.6; }
+            .cct-profit-period:not(:last-child)::after { content: '·'; margin-left: 5px; }
+            .cct-profit-period.cct-profit-active { font-weight: 700; opacity: 1; }
+            #cct-profit-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+            #cct-profit-summary > div, .cct-profit-row { padding: 7px 5px; border-radius: 5px; }
+            #cct-profit-summary small { display: block; opacity: 0.55; font-size: 9px; white-space: nowrap; }
+            #cct-profit-summary strong { font-size: 11px; white-space: nowrap; }
+            #cct-profit-rows { display: grid; gap: 5px; margin-top: 8px; }
+            .cct-profit-row { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; }
+            .cct-profit-row span { text-align: right; opacity: 0.78; }
+            .cct-profit-empty { font-size: 11px; opacity: 0.65; padding: 8px 0; }
         `;
         document.head.appendChild(style);
     }
@@ -1057,6 +1300,17 @@
             popover.style.background = th.popoverBg;
             popover.style.border = `1px solid ${th.popoverBorder}`;
             popover.style.color = th.popoverColor;
+        }
+
+        const profitPopover = document.querySelector('#cct-profit-popover');
+        if (profitPopover) {
+            profitPopover.style.background = th.popoverBg;
+            profitPopover.style.border = `1px solid ${th.popoverBorder}`;
+            profitPopover.style.color = th.popoverColor;
+            profitPopover.querySelectorAll('#cct-profit-summary > div,.cct-profit-row').forEach((el) => {
+                el.style.background = th.saveBg;
+                el.style.border = `1px solid ${th.saveBorder}`;
+            });
         }
 
         document.querySelectorAll('#cct-chain-input,#cct-log-key-input').forEach((input) => {
@@ -1117,6 +1371,7 @@
                 </div>
             </div>
             <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? SUN_ICON : MOON_ICON}</button>
+            <button id="cct-profit-toggle" class="cct-icon-btn" type="button" title="Crime Profit">$</button>
             <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">${GEAR_ICON}</button>
             <div id="cct-settings-popover">
                 <div class="cct-manual-label-row"><label>Manual correction</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Use this only if the displayed chain is wrong.</span></span></div>
@@ -1144,6 +1399,17 @@
                 </details>
                 <div id="cct-version-footer">Version ${VERSION}</div>
             </div>
+            <div id="cct-profit-popover" data-period="day">
+                <div id="cct-profit-title">Crime Profit</div>
+                <div id="cct-profit-periods">
+                    <button class="cct-profit-period" data-profit-period="day" type="button">Day</button>
+                    <button class="cct-profit-period" data-profit-period="week" type="button">Week</button>
+                    <button class="cct-profit-period" data-profit-period="month" type="button">Month</button>
+                    <button class="cct-profit-period" data-profit-period="year" type="button">Year</button>
+                </div>
+                <div id="cct-profit-summary"></div>
+                <div id="cct-profit-rows"></div>
+            </div>
         `;
 
         anchor.appendChild(el);
@@ -1156,8 +1422,10 @@
         });
 
         wireSettings(el);
+        wireProfitPopover(el);
         applyTheme();
         renderCorrectionLog();
+        renderProfitPopover();
     }
 
     let outsideClickWired = false;
@@ -1173,8 +1441,29 @@
         document.addEventListener('click', (e) => {
             const root = document.querySelector('#cct-root');
             const popover = document.querySelector('#cct-settings-popover');
-            if (!root || !popover) return;
-            if (!root.contains(e.target)) popover.classList.remove('cct-open');
+            const profitPopover = document.querySelector('#cct-profit-popover');
+            if (!root) return;
+            if (!root.contains(e.target)) {
+                if (popover) popover.classList.remove('cct-open');
+                if (profitPopover) profitPopover.classList.remove('cct-open');
+            }
+        });
+    }
+
+    function wireProfitPopover(el) {
+        const toggle = el.querySelector('#cct-profit-toggle');
+        const popover = el.querySelector('#cct-profit-popover');
+        toggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            el.querySelector('#cct-settings-popover').classList.remove('cct-open');
+            popover.classList.toggle('cct-open');
+            if (popover.classList.contains('cct-open')) renderProfitPopover();
+        });
+        popover.querySelectorAll('[data-profit-period]').forEach((button) => {
+            button.addEventListener('click', () => {
+                popover.dataset.period = button.dataset.profitPeriod;
+                renderProfitPopover();
+            });
         });
     }
 
@@ -1184,6 +1473,7 @@
 
         gear.addEventListener('click', (e) => {
             e.stopPropagation();
+            el.querySelector('#cct-profit-popover').classList.remove('cct-open');
             popover.classList.toggle('cct-open');
             if (popover.classList.contains('cct-open')) renderCorrectionLog();
         });
@@ -1301,6 +1591,16 @@
         observer = new MutationObserver((mutations) => {
             if (!document.querySelector('#cct-root')) renderWidget();
 
+            // Read the nerve bar before capturing the outcome so a same-batch
+            // nerve-drop mutation is reflected as "before" for THIS outcome
+            // rather than being folded into the reading captureProfitFromOutcome()
+            // itself takes.
+            pollNerve();
+
+            // The parser only accepts Torn's single rendered success-outcome popup.
+            // This runs immediately when that popup is populated, so it can be closed.
+            captureProfitFromOutcome();
+
             const synced = syncFromNativeBadge();
 
             if (!synced && !applyResultCountDeltaFallback({ source: 'mutation-observer', mutations })) {
@@ -1410,6 +1710,7 @@
             }
             renderWidget();
             startDOMObserver();
+            pollNerve();
             if (!syncFromNativeBadge()) applyResultCountDeltaFallback({ source: 'sync-loop' });
             render(false);
         }, 100);
@@ -1453,6 +1754,11 @@
         if (!app) return;
 
         runSyncLoop();
+        pollNerve();
+        // Heartbeat independent of the SPA sync loop so a nerve drop that lands
+        // between mutation bursts (or on a route the observer isn't watching)
+        // still gets caught before its window expires.
+        setInterval(pollNerve, 1500);
         console.log(`[CCT v${VERSION}] Hardened crime chain tracker loaded.`);
     }
 
