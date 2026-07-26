@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.7.2
+// @version      4.7.3
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -16,7 +16,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.7.2';
+    const VERSION = '4.7.3';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -358,6 +358,22 @@
         safeSet(STORAGE_KEY_ITEM_PRICES, JSON.stringify(itemPriceCache));
     }
 
+    // Destructive and irreversible, so this always gates on a native confirm()
+    // dialog naming exactly what's being lost — no silent or single-click wipe.
+    // Only touches profit records; chain, correction log, and API key are untouched.
+    function resetProfitData() {
+        const count = profitRecords.length;
+        if (!count) return;
+        const noun = count === 1 ? 'payout' : 'payouts';
+        const confirmed = window.confirm(
+            `Wipe your Crime Profit history?\n\nThis permanently deletes all ${count.toLocaleString('en-US')} tracked ${noun} — every $ and item you've captured — and can't be undone.\n\nYour crime chain and settings are not affected.`
+        );
+        if (!confirmed) return;
+        profitRecords = [];
+        saveProfitData();
+        renderProfitPopover();
+    }
+
     function parseCurrency(text) {
         const found = String(text || '').replace(/,/g, '').match(/\$(\d+(?:\.\d{1,2})?)/);
         return found ? Number(found[1]) : null;
@@ -388,13 +404,15 @@
         return `$${Math.round(totalWithNerve / nerve).toLocaleString('en-US')}`;
     }
 
-    // Best-effort locate of the nerve bar Torn renders (sidebar bar widget).
-    // Tried in order of how specific/reliable the match is; the last entry is
-    // a broad fallback. None of these are asserted to be correct — that's why
-    // every read is followed by a sanity check on the parsed number, and a
-    // missing element degrades to "—" everywhere instead of guessing.
+    // Confirmed against real rendered markup on the crimes page (a hashed-class
+    // CSS-module bar widget, same convention as the reward/count selectors
+    // above): a container with a "nerve" class substring holding a child whose
+    // class has a "bar-value" substring and text like "4 / 140". The remaining
+    // entries are defensive fallbacks in case Torn ships a different layout
+    // (e.g. the mobile bar variant) — never asserted, always sanity-checked.
     function findNerveElement() {
-        return document.querySelector('[class*="nerve" i][title*="/"]')
+        return document.querySelector('[class*="nerve" i] [class*="bar-value" i]')
+            || document.querySelector('[class*="nerve" i][title*="/"]')
             || document.querySelector('[class*="nerve" i][aria-label*="/"]')
             || document.querySelector('.bar-nerve[title]')
             || document.querySelector('[data-bar="nerve" i]')
@@ -531,6 +549,8 @@
         popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
         popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? rows.map((row) => `<div class="cct-profit-row"><b>${escapeHTML(row.key)}</b><span>${money(row.cash)} cash · ${money(row.itemValue)} items · ${ratioText(row.totalWithNerve, row.nerve)}/N</span></div>`).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
         popover.querySelectorAll('[data-profit-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.profitPeriod === period));
+        const resetBtn = popover.querySelector('#cct-profit-reset');
+        if (resetBtn) resetBtn.disabled = profitRecords.length === 0;
     }
 
     function hashText(text) {
@@ -1232,6 +1252,25 @@
                 cursor: pointer;
                 transition: background 0.15s;
             }
+            #cct-profit-reset-row {
+                margin-top: 10px;
+                padding-top: 8px;
+                border-top: 1px solid rgba(128,128,128,0.18);
+                text-align: right;
+            }
+            #cct-profit-reset {
+                padding: 4px 9px;
+                font-size: 10px;
+                border-radius: 5px;
+                cursor: pointer;
+                opacity: 0.55;
+                background: transparent;
+                border: 1px solid rgba(255,60,60,0.35);
+                color: #ff5555;
+                transition: opacity 0.15s, background 0.15s;
+            }
+            #cct-profit-reset:hover { opacity: 1; background: rgba(255,60,60,0.12); }
+            #cct-profit-reset:disabled { opacity: 0.25; cursor: default; background: transparent; }
             #cct-version-footer {
                 white-space: normal;
                 font-size: 10px;
@@ -1409,6 +1448,9 @@
                 </div>
                 <div id="cct-profit-summary"></div>
                 <div id="cct-profit-rows"></div>
+                <div id="cct-profit-reset-row">
+                    <button id="cct-profit-reset" type="button">Reset profit history</button>
+                </div>
             </div>
         `;
 
@@ -1464,6 +1506,10 @@
                 popover.dataset.period = button.dataset.profitPeriod;
                 renderProfitPopover();
             });
+        });
+        popover.querySelector('#cct-profit-reset').addEventListener('click', (e) => {
+            e.stopPropagation();
+            resetProfitData();
         });
     }
 
