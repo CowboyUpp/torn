@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.7.8
+// @version      4.8.0
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -16,7 +16,11 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.7.8';
+    const VERSION = '4.8.0';
+    // Installed immediately, before anything else, so a crime attempt fired in
+    // the brief window before waitForApp() resolves is never missed. Function
+    // declaration is hoisted, so this call can sit ahead of its definition.
+    installCrimeAttemptInterceptor();
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -72,9 +76,10 @@
     // real responses, not assumed" rule.
     //
     // Instead this reads the nerve bar that's actually rendered on the page —
-    // the same "trust only what's rendered" approach captureProfitFromOutcome()
-    // already uses for cash/items — and takes the delta right before each
-    // captured outcome. If the bar element can't be found, nerve simply stays
+    // still DOM-based (unlike reward/cash capture, which as of v4.8.0 comes
+    // from intercepting Torn's own crime-attempt response — see
+    // installCrimeAttemptInterceptor) since there's no nerve figure in that
+    // JSON either. If the bar element can't be found, nerve simply stays
     // unknown for that record (rendered as "—"), it never guesses.
     let nerveTracker = { last: null, pendingSpend: null, pendingAt: 0, warnedMissing: false };
     const NERVE_PENDING_WINDOW_MS = 15000;
@@ -453,7 +458,10 @@
             return;
         }
         if (nerveTracker.last !== null && value < nerveTracker.last) {
-            nerveTracker.pendingSpend = nerveTracker.last - value;
+            // Sum rather than overwrite: if a drop happens while a previous one
+            // is still unconsumed (e.g. two rapid attempts land in the same
+            // mutation window), the earlier drop must not be silently discarded.
+            nerveTracker.pendingSpend = (nerveTracker.pendingSpend || 0) + (nerveTracker.last - value);
             nerveTracker.pendingAt = Date.now();
         }
         nerveTracker.last = value;
@@ -472,71 +480,157 @@
         return spend;
     }
 
-    // Reads only Torn's rendered successful-outcome popup, never the page at large.
-    function captureProfitFromOutcome() {
-        const app = findCrimesApp();
-        if (!app) return false;
+    // Cash/item capture no longer scrapes the rendered outcome popup. Instead it
+    // intercepts Torn's own internal crime-attempt network call — the exact same
+    // technique the OutcomeDB userscript uses in production (unsafeWindow.fetch
+    // wrapping, watching for "sid=crimesData" + "step=attempt" in the URL) — and
+    // reads data.DB.outcome straight from the JSON response. This is strictly
+    // more reliable than DOM parsing: exact reward type/amount/id from Torn's own
+    // server response, no hashed CSS classes to track, and no more ambiguity
+    // about whether an empty "rewards" section means a genuine $0 outcome (e.g.
+    // Cracking's brute-force step) or a parse failure — the JSON just says so.
+    //
+    // The one thing this response does NOT carry is a dollar value for items —
+    // that only exists in the rendered popup's tooltip. So item pricing still
+    // falls back to the same pipeline as before: try the DOM tooltip shortly
+    // after (best-effort, since the popup may not have painted yet), then the
+    // per-session cache, then Torn's public item-price API.
+    function installCrimeAttemptInterceptor() {
+        const isSandboxed = typeof unsafeWindow !== 'undefined';
+        const win = isSandboxed ? unsafeWindow : window;
+        if (win.__cctFetchWrapped) return;
+        win.__cctFetchWrapped = true;
+        const originalFetch = win.fetch;
+        win.fetch = function (...args) {
+            return originalFetch.apply(this, args).then((response) => {
+                try {
+                    const resource = args[0];
+                    const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+                    if (url.includes('sid=crimesData') && url.includes('step=attempt')) {
+                        response.clone().text().then(handleCrimeAttemptResponseBody).catch(() => {});
+                    }
+                } catch (_) {
+                    // Never let interception interfere with the page's real request.
+                }
+                return response;
+            });
+        };
+    }
+
+    // Guards against acting twice on the same real outcome (belt-and-suspenders;
+    // fetch already gives a natural 1:1 with real network calls, unlike the old
+    // DOM approach which could see several mutations per popup).
+    let lastCrimeOutcomeSignature = null;
+    let lastCrimeOutcomeTime = 0;
+    const CRIME_OUTCOME_DEDUPE_MS = 2000;
+
+    function handleCrimeAttemptResponseBody(body) {
+        if (!body || /<!doctype|<html[\s>]|<head[\s>]|<body[\s>]/i.test(body)) return; // Cloudflare/error page, not JSON
+        let data;
+        try {
+            data = JSON.parse(body);
+        } catch (_) {
+            return;
+        }
+        const outcome = data && data.DB && data.DB.outcome;
+        // Only the confirmed literal value seen in real responses is treated as
+        // capturable. Anything else (fail/critical/unknown) is left alone here —
+        // chain success/fail/critical detection is handled entirely separately
+        // (native badge / result counters / log verification) and is untouched
+        // by this change.
+        if (!outcome || outcome.result !== 'success') return;
+
+        const signature = hashText(JSON.stringify(outcome));
+        if (signature === lastCrimeOutcomeSignature && Date.now() - lastCrimeOutcomeTime < CRIME_OUTCOME_DEDUPE_MS) return;
+        lastCrimeOutcomeSignature = signature;
+        lastCrimeOutcomeTime = Date.now();
+
+        recordProfitFromOutcomeJSON(outcome);
+    }
+
+    function recomputeRecordTotals(record) {
+        record.itemValue = record.items.reduce((total, item) => total + (typeof item.unitValue === 'number' ? item.unitValue * item.quantity : 0), 0);
+        record.total = record.cash + record.itemValue;
+    }
+
+    function recordProfitFromOutcomeJSON(outcome) {
         for (const [id, cached] of Object.entries(itemPriceCache)) {
             if (!cached || Date.now() - Number(cached.at || 0) > ITEM_PRICE_CACHE_MS) delete itemPriceCache[id];
         }
-        const panels = app.querySelectorAll('.outcome-content.crimes-outcome-success');
-        if (panels.length !== 1) return false;
-        const panel = panels[0];
-        // React may emit several mutations while rendering one popup. Mark the
-        // actual popup node rather than deduping by reward text: two separate
-        // crimes can legitimately pay the same amount or item combination.
-        if (panel.dataset.cctProfitSeen === '1') return false;
-        const rewards = [...panel.querySelectorAll('[class*="rewards"] > [class*="reward"]')];
-        if (!rewards.length) return false;
 
+        const rewards = Array.isArray(outcome.rewards) ? outcome.rewards : [];
         const items = [];
         let cash = 0;
-        for (const reward of rewards) {
-            const image = reward.querySelector('img[src*="/images/items/"]');
-            if (image) {
-                const id = image.src.match(/\/images\/items\/(\d+)\//)?.[1];
-                const quantity = Number(normalizeText(reward.querySelector('[class*="count"]')?.textContent || '1'));
-                const name = normalizeText(image.alt).replace(/,\s*\d+\s*$/, '');
-                if (!id || !name || !Number.isInteger(quantity) || quantity < 1) return false;
-                const displayedTotal = parseCurrency(reward.querySelector('.tt-crime-value-text')?.textContent);
-                let unitValue = null;
-                if (displayedTotal !== null) {
-                    unitValue = displayedTotal / quantity;
-                    itemPriceCache[id] = { name, value: unitValue, at: Date.now(), source: 'displayed' };
-                } else if (itemPriceCache[id] && typeof itemPriceCache[id].value === 'number') {
-                    // Torn didn't render an inline value for this item this time
-                    // (common for special/quest-type items, e.g. a forged ID
-                    // Badge, which have no open-market tooltip) — reuse a price
-                    // already resolved for the same item id instead of losing it.
-                    unitValue = itemPriceCache[id].value;
-                }
-                // unitValue stays null if unresolved. Previously this whole
-                // outcome (cash included) was discarded when a single item had
-                // no displayed value — that silently dropped real payouts. Now
-                // the item is recorded as unpriced and backfilled asynchronously
-                // by resolveUnknownItemPrices(); nothing is ever lost.
-                items.push({ id, name, quantity, unitValue });
+        for (const entry of rewards) {
+            if (entry && entry.type === 'money') {
+                const value = Number(entry.value);
+                if (Number.isFinite(value)) cash += value;
                 continue;
             }
-            const amounts = normalizeText(reward.textContent).match(/\$[\d,]+(?:\.\d{1,2})?/g) || [];
-            if (amounts.length !== 1) return false;
-            const value = parseCurrency(amounts[0]);
-            if (value === null) return false;
-            cash += value;
+            if (entry && entry.type === 'items' && Array.isArray(entry.value)) {
+                for (const it of entry.value) {
+                    const id = it && it.id !== undefined && it.id !== null ? String(it.id) : '';
+                    const quantity = Number(it && it.amount);
+                    const name = normalizeText(it && it.name);
+                    if (!id || !name || !Number.isInteger(quantity) || quantity < 1) continue;
+                    const unitValue = (itemPriceCache[id] && typeof itemPriceCache[id].value === 'number') ? itemPriceCache[id].value : null;
+                    items.push({ id, name, quantity, unitValue });
+                }
+            }
         }
 
         pollNerve();
         const nerve = consumeNerveSpend();
-        const itemValue = items.reduce((total, item) => total + (typeof item.unitValue === 'number' ? item.unitValue * item.quantity : 0), 0);
-        const hasUnresolvedItems = items.some((item) => typeof item.unitValue !== 'number');
+        if (!rewards.length) {
+            console.log(`[CCT v${VERSION}] captured a zero-reward success (e.g. Cracking brute-force step) — nerve counted, $0 payout.`);
+        }
         const id = `profit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const record = { id, ts: new Date().toISOString(), cash, itemValue, total: cash + itemValue, items, nerve };
+        const record = { id, ts: new Date().toISOString(), cash, itemValue: 0, total: 0, items, nerve };
+        recomputeRecordTotals(record);
         profitRecords.unshift(record);
-        panel.dataset.cctProfitSeen = '1';
         saveProfitData();
         renderProfitPopover();
-        if (hasUnresolvedItems) resolveUnknownItemPrices();
-        return true;
+
+        if (items.some((item) => typeof item.unitValue !== 'number')) {
+            // Give React a couple of paint cycles to render the outcome popup,
+            // then try the free/no-key DOM tooltip source before falling back
+            // to the API. Double rAF rather than a fixed timeout: ties this to
+            // actual paint cycles instead of guessing a duration.
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+                tryEnrichItemPricesFromDOM(record);
+                if (record.items.some((item) => typeof item.unitValue !== 'number')) resolveUnknownItemPrices();
+            }));
+        }
+    }
+
+    // Best-effort only: looks for the same rendered popup + tooltip the old DOM
+    // capture used, purely as a free pricing source. If the popup isn't there,
+    // or an item's tooltip isn't, this simply leaves unitValue as null for
+    // resolveUnknownItemPrices() to pick up — never a required step.
+    function tryEnrichItemPricesFromDOM(record) {
+        const app = findCrimesApp();
+        if (!app) return;
+        const panels = app.querySelectorAll('.outcome-content.crimes-outcome-success');
+        if (panels.length !== 1) return;
+        const panel = panels[0];
+        let changed = false;
+        for (const item of record.items) {
+            if (typeof item.unitValue === 'number') continue;
+            const image = panel.querySelector(`img[src*="/images/items/${item.id}/"]`);
+            if (!image) continue;
+            const rewardEl = image.closest('[class*="reward"]') || image.parentElement;
+            const displayedTotal = parseCurrency(rewardEl?.querySelector('.tt-crime-value-text')?.textContent);
+            if (displayedTotal === null) continue;
+            const unitValue = displayedTotal / item.quantity;
+            item.unitValue = unitValue;
+            itemPriceCache[item.id] = { name: item.name, value: unitValue, at: Date.now(), source: 'displayed' };
+            changed = true;
+        }
+        if (changed) {
+            recomputeRecordTotals(record);
+            saveProfitData();
+            renderProfitPopover();
+        }
     }
 
     // Fetches an item's official Torn price (torn/{id}?selections=items) as a
@@ -1769,15 +1863,10 @@
         observer = new MutationObserver((mutations) => {
             if (!document.querySelector('#cct-root')) renderWidget();
 
-            // Read the nerve bar before capturing the outcome so a same-batch
-            // nerve-drop mutation is reflected as "before" for THIS outcome
-            // rather than being folded into the reading captureProfitFromOutcome()
-            // itself takes.
+            // Supplementary nerve reading opportunity — profit/reward capture
+            // itself is now handled by the crime-attempt fetch interceptor (see
+            // installCrimeAttemptInterceptor), not by watching this popup render.
             pollNerve();
-
-            // The parser only accepts Torn's single rendered success-outcome popup.
-            // This runs immediately when that popup is populated, so it can be closed.
-            captureProfitFromOutcome();
 
             const synced = syncFromNativeBadge();
 
