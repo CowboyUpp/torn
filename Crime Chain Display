@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.7.4
+// @version      4.7.5
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -16,7 +16,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.7.4';
+    const VERSION = '4.7.5';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -539,6 +539,13 @@
     // Requires a valid Torn API key — item price is public data, so the
     // already-stored log-scoped key works fine for this too. Returns null (never
     // a guess) if no key is set, the item has no listed price, or the request fails.
+    //
+    // Field name verified against Torn's own response shape: the items selection
+    // returns market_value (resale/market price), NOT a field literally named
+    // "price" — v4.7.4 read the wrong key and silently failed to resolve every
+    // single item, which is why item 178 (and everything else) came back
+    // unresolved. sell_price is a documented secondary fallback for the rare
+    // item where market_value is 0/missing but a fixed sell-to-NPC price exists.
     async function fetchOfficialItemPrice(id) {
         const key = getLogApiKey();
         if (!key) return null;
@@ -549,8 +556,12 @@
                 logDiagnostic('item-price-fetch-error', `Item ${id}: ${data.error.error || 'API error'}`);
                 return null;
             }
-            const price = Number(data?.items?.[id]?.price);
-            return Number.isFinite(price) && price >= 0 ? price : null;
+            const item = data?.items?.[id];
+            const marketValue = Number(item?.market_value);
+            if (Number.isFinite(marketValue) && marketValue > 0) return marketValue;
+            const sellPrice = Number(item?.sell_price);
+            if (Number.isFinite(sellPrice) && sellPrice > 0) return sellPrice;
+            return Number.isFinite(marketValue) && marketValue >= 0 ? marketValue : null;
         } catch (err) {
             logDiagnostic('item-price-fetch-error', `Item ${id}: ${String(err)}`);
             return null;
@@ -1892,6 +1903,10 @@
         // between mutation bursts (or on a route the observer isn't watching)
         // still gets caught before its window expires.
         setInterval(pollNerve, 1500);
+        // One-time sweep on load: retries any item left unresolved by an earlier
+        // session (e.g. the market_value/price field-name bug in 4.7.4, which
+        // made every lookup fail regardless of item) now that the fix is live.
+        resolveUnknownItemPrices();
         console.log(`[CCT v${VERSION}] Hardened crime chain tracker loaded.`);
     }
 
