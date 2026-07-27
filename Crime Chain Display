@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.7.3
+// @version      4.7.4
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -16,7 +16,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.7.3';
+    const VERSION = '4.7.4';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -78,6 +78,10 @@
     // unknown for that record (rendered as "—"), it never guesses.
     let nerveTracker = { last: null, pendingSpend: null, pendingAt: 0, warnedMissing: false };
     const NERVE_PENDING_WINDOW_MS = 15000;
+    // Session-only guard so an item with no resolvable price (no key set, or
+    // Torn genuinely has no listed price for it) isn't re-fetched on every
+    // capture. Cleared on page reload, matching itemPriceCache's own TTL model.
+    const itemPriceFetchAttempted = new Set();
 
     const THEME = {
         dark: {
@@ -488,10 +492,24 @@
                 const id = image.src.match(/\/images\/items\/(\d+)\//)?.[1];
                 const quantity = Number(normalizeText(reward.querySelector('[class*="count"]')?.textContent || '1'));
                 const name = normalizeText(image.alt).replace(/,\s*\d+\s*$/, '');
+                if (!id || !name || !Number.isInteger(quantity) || quantity < 1) return false;
                 const displayedTotal = parseCurrency(reward.querySelector('.tt-crime-value-text')?.textContent);
-                if (!id || !name || !Number.isInteger(quantity) || quantity < 1 || displayedTotal === null) return false;
-                const unitValue = displayedTotal / quantity;
-                itemPriceCache[id] = { name, value: unitValue, at: Date.now() };
+                let unitValue = null;
+                if (displayedTotal !== null) {
+                    unitValue = displayedTotal / quantity;
+                    itemPriceCache[id] = { name, value: unitValue, at: Date.now(), source: 'displayed' };
+                } else if (itemPriceCache[id] && typeof itemPriceCache[id].value === 'number') {
+                    // Torn didn't render an inline value for this item this time
+                    // (common for special/quest-type items, e.g. a forged ID
+                    // Badge, which have no open-market tooltip) — reuse a price
+                    // already resolved for the same item id instead of losing it.
+                    unitValue = itemPriceCache[id].value;
+                }
+                // unitValue stays null if unresolved. Previously this whole
+                // outcome (cash included) was discarded when a single item had
+                // no displayed value — that silently dropped real payouts. Now
+                // the item is recorded as unpriced and backfilled asynchronously
+                // by resolveUnknownItemPrices(); nothing is ever lost.
                 items.push({ id, name, quantity, unitValue });
                 continue;
             }
@@ -504,20 +522,88 @@
 
         pollNerve();
         const nerve = consumeNerveSpend();
-        const itemValue = items.reduce((total, item) => total + (item.unitValue * item.quantity), 0);
+        const itemValue = items.reduce((total, item) => total + (typeof item.unitValue === 'number' ? item.unitValue * item.quantity : 0), 0);
+        const hasUnresolvedItems = items.some((item) => typeof item.unitValue !== 'number');
         const id = `profit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        profitRecords.unshift({ id, ts: new Date().toISOString(), cash, itemValue, total: cash + itemValue, items, nerve });
+        const record = { id, ts: new Date().toISOString(), cash, itemValue, total: cash + itemValue, items, nerve };
+        profitRecords.unshift(record);
         panel.dataset.cctProfitSeen = '1';
         saveProfitData();
         renderProfitPopover();
+        if (hasUnresolvedItems) resolveUnknownItemPrices();
         return true;
+    }
+
+    // Fetches an item's official Torn price (torn/{id}?selections=items) as a
+    // fallback source when the outcome popup didn't render an inline value.
+    // Requires a valid Torn API key — item price is public data, so the
+    // already-stored log-scoped key works fine for this too. Returns null (never
+    // a guess) if no key is set, the item has no listed price, or the request fails.
+    async function fetchOfficialItemPrice(id) {
+        const key = getLogApiKey();
+        if (!key) return null;
+        try {
+            const res = await fetch(`https://api.torn.com/torn/${encodeURIComponent(id)}?selections=items&key=${encodeURIComponent(key)}`);
+            const data = await res.json();
+            if (data?.error) {
+                logDiagnostic('item-price-fetch-error', `Item ${id}: ${data.error.error || 'API error'}`);
+                return null;
+            }
+            const price = Number(data?.items?.[id]?.price);
+            return Number.isFinite(price) && price >= 0 ? price : null;
+        } catch (err) {
+            logDiagnostic('item-price-fetch-error', `Item ${id}: ${String(err)}`);
+            return null;
+        }
+    }
+
+    // Resolves any item ids still missing a price across ALL stored records
+    // (not just the one that just triggered this), then recomputes every
+    // affected record's itemValue/total and re-renders. Each id is only
+    // attempted once per page session to avoid hammering the API.
+    async function resolveUnknownItemPrices() {
+        const unresolvedIds = [...new Set(
+            profitRecords.flatMap((rec) => rec.items.filter((it) => typeof it.unitValue !== 'number').map((it) => it.id))
+        )].filter((itemId) => !itemPriceFetchAttempted.has(itemId));
+        if (!unresolvedIds.length) return;
+        for (const itemId of unresolvedIds) {
+            itemPriceFetchAttempted.add(itemId);
+            const price = await fetchOfficialItemPrice(itemId);
+            if (price === null) {
+                logDiagnostic('item-price-unresolved', `Could not resolve a price for item ${itemId} — it will show as unpriced. This usually means no log-scoped API key is set, or the item has no listed Torn price.`);
+                continue;
+            }
+            const name = profitRecords.flatMap((rec) => rec.items).find((it) => it.id === itemId)?.name || `item ${itemId}`;
+            itemPriceCache[itemId] = { name, value: price, at: Date.now(), source: 'api' };
+        }
+        let changed = false;
+        for (const rec of profitRecords) {
+            let recItemValue = 0;
+            for (const it of rec.items) {
+                if (typeof it.unitValue !== 'number' && itemPriceCache[it.id]) {
+                    it.unitValue = itemPriceCache[it.id].value;
+                    changed = true;
+                }
+                if (typeof it.unitValue === 'number') recItemValue += it.unitValue * it.quantity;
+            }
+            const newTotal = rec.cash + recItemValue;
+            if (rec.itemValue !== recItemValue || rec.total !== newTotal) {
+                rec.itemValue = recItemValue;
+                rec.total = newTotal;
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveProfitData();
+            renderProfitPopover();
+        }
     }
 
     function profitRows(period) {
         const grouped = new Map();
         for (const record of profitRecords) {
             const key = profitPeriodKey(record.ts, period);
-            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0 };
+            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, unresolvedCount: 0 };
             row.cash += record.cash; row.itemValue += record.itemValue; row.total += record.total; row.count += 1;
             // Only records with a matched nerve reading contribute to the ratio,
             // on both sides of the division — an unmatched record (nerve bar
@@ -528,6 +614,7 @@
                 row.nerve += record.nerve;
                 row.totalWithNerve += record.total;
             }
+            if (record.items.some((it) => typeof it.unitValue !== 'number')) row.unresolvedCount += 1;
             grouped.set(key, row);
         }
         return [...grouped.values()].sort((a, b) => b.key.localeCompare(a.key));
@@ -547,7 +634,7 @@
             totalWithNerve: sum.totalWithNerve + row.totalWithNerve,
         }), { cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0 });
         popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
-        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? rows.map((row) => `<div class="cct-profit-row"><b>${escapeHTML(row.key)}</b><span>${money(row.cash)} cash · ${money(row.itemValue)} items · ${ratioText(row.totalWithNerve, row.nerve)}/N</span></div>`).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
+        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? rows.map((row) => `<div class="cct-profit-row"><b>${escapeHTML(row.key)}</b><span>${money(row.cash)} cash · ${money(row.itemValue)} items · ${ratioText(row.totalWithNerve, row.nerve)}/N${row.unresolvedCount ? ` · ⏳ ${row.unresolvedCount} pending price` : ''}</span></div>`).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
         popover.querySelectorAll('[data-profit-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.profitPeriod === period));
         const resetBtn = popover.querySelector('#cct-profit-reset');
         if (resetBtn) resetBtn.disabled = profitRecords.length === 0;
