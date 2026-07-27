@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.7.5
+// @version      4.7.8
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -16,7 +16,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.7.5';
+    const VERSION = '4.7.8';
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
     const STORAGE_KEY_THEME = 'cct_theme_v4';
@@ -82,6 +82,11 @@
     // Torn genuinely has no listed price for it) isn't re-fetched on every
     // capture. Cleared on page reload, matching itemPriceCache's own TTL model.
     const itemPriceFetchAttempted = new Set();
+    // Reason the most recent attempt for a given item id failed, so the UI can
+    // tell a fixable permissions gap (wrong key selections) apart from a
+    // transient network/API error or a genuinely unpriced item, instead of
+    // lumping everything into one vague "pending" state.
+    const itemPriceFetchFailureReason = new Map();
 
     const THEME = {
         dark: {
@@ -548,14 +553,24 @@
     // item where market_value is 0/missing but a fixed sell-to-NPC price exists.
     async function fetchOfficialItemPrice(id) {
         const key = getLogApiKey();
-        if (!key) return null;
+        if (!key) {
+            itemPriceFetchFailureReason.set(id, 'no-key');
+            return null;
+        }
         try {
             const res = await fetch(`https://api.torn.com/torn/${encodeURIComponent(id)}?selections=items&key=${encodeURIComponent(key)}`);
             const data = await res.json();
             if (data?.error) {
+                // Code 16 = "Access level of this key is not high enough" — this is a
+                // Custom-key permissions gap, not a broken key: the Torn > Items
+                // selection is a separate checkbox from the User > log selection
+                // this key was originally created for. Flagged distinctly so the UI
+                // can point at the actual fix instead of a generic error.
+                itemPriceFetchFailureReason.set(id, data.error.code === 16 ? 'permissions' : 'api-error');
                 logDiagnostic('item-price-fetch-error', `Item ${id}: ${data.error.error || 'API error'}`);
                 return null;
             }
+            itemPriceFetchFailureReason.delete(id);
             const item = data?.items?.[id];
             const marketValue = Number(item?.market_value);
             if (Number.isFinite(marketValue) && marketValue > 0) return marketValue;
@@ -563,6 +578,7 @@
             if (Number.isFinite(sellPrice) && sellPrice > 0) return sellPrice;
             return Number.isFinite(marketValue) && marketValue >= 0 ? marketValue : null;
         } catch (err) {
+            itemPriceFetchFailureReason.set(id, 'api-error');
             logDiagnostic('item-price-fetch-error', `Item ${id}: ${String(err)}`);
             return null;
         }
@@ -581,7 +597,13 @@
             itemPriceFetchAttempted.add(itemId);
             const price = await fetchOfficialItemPrice(itemId);
             if (price === null) {
-                logDiagnostic('item-price-unresolved', `Could not resolve a price for item ${itemId} — it will show as unpriced. This usually means no log-scoped API key is set, or the item has no listed Torn price.`);
+                const reason = itemPriceFetchFailureReason.get(itemId);
+                const reasonText = reason === 'permissions'
+                    ? 'this key is missing the "Items" selection under the Torn category — the log selection alone isn\'t enough. Edit the key in Preferences > API Keys and check Torn > Items.'
+                    : reason === 'no-key'
+                        ? 'no log-scoped API key is set.'
+                        : 'either the item has no listed Torn price, or the request failed.';
+                logDiagnostic('item-price-unresolved', `Could not resolve a price for item ${itemId} — it will show as unpriced. Reason: ${reasonText}`);
                 continue;
             }
             const name = profitRecords.flatMap((rec) => rec.items).find((it) => it.id === itemId)?.name || `item ${itemId}`;
@@ -614,7 +636,7 @@
         const grouped = new Map();
         for (const record of profitRecords) {
             const key = profitPeriodKey(record.ts, period);
-            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, unresolvedCount: 0 };
+            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, unresolvedCount: 0, permissionsBlocked: false };
             row.cash += record.cash; row.itemValue += record.itemValue; row.total += record.total; row.count += 1;
             // Only records with a matched nerve reading contribute to the ratio,
             // on both sides of the division — an unmatched record (nerve bar
@@ -625,7 +647,12 @@
                 row.nerve += record.nerve;
                 row.totalWithNerve += record.total;
             }
-            if (record.items.some((it) => typeof it.unitValue !== 'number')) row.unresolvedCount += 1;
+            for (const it of record.items) {
+                if (typeof it.unitValue !== 'number') {
+                    row.unresolvedCount += 1;
+                    if (itemPriceFetchFailureReason.get(it.id) === 'permissions') row.permissionsBlocked = true;
+                }
+            }
             grouped.set(key, row);
         }
         return [...grouped.values()].sort((a, b) => b.key.localeCompare(a.key));
@@ -645,7 +672,12 @@
             totalWithNerve: sum.totalWithNerve + row.totalWithNerve,
         }), { cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0 });
         popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
-        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? rows.map((row) => `<div class="cct-profit-row"><b>${escapeHTML(row.key)}</b><span>${money(row.cash)} cash · ${money(row.itemValue)} items · ${ratioText(row.totalWithNerve, row.nerve)}/N${row.unresolvedCount ? ` · ⏳ ${row.unresolvedCount} pending price` : ''}</span></div>`).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
+        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? rows.map((row) => {
+            const pendingTag = row.permissionsBlocked
+                ? ` · <span class="cct-profit-warn" title="Your API key is missing the &quot;Items&quot; selection under the Torn category. Edit it in Preferences &gt; API Keys, check Torn &gt; Items, then reopen this panel.">⚠️ key missing Items access</span>`
+                : row.unresolvedCount ? ` · ⏳ ${row.unresolvedCount} pending price` : '';
+            return `<div class="cct-profit-row"><b>${escapeHTML(row.key)}</b><span>${money(row.cash)} cash · ${money(row.itemValue)} items · ${ratioText(row.totalWithNerve, row.nerve)}/N${pendingTag}</span></div>`;
+        }).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
         popover.querySelectorAll('[data-profit-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.profitPeriod === period));
         const resetBtn = popover.querySelector('#cct-profit-reset');
         if (resetBtn) resetBtn.disabled = profitRecords.length === 0;
@@ -1150,13 +1182,12 @@
                 top: calc(100% + 6px);
                 left: 0;
                 z-index: 9999;
-                width: max-content;
+                width: 380px;
                 max-width: calc(100vw - 24px);
                 box-sizing: border-box;
                 padding: 10px 12px;
                 border-radius: 8px;
                 box-shadow: 0 6px 20px rgba(0,0,0,0.5);
-                white-space: nowrap;
                 flex-direction: column;
                 gap: 8px;
                 font-size: 12px;
@@ -1369,11 +1400,12 @@
             }
             #cct-profit-reset:hover { opacity: 1; background: rgba(255,60,60,0.12); }
             #cct-profit-reset:disabled { opacity: 0.25; cursor: default; background: transparent; }
-            #cct-version-footer {
+            .cct-version-footer {
                 white-space: normal;
                 font-size: 10px;
                 opacity: 0.4;
                 text-align: right;
+                margin-top: 4px;
             }
             #cct-profit-popover {
                 display: none;
@@ -1402,6 +1434,7 @@
             #cct-profit-rows { display: grid; gap: 5px; margin-top: 8px; }
             .cct-profit-row { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; }
             .cct-profit-row span { text-align: right; opacity: 0.78; }
+            .cct-profit-warn { opacity: 1 !important; color: #ff9a3c; cursor: help; }
             .cct-profit-empty { font-size: 11px; opacity: 0.65; padding: 8px 0; }
         `;
         document.head.appendChild(style);
@@ -1517,7 +1550,7 @@
                     <button id="cct-chain-save" type="button">Set Chain</button>
                 </div>
                 <div id="cct-sync-row">
-                    <label>Log verification</label>
+                    <label>API Key</label>
                     <div id="cct-log-key-row">
                         <input id="cct-log-key-input" type="password" placeholder="log key"
                             value="${escapeHTML(logKey)}" spellcheck="false" autocomplete="off">
@@ -1525,16 +1558,16 @@
                     </div>
                     <div id="cct-log-sync-btn-row">
                         <button id="cct-log-sync-now" type="button">Verify from Logs</button>
-                        <a id="cct-create-log-key-btn" href="https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=CrimeChainLogs&user=log" target="_blank" rel="noopener">Create Log Key</a>
+                        <a id="cct-create-log-key-btn" href="https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=CrimeChainTracker&user=log&torn=items" target="_blank" rel="noopener">Create Key</a>
                     </div>
-                    <span id="cct-log-sync-hint">Uses crime logs to verify and repair the tracker when page data is unreliable.</span>
+                    <span id="cct-log-sync-hint">Also used to verify/repair the chain from crime logs, and to price items for Crime Profit. Needs both "log" (User) and "items" (Torn) selections — the button below requests both.</span>
                 </div>
                 <details id="cct-log-details">
                     <summary>🛠️ Chain update log</summary>
                     <ul id="cct-log-list"></ul>
                     <button id="cct-log-clear" type="button">Clear log</button>
                 </details>
-                <div id="cct-version-footer">Version ${VERSION}</div>
+                <div class="cct-version-footer">Version ${VERSION}</div>
             </div>
             <div id="cct-profit-popover" data-period="day">
                 <div id="cct-profit-title">Crime Profit</div>
@@ -1549,6 +1582,7 @@
                 <div id="cct-profit-reset-row">
                     <button id="cct-profit-reset" type="button">Reset profit history</button>
                 </div>
+                <div class="cct-version-footer">Version ${VERSION}</div>
             </div>
         `;
 
