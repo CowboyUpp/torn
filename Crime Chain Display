@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.0
+// @version      4.9.1
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.0';
+    const VERSION = '4.9.1';
     // TODO after deploying cct-sync-worker.js: replace both this URL and the
     // @connect host above with your real *.workers.dev address (or custom
     // domain). Cross-device sync stays fully inert — no requests fired, no
@@ -1792,6 +1792,8 @@
                 right: 0;
                 z-index: 9999;
                 width: 400px;
+                max-width: calc(100vw - 16px);
+                box-sizing: border-box;
                 max-height: min(68vh, 620px);
                 overflow: auto;
                 padding: 10px 12px;
@@ -2001,6 +2003,54 @@
 
     let outsideClickWired = false;
 
+    // Pure CSS (max-width + right:0/left:0) can bound a popover's *size* to the
+    // viewport, but it can't know where the widget itself actually sits on
+    // screen — on Torn's mobile/PDA layout the widget can be near the left
+    // edge, which left a right-anchored popover mostly off-canvas to the left
+    // with nothing to scroll or drag it into view. This measures the popover's
+    // real on-screen position after CSS has placed it, and nudges it back
+    // in-bounds with an inline left offset (converted into rootEl's own
+    // coordinate space, since the popover is absolutely positioned relative
+    // to rootEl, not the viewport).
+    function clampPopoverToViewport(popover, rootEl) {
+        const margin = 8;
+        const viewportWidth = window.innerWidth;
+        const rootRect = rootEl.getBoundingClientRect();
+        const rect = popover.getBoundingClientRect();
+
+        let desiredLeft = rect.left;
+        if (rect.right > viewportWidth - margin) desiredLeft = viewportWidth - margin - rect.width;
+        if (desiredLeft < margin) desiredLeft = margin;
+
+        popover.style.left = `${desiredLeft - rootRect.left}px`;
+        popover.style.right = 'auto';
+    }
+
+    let viewportClampWired = false;
+
+    function wireViewportClampOnce() {
+        if (viewportClampWired) return;
+        viewportClampWired = true;
+
+        // Re-clamp whichever popover is currently open on resize/rotation —
+        // covers switching a phone between portrait and landscape, or a
+        // desktop window being resized, while a popover is sitting open.
+        const reclamp = () => {
+            const root = document.querySelector('#cct-root');
+            if (!root) return;
+            const settingsPopover = document.querySelector('#cct-settings-popover');
+            const profitPopover = document.querySelector('#cct-profit-popover');
+            if (settingsPopover && settingsPopover.classList.contains('cct-open')) {
+                clampPopoverToViewport(settingsPopover, root);
+            }
+            if (profitPopover && profitPopover.classList.contains('cct-open')) {
+                clampPopoverToViewport(profitPopover, root);
+            }
+        };
+        window.addEventListener('resize', reclamp);
+        window.addEventListener('orientationchange', reclamp);
+    }
+
     function wireOutsideClickOnce() {
         if (outsideClickWired) return;
         outsideClickWired = true;
@@ -2028,7 +2078,10 @@
             e.stopPropagation();
             el.querySelector('#cct-settings-popover').classList.remove('cct-open');
             popover.classList.toggle('cct-open');
-            if (popover.classList.contains('cct-open')) renderProfitPopover();
+            if (popover.classList.contains('cct-open')) {
+                renderProfitPopover();
+                clampPopoverToViewport(popover, el);
+            }
         });
         popover.querySelectorAll('[data-profit-period]').forEach((button) => {
             button.addEventListener('click', () => {
@@ -2041,6 +2094,7 @@
             resetProfitData();
         });
 
+        wireViewportClampOnce();
         wireSyncUI(popover);
     }
 
@@ -2107,10 +2161,14 @@
             e.stopPropagation();
             el.querySelector('#cct-profit-popover').classList.remove('cct-open');
             popover.classList.toggle('cct-open');
-            if (popover.classList.contains('cct-open')) renderCorrectionLog();
+            if (popover.classList.contains('cct-open')) {
+                renderCorrectionLog();
+                clampPopoverToViewport(popover, el);
+            }
         });
 
         wireOutsideClickOnce();
+        wireViewportClampOnce();
 
         el.querySelector('#cct-chain-save').addEventListener('click', () => {
             const input = el.querySelector('#cct-chain-input');
