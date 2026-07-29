@@ -1270,6 +1270,16 @@
                 justify-content: center;
             }
             .cct-icon-btn svg { display: block; }
+            @media (max-width: 480px) {
+                #cct-root { margin-left: 8px; gap: 4px; }
+                #cct-widget { gap: 6px; padding: 3px 8px 3px 4px; }
+                #cct-ring-wrap { width: 22px; height: 22px; }
+                #cct-ring-wrap svg { width: 22px; height: 22px; }
+                #cct-ring-label { font-size: 9px; min-width: 17px; min-height: 17px; inset: 2px; }
+                #cct-label { font-size: 8px; }
+                #cct-status { font-size: 10px; min-width: 58px; }
+                .cct-icon-btn { font-size: 10px; padding: 2px 4px; }
+            }
             #cct-settings-popover {
                 display: none;
                 position: absolute;
