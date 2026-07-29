@@ -1522,11 +1522,11 @@
             .cct-profit-period:not(:last-child)::after { content: '·'; margin-left: 5px; }
             .cct-profit-period.cct-profit-active { font-weight: 700; opacity: 1; }
             #cct-profit-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-            #cct-profit-summary > div, .cct-profit-row { padding: 7px 5px; border-radius: 5px; }
+            #cct-profit-summary > div { padding: 7px 5px; border-radius: 5px; }
             #cct-profit-summary small { display: block; opacity: 0.55; font-size: 9px; white-space: nowrap; }
             #cct-profit-summary strong { font-size: 11px; white-space: nowrap; }
-            #cct-profit-rows { display: grid; gap: 5px; margin-top: 8px; }
-            .cct-profit-row { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; }
+            #cct-profit-rows { display: grid; gap: 2px; margin-top: 8px; }
+            .cct-profit-row { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; padding: 4px 5px; border-radius: 5px; }
             .cct-profit-row span { text-align: right; opacity: 0.78; }
             .cct-profit-warn { opacity: 1 !important; color: #ff9a3c; cursor: help; }
             .cct-profit-empty { font-size: 11px; opacity: 0.65; padding: 8px 0; }
