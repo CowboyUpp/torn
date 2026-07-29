@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.1
+// @version      4.9.2
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.1';
+    const VERSION = '4.9.2';
     // TODO after deploying cct-sync-worker.js: replace both this URL and the
     // @connect host above with your real *.workers.dev address (or custom
     // domain). Cross-device sync stays fully inert — no requests fired, no
@@ -54,6 +54,10 @@
     const SYNC_PUSH_INTERVAL_MS = 10 * 60 * 1000;
     const SYNC_PULL_INTERVAL_MS = 150 * 1000;
     const SYNC_PUSH_BATCH_MAX = 300;
+    // Mirrors the Worker's own TOKEN_RE exactly — catching a malformed token
+    // here means "why is sync failing?" gets answered immediately in the UI
+    // instead of surfacing later as an opaque HTTP 400 from the server.
+    const SYNC_TOKEN_RE = /^[a-zA-Z0-9_-]{16,64}$/;
 
     // Verified against real API responses, not assumed. See torn/logtypes:
     // 9010 = Crime success, 9150 = Crime fail (new). Critical fails fragment across
@@ -490,6 +494,21 @@
     // timestamp actually included in a *successful* push — a large offline
     // backlog simply catches up over a few cycles rather than risking an
     // oversized request or losing track of a failed batch.
+    // Turns the Worker's { error: "..." } response body into something a
+    // non-technical status line can show, instead of just a bare HTTP code —
+    // this is what actually let the invalid-token case below get diagnosed
+    // instead of just retrying blind forever.
+    function describeSyncError(status, responseText) {
+        let body = null;
+        try { body = JSON.parse(responseText); } catch (_) { /* not JSON, ignore */ }
+        const code = body && body.error;
+        if (code === 'invalid-token') return 'Token isn\'t valid (16\u201364 letters/numbers/-/_ only) — use Generate for a safe one';
+        if (code === 'invalid-record-shape' || code === 'invalid-json') return 'Sync data was rejected as malformed — please report this';
+        if (code === 'batch-too-large') return 'Too many records to sync in one go — will retry in smaller batches next cycle';
+        if (code === 'unauthorized') return 'Not authorized';
+        return `HTTP ${status}`;
+    }
+
     async function pushProfitRecords() {
         if (!syncEnabled || !syncToken || !profitRecords.length) return;
 
@@ -511,7 +530,7 @@
                 saveSyncPushCursor(newest);
                 setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
             } else {
-                setSyncStatus(`Push failed (HTTP ${res.status}) — will retry`);
+                setSyncStatus(`Push failed: ${describeSyncError(res.status, res.responseText)}`);
                 logDiagnostic('sync-push-failed', { status: res.status, body: String(res.responseText || '').slice(0, 300) });
             }
         } catch (err) {
@@ -533,7 +552,7 @@
                 url: `${SYNC_WORKER_URL}/records?token=${encodeURIComponent(syncToken)}&since=${syncPullCursor}`,
             });
             if (res.status < 200 || res.status >= 300) {
-                setSyncStatus(`Pull failed (HTTP ${res.status}) — will retry`);
+                setSyncStatus(`Pull failed: ${describeSyncError(res.status, res.responseText)}`);
                 logDiagnostic('sync-pull-failed', { status: res.status, body: String(res.responseText || '').slice(0, 300) });
                 return;
             }
@@ -1724,6 +1743,26 @@
                 padding-top: 8px;
                 border-top: 1px solid rgba(128,128,128,0.18);
             }
+            #cct-sync-section summary {
+                cursor: pointer;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                opacity: 0.75;
+                outline: none;
+                user-select: none;
+            }
+            #cct-sync-section summary:hover { opacity: 1; }
+            #cct-sync-section[open] summary { margin-bottom: 8px; }
+            .cct-sync-on-dot {
+                display: inline-block;
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: #16a34a;
+                margin-left: 4px;
+                vertical-align: middle;
+            }
             #cct-sync-toggle-row { margin: 6px 0; }
             .cct-sync-toggle-label {
                 display: inline-flex;
@@ -1962,8 +2001,8 @@
                 <div id="cct-profit-reset-row">
                     <button id="cct-profit-reset" type="button">Reset profit history</button>
                 </div>
-                <div id="cct-sync-section">
-                    <div class="cct-manual-label-row"><label>Cross-device sync</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Optional. Syncs only your Crime Profit history between your own devices via a token only you have. Off by default.</span></span></div>
+                <details id="cct-sync-section">
+                    <summary>🔗 Cross-device sync${syncEnabled ? ' <span class="cct-sync-on-dot" title="Sync is on"></span>' : ''} <span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Optional. Syncs only your Crime Profit history between your own devices via a token only you have. Off by default.</span></span></summary>
                     <div id="cct-sync-toggle-row">
                         <label class="cct-sync-toggle-label">
                             <input id="cct-sync-toggle" type="checkbox" ${syncEnabled ? 'checked' : ''}>
@@ -1980,7 +2019,7 @@
                         <span id="cct-sync-status">${escapeHTML(crossSyncLastStatus)}</span>
                     </div>
                     <span id="cct-sync-hint">Same token on both devices links them. Keep it private — it works like a password. Only Crime Profit history syncs; your chain and settings stay local.</span>
-                </div>
+                </details>
                 <div class="cct-version-footer">Version ${VERSION}</div>
             </div>
         `;
@@ -2129,7 +2168,12 @@
         });
 
         saveBtn.addEventListener('click', () => {
-            saveSyncToken(tokenInput.value);
+            const trimmed = String(tokenInput.value || '').trim();
+            if (trimmed && !SYNC_TOKEN_RE.test(trimmed)) {
+                setSyncStatus('Token must be 16\u201364 letters/numbers/-/_ \u2014 try Generate instead');
+                return;
+            }
+            saveSyncToken(trimmed);
             tokenInput.type = 'password';
             if (!syncToken) {
                 setSyncStatus('Token cleared — sync paused');
