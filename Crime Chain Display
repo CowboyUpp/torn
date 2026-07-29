@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.8.0
-// @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency.
+// @version      4.9.0
+// @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @run-at       document-idle
 // @license      MIT; https://opensource.org/licenses/MIT
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      cct-sync.selbaer.workers.dev
 // @downloadURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.user.js
 // @updateURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.meta.js
 // ==/UserScript==
@@ -16,7 +18,13 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.8.0';
+    const VERSION = '4.9.0';
+    // TODO after deploying cct-sync-worker.js: replace both this URL and the
+    // @connect host above with your real *.workers.dev address (or custom
+    // domain). Cross-device sync stays fully inert — no requests fired, no
+    // permission prompt shown — until the person opts in AND a token is set,
+    // regardless of what this is set to.
+    const SYNC_WORKER_URL = 'https://cct-sync.selbaer.workers.dev';
     // Installed immediately, before anything else, so a crime attempt fired in
     // the brief window before waitForApp() resolves is never missed. Function
     // declaration is hoisted, so this call can sit ahead of its definition.
@@ -29,12 +37,23 @@
     const STORAGE_KEY_DIAGNOSTICS = 'cct_diagnostics_v4';
     const STORAGE_KEY_PROFIT_RECORDS = 'cct_profit_records_v1';
     const STORAGE_KEY_ITEM_PRICES = 'cct_profit_prices_v1';
+    const STORAGE_KEY_SYNC_ENABLED = 'cct_sync_enabled_v1';
+    const STORAGE_KEY_SYNC_TOKEN = 'cct_sync_token_v1';
+    const STORAGE_KEY_SYNC_PUSH_CURSOR = 'cct_sync_push_cursor_v1';
+    const STORAGE_KEY_SYNC_PULL_CURSOR = 'cct_sync_pull_cursor_v1';
     const CORRECTION_LOG_MAX = 15;
     const DIAGNOSTIC_LOG_MAX = 10;
     const CHAIN_CAP_DISPLAY = 100;
     const OUTCOME_DEDUPE_MS = 3500;
     const MAX_REASONABLE_COUNTER_DELTA = 10;
     const ITEM_PRICE_CACHE_MS = 24 * 60 * 60 * 1000;
+    // Push (write) is the scarce resource on the Worker's free KV tier (1,000
+    // writes/day shared across every opted-in user), so it's batched on a slow
+    // 10-min cycle. Pull (read) is cheap (100k/day) so it runs far more often,
+    // which is what actually makes cross-device stats feel close to live.
+    const SYNC_PUSH_INTERVAL_MS = 10 * 60 * 1000;
+    const SYNC_PULL_INTERVAL_MS = 150 * 1000;
+    const SYNC_PUSH_BATCH_MAX = 300;
 
     // Verified against real API responses, not assumed. See torn/logtypes:
     // 9010 = Crime success, 9150 = Crime fail (new). Critical fails fragment across
@@ -66,6 +85,18 @@
     let confirmedCriticalFails = null;
     let profitRecords = readProfitRecords();
     let itemPriceCache = readItemPriceCache();
+
+    // Cross-device Crime Profit sync (opt-in, off by default — see wireSyncUI()).
+    // Named distinctly from the pre-existing `syncTimer` above, which is the
+    // unrelated SPA-navigation debounce timer.
+    let syncEnabled = safeGet(STORAGE_KEY_SYNC_ENABLED, '0') === '1';
+    let syncToken = safeGet(STORAGE_KEY_SYNC_TOKEN, '');
+    let syncPushCursor = Number(safeGet(STORAGE_KEY_SYNC_PUSH_CURSOR, '0')) || 0;
+    let syncPullCursor = Number(safeGet(STORAGE_KEY_SYNC_PULL_CURSOR, '0')) || 0;
+    let crossSyncPushTimer = null;
+    let crossSyncPullTimer = null;
+    let crossSyncInFlight = false;
+    let crossSyncLastStatus = '';
 
     // Nerve capture: there is no confirmed, documented "Nerve outgoing" log
     // type in Torn's API (torn/logtypes has no such entry, and nerve cost is
@@ -386,6 +417,190 @@
         profitRecords = [];
         saveProfitData();
         renderProfitPopover();
+    }
+
+    function saveSyncEnabled(enabled) {
+        syncEnabled = Boolean(enabled);
+        safeSet(STORAGE_KEY_SYNC_ENABLED, syncEnabled ? '1' : '0');
+    }
+
+    function saveSyncToken(token) {
+        syncToken = String(token || '').trim();
+        safeSet(STORAGE_KEY_SYNC_TOKEN, syncToken);
+    }
+
+    function saveSyncPushCursor(ts) {
+        syncPushCursor = ts;
+        safeSet(STORAGE_KEY_SYNC_PUSH_CURSOR, String(ts));
+    }
+
+    function saveSyncPullCursor(ts) {
+        syncPullCursor = ts;
+        safeSet(STORAGE_KEY_SYNC_PULL_CURSOR, String(ts));
+    }
+
+    // 122 bits of entropy, no external dependency — this token is the only
+    // thing gating access to a KV partition on the shared Worker, so it must
+    // never be predictable. Treated like the log API key everywhere in the
+    // UI: password-masked input, never written to the diagnostics log.
+    function generateSyncToken() {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID().replace(/-/g, '');
+        }
+        // Fallback for older engines: still crypto-sourced, just assembled by hand.
+        const bytes = new Uint8Array(16);
+        (crypto.getRandomValues ? crypto : window.crypto).getRandomValues(bytes);
+        return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // Thin Promise wrapper around GM_xmlhttpRequest, used instead of page fetch()
+    // specifically because it's a brand-new cross-origin destination outside
+    // Torn's own API — GM_xmlhttpRequest runs outside the page's CSP, whereas
+    // window.fetch to a new host could silently be blocked by it. Declared via
+    // @connect in the userscript header, which is what triggers Tampermonkey's
+    // one-time cross-origin permission prompt on first use.
+    function gmRequest(details) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('GM_xmlhttpRequest not granted'));
+                return;
+            }
+            GM_xmlhttpRequest({
+                ...details,
+                onload: (res) => resolve(res),
+                onerror: (err) => reject(err || new Error('network error')),
+                ontimeout: () => reject(new Error('timeout')),
+                timeout: 15000,
+            });
+        });
+    }
+
+    function syncStatusEl() {
+        return document.querySelector('#cct-sync-status');
+    }
+
+    function setSyncStatus(text) {
+        crossSyncLastStatus = text;
+        const el = syncStatusEl();
+        if (el) el.textContent = text;
+    }
+
+    // Pushes any local records newer than the push cursor, oldest-first, capped
+    // at SYNC_PUSH_BATCH_MAX per call. The cursor only advances to the newest
+    // timestamp actually included in a *successful* push — a large offline
+    // backlog simply catches up over a few cycles rather than risking an
+    // oversized request or losing track of a failed batch.
+    async function pushProfitRecords() {
+        if (!syncEnabled || !syncToken || !profitRecords.length) return;
+
+        const pending = profitRecords
+            .filter((r) => new Date(r.ts).getTime() > syncPushCursor)
+            .sort((a, b) => new Date(a.ts) - new Date(b.ts))
+            .slice(0, SYNC_PUSH_BATCH_MAX);
+        if (!pending.length) return;
+
+        try {
+            const res = await gmRequest({
+                method: 'POST',
+                url: `${SYNC_WORKER_URL}/records`,
+                headers: { 'Content-Type': 'application/json' },
+                data: JSON.stringify({ token: syncToken, records: pending }),
+            });
+            if (res.status >= 200 && res.status < 300) {
+                const newest = Math.max(...pending.map((r) => new Date(r.ts).getTime()));
+                saveSyncPushCursor(newest);
+                setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
+            } else {
+                setSyncStatus(`Push failed (HTTP ${res.status}) — will retry`);
+                logDiagnostic('sync-push-failed', { status: res.status, body: String(res.responseText || '').slice(0, 300) });
+            }
+        } catch (err) {
+            setSyncStatus('Push failed — will retry');
+            logDiagnostic('sync-push-error', String(err && err.message || err));
+        }
+    }
+
+    // Pulls anything newer than the pull cursor and merges by id — safe even if
+    // the server returns overlap with what's already stored locally, since a
+    // record's id is unique and never reused. Recomputes/re-renders only if
+    // something new was actually merged in.
+    async function pullProfitRecords() {
+        if (!syncEnabled || !syncToken) return;
+
+        try {
+            const res = await gmRequest({
+                method: 'GET',
+                url: `${SYNC_WORKER_URL}/records?token=${encodeURIComponent(syncToken)}&since=${syncPullCursor}`,
+            });
+            if (res.status < 200 || res.status >= 300) {
+                setSyncStatus(`Pull failed (HTTP ${res.status}) — will retry`);
+                logDiagnostic('sync-pull-failed', { status: res.status, body: String(res.responseText || '').slice(0, 300) });
+                return;
+            }
+            let body;
+            try { body = JSON.parse(res.responseText); } catch (_) { body = null; }
+            const incoming = (body && Array.isArray(body.records)) ? body.records : [];
+            if (!incoming.length) {
+                setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
+                return;
+            }
+
+            const existingIds = new Set(profitRecords.map((r) => r.id));
+            let mergedCount = 0;
+            let newestSeen = syncPullCursor;
+            for (const r of incoming) {
+                newestSeen = Math.max(newestSeen, new Date(r.ts).getTime() || 0);
+                if (existingIds.has(r.id)) continue;
+                profitRecords.push(r);
+                existingIds.add(r.id);
+                mergedCount++;
+            }
+
+            if (mergedCount > 0) {
+                profitRecords.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+                saveProfitData();
+                renderProfitPopover();
+            }
+            saveSyncPullCursor(newestSeen);
+            setSyncStatus(mergedCount
+                ? `Synced ✓ pulled ${mergedCount} from other device${mergedCount === 1 ? '' : 's'}`
+                : `Synced ✓ ${relativeTime(Date.now())}`);
+        } catch (err) {
+            setSyncStatus('Pull failed — will retry');
+            logDiagnostic('sync-pull-error', String(err && err.message || err));
+        }
+    }
+
+    // Shared entry point for both the periodic timers and the manual
+    // "Sync now" button. Guarded against overlap so a slow request can't
+    // stack with the next timer tick or a second manual click.
+    async function runCrossDeviceSync() {
+        if (!syncEnabled || !syncToken || crossSyncInFlight) return;
+        crossSyncInFlight = true;
+        setSyncStatus('Syncing…');
+        try {
+            await pushProfitRecords();
+            await pullProfitRecords();
+        } finally {
+            crossSyncInFlight = false;
+        }
+    }
+
+    function stopCrossDeviceSync() {
+        clearInterval(crossSyncPushTimer);
+        clearInterval(crossSyncPullTimer);
+        crossSyncPushTimer = null;
+        crossSyncPullTimer = null;
+    }
+
+    function startCrossDeviceSync() {
+        stopCrossDeviceSync();
+        if (!syncEnabled || !syncToken) return;
+        crossSyncPushTimer = setInterval(pushProfitRecords, SYNC_PUSH_INTERVAL_MS);
+        crossSyncPullTimer = setInterval(pullProfitRecords, SYNC_PULL_INTERVAL_MS);
+        // Kick off an immediate combined sync so enabling the toggle (or
+        // reloading with it already on) doesn't sit idle until the first timer.
+        runCrossDeviceSync();
     }
 
     function parseCurrency(text) {
@@ -1504,6 +1719,65 @@
             }
             #cct-profit-reset:hover { opacity: 1; background: rgba(255,60,60,0.12); }
             #cct-profit-reset:disabled { opacity: 0.25; cursor: default; background: transparent; }
+            #cct-sync-section {
+                margin-top: 10px;
+                padding-top: 8px;
+                border-top: 1px solid rgba(128,128,128,0.18);
+            }
+            #cct-sync-toggle-row { margin: 6px 0; }
+            .cct-sync-toggle-label {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 11px;
+                cursor: pointer;
+                opacity: 0.9;
+            }
+            .cct-sync-toggle-label input { cursor: pointer; }
+            #cct-sync-token-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            #cct-sync-token-input {
+                flex: 1;
+                min-width: 0;
+                padding: 4px 7px;
+                font-size: 12px;
+                border-radius: 5px;
+                outline: none;
+            }
+            #cct-sync-token-generate,
+            #cct-sync-token-save,
+            #cct-sync-now {
+                padding: 4px 9px;
+                font-size: 11px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: background 0.15s;
+                white-space: nowrap;
+            }
+            #cct-sync-action-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 2px;
+            }
+            #cct-sync-status {
+                font-size: 10px;
+                opacity: 0.65;
+                white-space: normal;
+                line-height: 1.4;
+            }
+            #cct-sync-hint {
+                display: block;
+                margin-top: 6px;
+                font-size: 10px;
+                opacity: 0.55;
+                white-space: normal;
+                line-height: 1.4;
+            }
             .cct-version-footer {
                 white-space: normal;
                 font-size: 10px;
@@ -1587,7 +1861,7 @@
             });
         }
 
-        document.querySelectorAll('#cct-chain-input,#cct-log-key-input').forEach((input) => {
+        document.querySelectorAll('#cct-chain-input,#cct-log-key-input,#cct-sync-token-input').forEach((input) => {
             input.style.background = th.inputBg;
             input.style.border = `1px solid ${th.inputBorder}`;
             input.style.color = th.popoverColor;
@@ -1595,7 +1869,7 @@
             input.onblur = () => { input.style.borderColor = th.inputBorder; };
         });
 
-        document.querySelectorAll('#cct-chain-save,#cct-log-clear,#cct-log-key-save,#cct-log-sync-now,#cct-create-log-key-btn').forEach((btn) => {
+        document.querySelectorAll('#cct-chain-save,#cct-log-clear,#cct-log-key-save,#cct-log-sync-now,#cct-create-log-key-btn,#cct-sync-token-generate,#cct-sync-token-save,#cct-sync-now').forEach((btn) => {
             btn.style.background = th.saveBg;
             btn.style.border = `1px solid ${th.saveBorder}`;
             btn.style.color = th.popoverColor;
@@ -1686,6 +1960,25 @@
                 <div id="cct-profit-reset-row">
                     <button id="cct-profit-reset" type="button">Reset profit history</button>
                 </div>
+                <div id="cct-sync-section">
+                    <div class="cct-manual-label-row"><label>Cross-device sync</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Optional. Syncs only your Crime Profit history between your own devices via a token only you have. Off by default.</span></span></div>
+                    <div id="cct-sync-toggle-row">
+                        <label class="cct-sync-toggle-label">
+                            <input id="cct-sync-toggle" type="checkbox" ${syncEnabled ? 'checked' : ''}>
+                            <span>Enable sync (beta)</span>
+                        </label>
+                    </div>
+                    <div id="cct-sync-token-row">
+                        <input id="cct-sync-token-input" type="password" placeholder="sync token" value="${escapeHTML(syncToken)}" spellcheck="false" autocomplete="off">
+                        <button id="cct-sync-token-generate" type="button" title="Generate a new random token">Generate</button>
+                        <button id="cct-sync-token-save" type="button">Save</button>
+                    </div>
+                    <div id="cct-sync-action-row">
+                        <button id="cct-sync-now" type="button">Sync now</button>
+                        <span id="cct-sync-status">${escapeHTML(crossSyncLastStatus)}</span>
+                    </div>
+                    <span id="cct-sync-hint">Same token on both devices links them. Keep it private — it works like a password. Only Crime Profit history syncs; your chain and settings stay local.</span>
+                </div>
                 <div class="cct-version-footer">Version ${VERSION}</div>
             </div>
         `;
@@ -1746,6 +2039,63 @@
         popover.querySelector('#cct-profit-reset').addEventListener('click', (e) => {
             e.stopPropagation();
             resetProfitData();
+        });
+
+        wireSyncUI(popover);
+    }
+
+    function wireSyncUI(popover) {
+        const toggleInput = popover.querySelector('#cct-sync-toggle');
+        const tokenInput = popover.querySelector('#cct-sync-token-input');
+        const generateBtn = popover.querySelector('#cct-sync-token-generate');
+        const saveBtn = popover.querySelector('#cct-sync-token-save');
+        const syncNowBtn = popover.querySelector('#cct-sync-now');
+
+        toggleInput.addEventListener('change', () => {
+            saveSyncEnabled(toggleInput.checked);
+            if (syncEnabled && !syncToken) {
+                setSyncStatus('Add or generate a token to start syncing');
+                startCrossDeviceSync(); // no-op until a token exists, but arms the timers
+            } else if (syncEnabled) {
+                setSyncStatus('Enabling…');
+                startCrossDeviceSync();
+            } else {
+                stopCrossDeviceSync();
+                setSyncStatus('Sync disabled');
+            }
+        });
+
+        generateBtn.addEventListener('click', () => {
+            const token = generateSyncToken();
+            tokenInput.type = 'text'; // briefly reveal so it's easy to copy to the other device
+            tokenInput.value = token;
+            saveSyncToken(token);
+            setSyncStatus('New token generated — copy it to your other device, then paste + Save there');
+            if (syncEnabled) startCrossDeviceSync();
+        });
+
+        saveBtn.addEventListener('click', () => {
+            saveSyncToken(tokenInput.value);
+            tokenInput.type = 'password';
+            if (!syncToken) {
+                setSyncStatus('Token cleared — sync paused');
+                stopCrossDeviceSync();
+                return;
+            }
+            setSyncStatus(syncEnabled ? 'Token saved — syncing…' : 'Token saved — enable sync to start');
+            if (syncEnabled) startCrossDeviceSync();
+        });
+
+        syncNowBtn.addEventListener('click', () => {
+            if (!syncEnabled) {
+                setSyncStatus('Enable sync first');
+                return;
+            }
+            if (!syncToken) {
+                setSyncStatus('Add a token first');
+                return;
+            }
+            runCrossDeviceSync();
         });
     }
 
@@ -2040,6 +2390,10 @@
         // session (e.g. the market_value/price field-name bug in 4.7.4, which
         // made every lookup fail regardless of item) now that the fix is live.
         resolveUnknownItemPrices();
+        // Only arms timers/fires a request if the person previously opted in
+        // AND saved a token — stays fully inert otherwise (see SYNC_WORKER_URL
+        // comment near the top).
+        startCrossDeviceSync();
         console.log(`[CCT v${VERSION}] Hardened crime chain tracker loaded.`);
     }
 
