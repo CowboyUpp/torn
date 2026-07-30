@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.5
+// @version      2.9.7
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -10,7 +10,6 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
-// @license      MIT; https://opensource.org/licenses/MIT
 // @downloadURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.user.js
 // @updateURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.meta.js
 // ==/UserScript==
@@ -39,8 +38,23 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.5';
+    const SCRIPT_VERSION = '2.9.7';
     const TARGET_HASH = '#/viewListing';
+
+    const TORN_API_HOST = 'api.torn.com';
+
+    // Manual API settings page, and a "custom key" deep link that pre-selects
+    // only the permissions this script actually needs: the user's Item
+    // Market listings, and the (public) item catalog. Both selections must
+    // be listed explicitly — a custom key does NOT automatically include
+    // public selections, they still have to be checked. Full Access is NOT
+    // required. See https://tornapi.tornplayground.eu/ and Torn's own API
+    // docs for the addNewKey query-param format.
+    const TORN_API_SETUP_URL = 'https://www.torn.com/preferences.php#tab=api';
+    const TORN_CUSTOM_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey'
+        + '&title=' + encodeURIComponent('Item Market Portfolio')
+        + '&user=' + encodeURIComponent('itemmarket')
+        + '&torn=' + encodeURIComponent('items');
 
     const STORAGE = {
         API_KEY: 'imp_api_key',
@@ -388,6 +402,28 @@
             opacity: 0.6;
             cursor: default;
         }
+
+        .tm-link-row {
+            margin-bottom: 12px;
+        }
+
+        .tm-link-row a {
+            text-decoration: none;
+        }
+
+        .tm-link-row a.tm-btn {
+            display: inline-block;
+        }
+
+        .tm-link-row a.tm-secondary-link {
+            margin-left: 10px;
+            color: #4b5a69;
+            font-size: 11px;
+        }
+
+        .tm-link-row a.tm-secondary-link:hover {
+            color: #2e78bf;
+        }
     `);
 
     /**************************************************************************
@@ -455,8 +491,17 @@
         return url.toString();
     }
 
+    // Defense-in-depth: the `next` pagination link comes from the API
+    // response body, not a hardcoded URL. @connect should already restrict
+    // GM_xmlhttpRequest to api.torn.com, but we also verify the hostname
+    // ourselves before ever attaching the user's API key to a URL, so a
+    // malformed or unexpected `next` link can never smuggle the key
+    // somewhere else.
     function ensureApiKeyInNextUrl(nextUrl) {
         const url = new URL(nextUrl, API.BASE);
+        if (url.hostname !== TORN_API_HOST) {
+            throw new Error(`Refusing to attach API key to unexpected host: ${url.hostname}`);
+        }
         url.searchParams.set('key', apiKey);
         return url.toString();
     }
@@ -594,7 +639,7 @@
         return map;
     }
 
-    async function loadItemsDB(forceRefresh = false) {
+    async function loadItemsDB(forceRefresh = false, progressCallback = null) {
         if (!forceRefresh && itemsCache && isFresh(itemsCacheTime, TTL.ITEM_CATALOG_MS)) {
             return {
                 itemsDB: itemsCache,
@@ -603,7 +648,11 @@
             };
         }
 
-        const res = await apiGetWithBackoff(buildApiUrl('/torn/items'), null, 'catalog');
+        if (progressCallback) {
+            progressCallback('Loading Torn item catalog...');
+        }
+
+        const res = await apiGetWithBackoff(buildApiUrl('/torn/items'), progressCallback, 'catalog');
 
         if (res.error) {
             if (itemsCache) {
@@ -816,7 +865,7 @@
     }
 
     async function buildFreshPortfolio(progressCallback, forceCatalogRefresh = false) {
-        const itemsResult = await loadItemsDB(forceCatalogRefresh);
+        const itemsResult = await loadItemsDB(forceCatalogRefresh, progressCallback);
 
         if (itemsResult.error && Object.keys(itemsResult.itemsDB).length === 0) {
             throw new Error(`Could not load item catalog: ${itemsResult.error}`);
@@ -843,16 +892,26 @@
         return document.getElementById('tm-overlay-body');
     }
 
+    function apiKeyLinksHtml() {
+        return `
+            <div class="tm-link-row">
+                <a href="${esc(TORN_CUSTOM_KEY_URL)}" target="_blank" rel="noopener noreferrer" class="tm-btn">Create pre-configured key &#8599;</a>
+                <a href="${esc(TORN_API_SETUP_URL)}" target="_blank" rel="noopener noreferrer" class="tm-secondary-link">or open API settings manually &#8599;</a>
+            </div>
+        `;
+    }
+
     function renderKeyConfigForm() {
         const body = getBody();
 
         body.innerHTML = `
             <div style="padding: 10px 0;">
-                <p style="margin-bottom: 12px; line-height: 1.4; color: #a56500;">
-                    <strong>V2 API Notice:</strong> A Full Access Torn API key is required to read your Item Market listings.
+                <p style="margin-bottom: 12px; line-height: 1.4; color: #2e78bf;">
+                    <strong>API Key Needed:</strong> This script only reads your active Item Market listings and the public item catalog. A <strong>Limited Access</strong> key works, or use the button below to generate a custom key scoped to just the Item Market selection — <strong>Full Access is not required</strong>.
                 </p>
+                ${apiKeyLinksHtml()}
                 <div style="display: flex; margin-bottom: 15px;">
-                    <input type="text" id="tm-key-input" class="tm-input-field" placeholder="Paste Full Access API Key" maxlength="16">
+                    <input type="text" id="tm-key-input" class="tm-input-field" placeholder="Paste API Key" maxlength="16">
                     <button id="tm-save-key-btn" class="tm-btn">Save Key</button>
                 </div>
                 <p class="tm-muted">The key is stored locally in your browser and is only sent directly to Torn's official API.</p>
@@ -911,9 +970,12 @@
                 Portfolio cache: ${portfolioCacheTime ? `${esc(formatDateTime(portfolioCacheTime))} (${esc(cacheAgeText(portfolioCacheTime))})` : 'not cached'}
             </div>
 
+            <p class="tm-muted" style="margin: 0 0 8px;">Only Limited Access (or a custom key with the Item Market selection) is needed — Full Access is not required.</p>
+            ${apiKeyLinksHtml()}
+
             <div style="margin-bottom: 14px;">
                 <div style="display: flex; margin-bottom: 8px;">
-                    <input type="text" id="tm-settings-key-input" class="tm-input-field" placeholder="Paste new Full Access API key" maxlength="16">
+                    <input type="text" id="tm-settings-key-input" class="tm-input-field" placeholder="Paste new API key" maxlength="16">
                     <button id="tm-settings-save-key-btn" class="tm-btn">Save New Key</button>
                 </div>
                 <p class="tm-muted">Saving a new key clears cached data and refreshes immediately.</p>
