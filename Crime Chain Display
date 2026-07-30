@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.2
+// @version      4.9.3
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.2';
+    const VERSION = '4.9.3';
     // TODO after deploying cct-sync-worker.js: replace both this URL and the
     // @connect host above with your real *.workers.dev address (or custom
     // domain). Cross-device sync stays fully inert — no requests fired, no
@@ -1000,11 +1000,22 @@
             totalWithNerve: sum.totalWithNerve + row.totalWithNerve,
         }), { cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0 });
         popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
-        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? rows.map((row) => {
+        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? `<div class="cct-profit-row cct-profit-row-header">
+                <span class="cct-profit-col-date"></span>
+                <span class="cct-profit-col-val">Cash</span>
+                <span class="cct-profit-col-val">Items</span>
+                <span class="cct-profit-col-val">$/N</span>
+            </div>` + rows.map((row) => {
             const pendingTag = row.permissionsBlocked
-                ? ` · <span class="cct-profit-warn" title="Your API key is missing the &quot;Items&quot; selection under the Torn category. Edit it in Preferences &gt; API Keys, check Torn &gt; Items, then reopen this panel.">⚠️ key missing Items access</span>`
-                : row.unresolvedCount ? ` · ⏳ ${row.unresolvedCount} pending price` : '';
-            return `<div class="cct-profit-row"><b>${escapeHTML(row.key)}</b><span>${money(row.cash)} cash · ${money(row.itemValue)} items · ${ratioText(row.totalWithNerve, row.nerve)}/N${pendingTag}</span></div>`;
+                ? `<span class="cct-profit-warn" title="Your API key is missing the &quot;Items&quot; selection under the Torn category. Edit it in Preferences &gt; API Keys, check Torn &gt; Items, then reopen this panel.">⚠️ key missing Items access</span>`
+                : row.unresolvedCount ? `<span class="cct-profit-pending">⏳ ${row.unresolvedCount} pending price</span>` : '';
+            return `<div class="cct-profit-row">
+                <span class="cct-profit-col-date">${escapeHTML(row.key)}</span>
+                <span class="cct-profit-col-val">${money(row.cash)}</span>
+                <span class="cct-profit-col-val">${money(row.itemValue)}</span>
+                <span class="cct-profit-col-val">${ratioText(row.totalWithNerve, row.nerve)}/N</span>
+                ${pendingTag ? `<span class="cct-profit-col-tag">${pendingTag}</span>` : ''}
+            </div>`;
         }).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
         popover.querySelectorAll('[data-profit-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.profitPeriod === period));
         const resetBtn = popover.querySelector('#cct-profit-reset');
@@ -1851,8 +1862,27 @@
             #cct-profit-summary small { display: block; opacity: 0.55; font-size: 9px; white-space: nowrap; }
             #cct-profit-summary strong { font-size: 11px; white-space: nowrap; }
             #cct-profit-rows { display: grid; gap: 2px; margin-top: 8px; }
-            .cct-profit-row { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; padding: 4px 5px; border-radius: 5px; }
-            .cct-profit-row span { text-align: right; opacity: 0.78; }
+            .cct-profit-row {
+                display: grid;
+                grid-template-columns: 1fr 1fr 1fr 1fr;
+                align-items: baseline;
+                gap: 4px 10px;
+                font-size: 10px;
+                padding: 4px 5px;
+                border-radius: 5px;
+            }
+            .cct-profit-row-header {
+                padding-top: 0;
+                padding-bottom: 2px;
+                opacity: 0.5;
+                font-size: 9px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .cct-profit-col-date { text-align: left; font-weight: 600; }
+            .cct-profit-row-header .cct-profit-col-date { font-weight: 600; }
+            .cct-profit-col-val { text-align: right; opacity: 0.85; font-variant-numeric: tabular-nums; white-space: nowrap; }
+            .cct-profit-col-tag { grid-column: 1 / -1; text-align: right; font-size: 9px; opacity: 0.75; }
             .cct-profit-warn { opacity: 1 !important; color: #ff9a3c; cursor: help; }
             .cct-profit-empty { font-size: 11px; opacity: 0.65; padding: 8px 0; }
         `;
@@ -1896,7 +1926,7 @@
             profitPopover.style.background = th.popoverBg;
             profitPopover.style.border = `1px solid ${th.popoverBorder}`;
             profitPopover.style.color = th.popoverColor;
-            profitPopover.querySelectorAll('#cct-profit-summary > div,.cct-profit-row').forEach((el) => {
+            profitPopover.querySelectorAll('#cct-profit-summary > div,.cct-profit-row:not(.cct-profit-row-header)').forEach((el) => {
                 el.style.background = th.saveBg;
                 el.style.border = `1px solid ${th.saveBorder}`;
             });
