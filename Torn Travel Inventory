@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.8.6
+// @version      1.9.0
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,11 +22,16 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.8.6";
+  const SCRIPT_VERSION = "1.9.0";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
   const THEME_STORE = "tti_theme";
+  const CATEGORY_STATE_STORE = "tti_category_state";
+  // Matches Torn's own server-side inventory cache window (1 hour per
+  // category). Past this age, an "empty" reading is stale rather than wrong,
+  // since the category may have refilled since we last checked.
+  const CATEGORY_CACHE_WINDOW_MS = 60 * 60 * 1000;
   const API_KEY_URL =
     "https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Travel%20Inventory&user=inventory";
   const PAGE_SIZE = 250;
@@ -147,11 +152,11 @@
     query: "",
     requestToken: 0,
     theme: String(gmGet(THEME_STORE, "light")) === "dark" ? "dark" : "light",
-    // Per-session (not persisted) record of which categories have been
-    // confirmed empty by the API, so their nav chip can be faded and
-    // disabled. Only ever holds explicit 0s - unknown categories are
-    // simply absent from this map until visited.
-    categoryCounts: {},
+    // Reactive record of which categories came back empty the last time they
+    // were actually loaded, keyed by category id: { empty, checkedAt }.
+    // Built up as the user browses rather than probed upfront, so it costs
+    // zero extra API calls.
+    categoryEmptiness: loadCategoryEmptiness(),
   };
 
   let root;
@@ -191,6 +196,49 @@
 
   function getApiKey() {
     return String(gmGet(KEY_STORE, "")).trim();
+  }
+
+  function loadCategoryEmptiness() {
+    try {
+      const raw = gmGet(CATEGORY_STATE_STORE, "");
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function persistCategoryEmptiness() {
+    try {
+      gmSet(CATEGORY_STATE_STORE, JSON.stringify(state.categoryEmptiness));
+    } catch {
+      /* Best-effort only; a failed write just means the fade resets next load. */
+    }
+  }
+
+  function recordCategoryEmptiness(category, isEmpty) {
+    state.categoryEmptiness[category] = { empty: isEmpty, checkedAt: Date.now() };
+    persistCategoryEmptiness();
+  }
+
+  function resetCategoryEmptiness() {
+    state.categoryEmptiness = {};
+    persistCategoryEmptiness();
+  }
+
+  function getCategoryKnownState(category) {
+    const entry = state.categoryEmptiness[category];
+    if (!entry) return null;
+    const stale = Date.now() - entry.checkedAt >= CATEGORY_CACHE_WINDOW_MS;
+    return { ...entry, stale };
+  }
+
+  function formatRelativeMinutes(timestampMs) {
+    const minutes = Math.max(0, Math.round((Date.now() - timestampMs) / 60000));
+    if (minutes < 1) return "moments ago";
+    if (minutes === 1) return "1 minute ago";
+    return `${minutes} minutes ago`;
   }
 
   function detectDarkTheme() {
@@ -356,16 +404,10 @@
       state.totalKnown = Number.isFinite(reportedTotal) && reportedTotal >= 0;
       state.total = state.totalKnown ? reportedTotal : state.offset + inventory.items.length;
 
-      // Only the first page conclusively tells us whether a category is
-      // empty. A zero-length later page just means we've paged past the
-      // end. Record (or clear) the confirmed-empty flag used to fade and
-      // disable that category's nav chip.
+      // Only the first page tells us whether the category itself is empty;
+      // an empty later page just means we paged past the end.
       if (state.offset === 0) {
-        if (state.items.length === 0) {
-          state.categoryCounts[state.category] = 0;
-        } else {
-          delete state.categoryCounts[state.category];
-        }
+        recordCategoryEmptiness(state.category, inventory.items.length === 0);
       }
     } catch (error) {
       if (token !== state.requestToken) return;
@@ -400,18 +442,23 @@
   function renderCategoryChips() {
     return CATEGORIES.map((category) => {
       const isActive = category === state.category;
-      const isEmpty = state.categoryCounts[category] === 0;
       const label = categoryLabel(category);
+      const known = getCategoryKnownState(category);
+      const isConfirmedEmpty = Boolean(known && known.empty && !known.stale);
+      const tooltip = isConfirmedEmpty
+        ? `${label} — no items ${formatRelativeMinutes(known.checkedAt)}. Torn caches inventory per category for up to an hour, so this clears on its own once new data is available, or once you reload after the cache refreshes.`
+        : label;
+
       return `
         <button
           type="button"
-          class="${APP_ID}-chip${isActive ? " is-active" : ""}${isEmpty ? " is-empty" : ""}"
+          class="${APP_ID}-chip${isActive ? " is-active" : ""}${isConfirmedEmpty ? " is-empty" : ""}"
           data-category="${escapeHtml(category)}"
           role="tab"
           aria-selected="${isActive}"
-          aria-disabled="${isEmpty}"
-          aria-label="${escapeHtml(label)}${isEmpty ? " (empty)" : ""}"
-          title="${escapeHtml(label)}${isEmpty ? " - empty" : ""}"
+          aria-disabled="${isConfirmedEmpty}"
+          aria-label="${escapeHtml(label)}"
+          title="${escapeHtml(tooltip)}"
         >
           ${categoryIconMarkup(category)}
         </button>`;
@@ -594,7 +641,7 @@
           </button>
         </section>
 
-        <nav class="${APP_ID}-categories" role="tablist" aria-label="Item category shortcuts">
+        <nav class="${APP_ID}-categories" role="tablist" aria-label="Item category shortcuts" title="Faded tabs are categories that came back empty last time they were checked. Torn caches inventory for up to an hour per category, so a faded tab clears on its own once fresh data confirms items are there.">
           ${renderCategoryChips()}
         </nav>
 
@@ -658,10 +705,7 @@
     if (!target) return;
 
     if (target.dataset.category) {
-      // Categories confirmed empty by a previous fetch are faded and
-      // shouldn't trigger a switch; the Reload button remains available
-      // for the currently open category if the person wants to re-check.
-      if (state.categoryCounts[target.dataset.category] === 0) return;
+      if (target.getAttribute("aria-disabled") === "true") return;
       state.category = target.dataset.category;
       state.offset = 0;
       state.query = "";
@@ -720,7 +764,7 @@
         state.total = 0;
         state.timestamp = null;
         state.error = "";
-        state.categoryCounts = {};
+        resetCategoryEmptiness();
         render();
         setTimeout(() => keyInput?.focus(), 0);
         break;
@@ -1031,11 +1075,6 @@
         background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.5), rgba(0,0,0,0));
       }
       .${APP_ID}-chip:hover { filter: brightness(1.14); }
-      .${APP_ID}-chip.is-empty {
-        opacity: .38;
-        cursor: default;
-        pointer-events: none;
-      }
       .${APP_ID}-native-category-icon {
         position: relative;
         z-index: 1;
@@ -2273,6 +2312,20 @@
       }
       #${APP_ID}-root .${APP_ID}-pager button {
         min-width: 82px;
+      }
+
+      /* Empty-category state: added last so it wins over every chip
+         background/hover rule defined above, regardless of theme layer. */
+      #${APP_ID}-root .${APP_ID}-chip.is-empty {
+        opacity: .35 !important;
+        cursor: default !important;
+        filter: none !important;
+      }
+      #${APP_ID}-root .${APP_ID}-chip.is-empty:hover {
+        filter: none !important;
+      }
+      #${APP_ID}-root .${APP_ID}-chip.is-empty .${APP_ID}-native-category-icon {
+        filter: grayscale(55%);
       }
     `;
     document.head.appendChild(nativeStyle);
