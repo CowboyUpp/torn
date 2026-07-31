@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.8.5
+// @version      1.8.6
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,7 +22,7 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.8.5";
+  const SCRIPT_VERSION = "1.8.6";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -147,6 +147,11 @@
     query: "",
     requestToken: 0,
     theme: String(gmGet(THEME_STORE, "light")) === "dark" ? "dark" : "light",
+    // Per-session (not persisted) record of which categories have been
+    // confirmed empty by the API, so their nav chip can be faded and
+    // disabled. Only ever holds explicit 0s - unknown categories are
+    // simply absent from this map until visited.
+    categoryCounts: {},
   };
 
   let root;
@@ -350,6 +355,18 @@
       state.timestamp = inventory.timestamp || null;
       state.totalKnown = Number.isFinite(reportedTotal) && reportedTotal >= 0;
       state.total = state.totalKnown ? reportedTotal : state.offset + inventory.items.length;
+
+      // Only the first page conclusively tells us whether a category is
+      // empty. A zero-length later page just means we've paged past the
+      // end. Record (or clear) the confirmed-empty flag used to fade and
+      // disable that category's nav chip.
+      if (state.offset === 0) {
+        if (state.items.length === 0) {
+          state.categoryCounts[state.category] = 0;
+        } else {
+          delete state.categoryCounts[state.category];
+        }
+      }
     } catch (error) {
       if (token !== state.requestToken) return;
       state.items = [];
@@ -383,15 +400,18 @@
   function renderCategoryChips() {
     return CATEGORIES.map((category) => {
       const isActive = category === state.category;
+      const isEmpty = state.categoryCounts[category] === 0;
+      const label = categoryLabel(category);
       return `
         <button
           type="button"
-          class="${APP_ID}-chip${isActive ? " is-active" : ""}"
+          class="${APP_ID}-chip${isActive ? " is-active" : ""}${isEmpty ? " is-empty" : ""}"
           data-category="${escapeHtml(category)}"
           role="tab"
           aria-selected="${isActive}"
-          aria-label="${escapeHtml(categoryLabel(category))}"
-          title="${escapeHtml(categoryLabel(category))}"
+          aria-disabled="${isEmpty}"
+          aria-label="${escapeHtml(label)}${isEmpty ? " (empty)" : ""}"
+          title="${escapeHtml(label)}${isEmpty ? " - empty" : ""}"
         >
           ${categoryIconMarkup(category)}
         </button>`;
@@ -638,6 +658,10 @@
     if (!target) return;
 
     if (target.dataset.category) {
+      // Categories confirmed empty by a previous fetch are faded and
+      // shouldn't trigger a switch; the Reload button remains available
+      // for the currently open category if the person wants to re-check.
+      if (state.categoryCounts[target.dataset.category] === 0) return;
       state.category = target.dataset.category;
       state.offset = 0;
       state.query = "";
@@ -696,6 +720,7 @@
         state.total = 0;
         state.timestamp = null;
         state.error = "";
+        state.categoryCounts = {};
         render();
         setTimeout(() => keyInput?.focus(), 0);
         break;
@@ -986,7 +1011,7 @@
         box-shadow: inset 0 1px rgba(255,255,255,.08);
         cursor: pointer;
         overflow: hidden;
-        transition: filter .12s, background .12s;
+        transition: filter .12s, background .12s, opacity .12s;
       }
       .${APP_ID}-chip::before,
       .${APP_ID}-chip::after {
@@ -1006,6 +1031,11 @@
         background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.5), rgba(0,0,0,0));
       }
       .${APP_ID}-chip:hover { filter: brightness(1.14); }
+      .${APP_ID}-chip.is-empty {
+        opacity: .38;
+        cursor: default;
+        pointer-events: none;
+      }
       .${APP_ID}-native-category-icon {
         position: relative;
         z-index: 1;
