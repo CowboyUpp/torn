@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.7
+// @version      2.9.8
 // @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -38,7 +38,7 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.7';
+    const SCRIPT_VERSION = '2.9.8';
     const TARGET_HASH = '#/viewListing';
 
     const TORN_API_HOST = 'api.torn.com';
@@ -795,7 +795,11 @@
 
             const info = itemsDB[itemId] || {};
             const quantity = Number(listing.amount || 1);
-            const totalListed = Number(listing.price || 0);
+            // listing.price is the PER-UNIT ask price (same convention as
+            // average_price below), so it must be multiplied by quantity to
+            // get the stack's total — previously this used the raw price
+            // as-is, which badly undercounted any listing with amount > 1.
+            const totalListed = Number(listing.price || 0) * quantity;
 
             const perUnitMarketValue = listing.average_price !== undefined && listing.average_price !== null
                 ? Number(listing.average_price)
