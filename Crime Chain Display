@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.3
+// @version      4.9.4
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.3';
+    const VERSION = '4.9.4';
     // TODO after deploying cct-sync-worker.js: replace both this URL and the
     // @connect host above with your real *.workers.dev address (or custom
     // domain). Cross-device sync stays fully inert — no requests fired, no
@@ -40,7 +40,6 @@
     const STORAGE_KEY_SYNC_ENABLED = 'cct_sync_enabled_v1';
     const STORAGE_KEY_SYNC_TOKEN = 'cct_sync_token_v1';
     const STORAGE_KEY_SYNC_PUSH_CURSOR = 'cct_sync_push_cursor_v1';
-    const STORAGE_KEY_SYNC_PULL_CURSOR = 'cct_sync_pull_cursor_v1';
     const CORRECTION_LOG_MAX = 15;
     const DIAGNOSTIC_LOG_MAX = 10;
     const CHAIN_CAP_DISPLAY = 100;
@@ -96,7 +95,6 @@
     let syncEnabled = safeGet(STORAGE_KEY_SYNC_ENABLED, '0') === '1';
     let syncToken = safeGet(STORAGE_KEY_SYNC_TOKEN, '');
     let syncPushCursor = Number(safeGet(STORAGE_KEY_SYNC_PUSH_CURSOR, '0')) || 0;
-    let syncPullCursor = Number(safeGet(STORAGE_KEY_SYNC_PULL_CURSOR, '0')) || 0;
     let crossSyncPushTimer = null;
     let crossSyncPullTimer = null;
     let crossSyncInFlight = false;
@@ -438,11 +436,6 @@
         safeSet(STORAGE_KEY_SYNC_PUSH_CURSOR, String(ts));
     }
 
-    function saveSyncPullCursor(ts) {
-        syncPullCursor = ts;
-        safeSet(STORAGE_KEY_SYNC_PULL_CURSOR, String(ts));
-    }
-
     // 122 bits of entropy, no external dependency — this token is the only
     // thing gating access to a KV partition on the shared Worker, so it must
     // never be predictable. Treated like the log API key everywhere in the
@@ -539,17 +532,30 @@
         }
     }
 
-    // Pulls anything newer than the pull cursor and merges by id — safe even if
-    // the server returns overlap with what's already stored locally, since a
+    // Pulls the token's full record set and merges by id — safe even if the
+    // server returns overlap with what's already stored locally, since a
     // record's id is unique and never reused. Recomputes/re-renders only if
     // something new was actually merged in.
+    //
+    // Deliberately NOT filtered by "since a last-seen timestamp": an earlier
+    // version tracked a high-water-mark cursor based on the newest record ts
+    // seen, but that breaks the moment two devices push independently. If
+    // device A captures a crime at 9:00 but (batched every 10 min) doesn't
+    // push it until 9:10, and this device already pulled something else at
+    // 9:05 that advanced its cursor to 9:30, then A's 9:00 record arrives on
+    // the server *after* this device's cursor has already passed 9:00 — so a
+    // since-based filter would silently and permanently exclude it. Reads are
+    // the cheap side of the Cloudflare free tier (100k/day vs. 1k/day writes)
+    // and blobs are capped at MAX_RECORDS_PER_TOKEN server-side, so there's no
+    // real cost to just always fetching everything and letting id-based
+    // dedup — which is order-independent — sort out what's actually new.
     async function pullProfitRecords() {
         if (!syncEnabled || !syncToken) return;
 
         try {
             const res = await gmRequest({
                 method: 'GET',
-                url: `${SYNC_WORKER_URL}/records?token=${encodeURIComponent(syncToken)}&since=${syncPullCursor}`,
+                url: `${SYNC_WORKER_URL}/records?token=${encodeURIComponent(syncToken)}`,
             });
             if (res.status < 200 || res.status >= 300) {
                 setSyncStatus(`Pull failed: ${describeSyncError(res.status, res.responseText)}`);
@@ -566,9 +572,7 @@
 
             const existingIds = new Set(profitRecords.map((r) => r.id));
             let mergedCount = 0;
-            let newestSeen = syncPullCursor;
             for (const r of incoming) {
-                newestSeen = Math.max(newestSeen, new Date(r.ts).getTime() || 0);
                 if (existingIds.has(r.id)) continue;
                 profitRecords.push(r);
                 existingIds.add(r.id);
@@ -580,7 +584,6 @@
                 saveProfitData();
                 renderProfitPopover();
             }
-            saveSyncPullCursor(newestSeen);
             setSyncStatus(mergedCount
                 ? `Synced ✓ pulled ${mergedCount} from other device${mergedCount === 1 ? '' : 's'}`
                 : `Synced ✓ ${relativeTime(Date.now())}`);
@@ -1636,7 +1639,8 @@
                 opacity: 0.55;
             }
             .cct-info-icon:hover .cct-info-glyph,
-            .cct-info-icon:focus .cct-info-glyph {
+            .cct-info-icon:focus .cct-info-glyph,
+            .cct-info-icon.cct-info-open .cct-info-glyph {
                 opacity: 1;
             }
             .cct-info-icon .cct-tooltip {
@@ -1664,7 +1668,8 @@
                 border-radius: 5px;
             }
             .cct-info-icon:hover .cct-tooltip,
-            .cct-info-icon:focus .cct-tooltip {
+            .cct-info-icon:focus .cct-tooltip,
+            .cct-info-icon.cct-info-open .cct-tooltip {
                 display: block;
             }
             #cct-log-details {
@@ -2070,6 +2075,34 @@
         renderProfitPopover();
     }
 
+    let infoIconWired = false;
+
+    // Hover/:focus alone don't work reliably on touch devices — many mobile
+    // browsers don't fire :hover on tap at all, and even where they do,
+    // there's no "hover away" gesture to dismiss it again. This adds an
+    // explicit tap-toggle (.cct-info-open, handled by the CSS above) so the
+    // same tooltip works on PDA/mobile, not just desktop.
+    function wireInfoIconOnce() {
+        if (infoIconWired) return;
+        infoIconWired = true;
+
+        document.addEventListener('click', (e) => {
+            const icon = e.target.closest('.cct-info-icon');
+            if (icon && icon.closest('#cct-root')) {
+                // The sync-section icon sits inside a <summary> — without this,
+                // tapping ⓘ would also toggle that <details> open/closed via the
+                // browser's default summary-click behavior.
+                e.preventDefault();
+                e.stopPropagation();
+                const wasOpen = icon.classList.contains('cct-info-open');
+                document.querySelectorAll('.cct-info-icon.cct-info-open').forEach((el) => el.classList.remove('cct-info-open'));
+                if (!wasOpen) icon.classList.add('cct-info-open');
+                return;
+            }
+            document.querySelectorAll('.cct-info-icon.cct-info-open').forEach((el) => el.classList.remove('cct-info-open'));
+        });
+    }
+
     let outsideClickWired = false;
 
     // Pure CSS (max-width + right:0/left:0) can bound a popover's *size* to the
@@ -2164,6 +2197,7 @@
         });
 
         wireViewportClampOnce();
+        wireInfoIconOnce();
         wireSyncUI(popover);
     }
 
@@ -2243,6 +2277,7 @@
 
         wireOutsideClickOnce();
         wireViewportClampOnce();
+        wireInfoIconOnce();
 
         el.querySelector('#cct-chain-save').addEventListener('click', () => {
             const input = el.querySelector('#cct-chain-input');
