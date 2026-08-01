@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.0
+// @version      1.9.2
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,7 +22,7 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.9.0";
+  const SCRIPT_VERSION = "1.9.2";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -157,6 +157,13 @@
     // Built up as the user browses rather than probed upfront, so it costs
     // zero extra API calls.
     categoryEmptiness: loadCategoryEmptiness(),
+    // Display order for the chip bar. Confirmed-empty categories are pushed
+    // to the right; recomputed once per panel-open (not live) so chips don't
+    // jump around mid-session as you check new categories.
+    categoryOrder: CATEGORIES.slice(),
+    // Brief on-screen confirmation for anything that would otherwise only be
+    // explained via a hover title — titles don't fire on touch-only PDA.
+    toast: "",
   };
 
   let root;
@@ -166,6 +173,7 @@
   let navigationObserver;
   let navigationTimer;
   let launcherFallbackTimer;
+  let toastTimer;
 
   function gmGet(key, fallback = "") {
     try {
@@ -232,6 +240,30 @@
     if (!entry) return null;
     const stale = Date.now() - entry.checkedAt >= CATEGORY_CACHE_WINDOW_MS;
     return { ...entry, stale };
+  }
+
+  const TOAST_DURATION_MS = 3600;
+
+  function showToast(message) {
+    if (!message) return;
+    state.toast = message;
+    render();
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      state.toast = "";
+      render();
+    }, TOAST_DURATION_MS);
+  }
+
+  function computeCategoryOrder() {
+    const nonEmpty = [];
+    const empty = [];
+    for (const category of CATEGORIES) {
+      const known = getCategoryKnownState(category);
+      if (known && known.empty && !known.stale) empty.push(category);
+      else nonEmpty.push(category);
+    }
+    return [...nonEmpty, ...empty];
   }
 
   function formatRelativeMinutes(timestampMs) {
@@ -440,7 +472,7 @@
   }
 
   function renderCategoryChips() {
-    return CATEGORIES.map((category) => {
+    return state.categoryOrder.map((category) => {
       const isActive = category === state.category;
       const label = categoryLabel(category);
       const known = getCategoryKnownState(category);
@@ -604,6 +636,7 @@
 
     panel.innerHTML = `
       <div class="${APP_ID}-shell">
+        ${state.toast ? `<div class="${APP_ID}-toast" role="status">${escapeHtml(state.toast)}</div>` : ""}
         <header class="${APP_ID}-header">
           <div class="${APP_ID}-brand">
             <div class="${APP_ID}-mark" aria-hidden="true">T</div>
@@ -682,6 +715,7 @@
     syncTheme();
     syncNativeControlStyle();
     state.open = true;
+    state.categoryOrder = computeCategoryOrder();
     document.documentElement.classList.add(`${APP_ID}-no-scroll`);
     render();
     if (!getApiKey()) {
@@ -705,7 +739,10 @@
     if (!target) return;
 
     if (target.dataset.category) {
-      if (target.getAttribute("aria-disabled") === "true") return;
+      if (target.getAttribute("aria-disabled") === "true") {
+        showToast(target.title);
+        return;
+      }
       state.category = target.dataset.category;
       state.offset = 0;
       state.query = "";
@@ -769,9 +806,18 @@
         setTimeout(() => keyInput?.focus(), 0);
         break;
       case "refresh":
-      case "retry":
-        loadInventory({ force: true });
+      case "retry": {
+        const previousTimestamp = state.timestamp;
+        loadInventory({ force: true }).then(() => {
+          if (state.error) return;
+          showToast(
+            state.timestamp && state.timestamp === previousTimestamp
+              ? "Still the same cached snapshot — Torn refreshes each category's inventory data about once an hour."
+              : "Loaded a fresh snapshot from Torn.",
+          );
+        });
         break;
+      }
       case "previous":
         state.offset = Math.max(0, state.offset - PAGE_SIZE);
         state.query = "";
@@ -2326,6 +2372,31 @@
       }
       #${APP_ID}-root .${APP_ID}-chip.is-empty .${APP_ID}-native-category-icon {
         filter: grayscale(55%);
+      }
+
+      /* Toast: visible confirmation for anything that would otherwise only
+         be explained via a hover title. Titles don't fire on tap-only
+         interfaces (Torn's PDA app), so this is the primary channel there. */
+      #${APP_ID}-root .${APP_ID}-toast {
+        position: absolute;
+        top: 8px;
+        left: 50%;
+        z-index: 6;
+        max-width: calc(100% - 24px);
+        padding: 7px 12px;
+        border-radius: 5px !important;
+        background: rgba(15, 15, 15, .94);
+        color: #f2f3f4;
+        font-size: 10px !important;
+        line-height: 1.45;
+        text-align: center;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, .4);
+        pointer-events: none;
+        transform: translateX(-50%);
+        animation: ${APP_ID}-toast-in .16s ease both;
+      }
+      @keyframes ${APP_ID}-toast-in {
+        from { opacity: 0; transform: translate(-50%, -6px); }
       }
     `;
     document.head.appendChild(nativeStyle);
