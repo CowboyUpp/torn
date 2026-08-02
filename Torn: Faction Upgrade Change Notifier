@@ -1,0 +1,722 @@
+// ==UserScript==
+// @name         Torn: Faction Upgrade Change Notifier
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      4.6.0
+// @description  Notifies (toast + OS notification) when your faction's upgrades change. DOM mode reads button.wai-upgrade-btn aria-labels on the Upgrades tab - no special permission needed. Settings toggle sits next to BUSTR+ in the faction toolbar.
+// @author       cowboyup
+// @match        https://www.torn.com/factions.php*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_notification
+// @connect      api.torn.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ---------- Predefined defaults ----------
+  const DEFAULTS = {
+    MODE: 'dom',            // 'dom' (no API access needed) or 'api' (needs Faction API Access)
+    API_KEY: '',
+    NOTIFY_DESKTOP: true,
+  };
+
+  const NS = 'ffu_';
+
+  const store = {
+    get(key, fallback) {
+      const v = GM_getValue(NS + key, undefined);
+      return v === undefined ? fallback : v;
+    },
+    set(key, val) {
+      GM_setValue(NS + key, val);
+    },
+  };
+
+  function getConfig() {
+    return {
+      mode: store.get('mode', DEFAULTS.MODE),
+      apiKey: store.get('apiKey', DEFAULTS.API_KEY),
+      notifyDesktop: store.get('notifyDesktop', DEFAULTS.NOTIFY_DESKTOP),
+    };
+  }
+
+  // ============================================================
+  // MODE 1: API-based (needs "Access Faction API" permission)
+  // ============================================================
+
+  function fetchUpgradesFromApi() {
+    return new Promise((resolve, reject) => {
+      const { apiKey } = getConfig();
+      if (!apiKey) {
+        reject(new Error('No API key set.'));
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: `https://api.torn.com/faction/?selections=upgrades&key=${encodeURIComponent(apiKey)}`,
+        onload: (res) => {
+          try {
+            const data = JSON.parse(res.responseText);
+            if (data.error) {
+              reject(new Error(`Torn API error ${data.error.code}: ${data.error.error}`));
+              return;
+            }
+            resolve(data);
+          } catch (e) {
+            reject(new Error('Failed to parse API response: ' + e.message));
+          }
+        },
+        onerror: () => reject(new Error('Network error contacting Torn API.')),
+        ontimeout: () => reject(new Error('Torn API request timed out.')),
+        timeout: 15000,
+      });
+    });
+  }
+
+  function flattenTree(dataBlock) {
+    const out = {};
+    if (!dataBlock) return out;
+    for (const [id, up] of Object.entries(dataBlock)) {
+      out[id] = { name: up.name, branch: up.branch, level: up.level, unlocked: up.unlocked };
+    }
+    return out;
+  }
+
+  function diffApiSnapshots(prev, curr) {
+    const changes = [];
+    if (prev && prev.state !== curr.state) {
+      changes.push(`Faction tree switched from ${prev.state} to ${curr.state}.`);
+    }
+    for (const treeKey of ['peace', 'war']) {
+      const prevTree = flattenTree(prev ? prev[treeKey] : null);
+      const currTree = flattenTree(curr[treeKey]);
+      for (const [id, upNow] of Object.entries(currTree)) {
+        const upBefore = prevTree[id];
+        if (!upBefore) {
+          if (prev && upNow.level > 0) {
+            changes.push(`[${treeKey}] ${upNow.name} (${upNow.branch}) unlocked at level ${upNow.level}.`);
+          }
+          continue;
+        }
+        if (upBefore.level !== upNow.level) {
+          if (upBefore.level === 0 && upNow.level > 0) {
+            changes.push(`[${treeKey}] ${upNow.name} (${upNow.branch}) unlocked at level ${upNow.level}.`);
+          } else if (upNow.level > upBefore.level) {
+            changes.push(`[${treeKey}] ${upNow.name} (${upNow.branch}) leveled up: ${upBefore.level} -> ${upNow.level}.`);
+          } else if (upNow.level < upBefore.level) {
+            changes.push(`[${treeKey}] ${upNow.name} (${upNow.branch}) leveled down: ${upBefore.level} -> ${upNow.level}.`);
+          }
+        }
+      }
+    }
+    return changes;
+  }
+
+  async function checkViaApi(manual, statusCb) {
+    const curr = await fetchUpgradesFromApi();
+    const prev = store.get('apiSnapshot', null);
+
+    if (!prev) {
+      store.set('apiSnapshot', curr);
+      const msg = 'Baseline snapshot saved (API mode).';
+      if (manual) toast(msg, 'info');
+      if (statusCb) statusCb(msg);
+      return;
+    }
+
+    const changes = diffApiSnapshots(prev, curr);
+    store.set('apiSnapshot', curr);
+
+    if (changes.length > 0) {
+      toast(changes.join('\n'), 'success');
+      osNotify('Torn Faction Upgrade Change', changes.join(' | '));
+      if (statusCb) statusCb(`${changes.length} change(s) found (${new Date().toLocaleTimeString()}).`);
+    } else {
+      if (manual) toast('No changes since last check.', 'info');
+      if (statusCb) statusCb(`No changes (${new Date().toLocaleTimeString()}).`);
+    }
+  }
+
+  // ============================================================
+  // MODE 2: DOM-scrape (no API access needed)
+  //
+  // Each individual upgrade is a <button class="wai-upgrade-btn"
+  // i-data="i_XXX_YYY_26_26" aria-label="Name LEVEL. Description.
+  // Challenge: ... Total respect: N. "> — only the currently open
+  // branch's buttons exist in the DOM at a time, so we merge each
+  // scan into the saved snapshot incrementally rather than treating
+  // a scan as the complete picture. Only reads what's on-screen,
+  // per Torn's scripting rules.
+  // ============================================================
+
+  const ARIA_LABEL_RE = /^(.*?)\s+(\d+)\.\s+(.*?)\s*Total respect:\s*([\d,]+)\.?\s*$/;
+
+  function parseUpgradeButton(btn) {
+    const id = btn.getAttribute('i-data');
+    const label = btn.getAttribute('aria-label') || '';
+    if (!id || !label) return null;
+
+    const m = label.match(ARIA_LABEL_RE);
+    if (!m) {
+      // Unexpected format - keep the raw label so we can still diff on it,
+      // just without pretty name/level/cost breakdown.
+      return { id, raw: label, name: null, level: null, cost: null };
+    }
+    const [, name, level, desc, cost] = m;
+    return { id, raw: label, name: name.trim(), level: parseInt(level, 10), desc: desc.trim(), cost: cost.replace(/,/g, '') };
+  }
+
+  function scanUpgradeButtons() {
+    const buttons = document.querySelectorAll('button.wai-upgrade-btn[i-data]');
+    const out = {};
+    buttons.forEach((btn) => {
+      const parsed = parseUpgradeButton(btn);
+      if (parsed) out[parsed.id] = parsed;
+    });
+    return out;
+  }
+
+  // ---- Branch-icon row (Core section) ----
+  // <button class="branch-icon" i-data="i_604_417_80_80">
+  //   <span class="branch-factor"><span class="factor"><span class="x-factor">x </span>8</span></span>
+  // </button>
+  // No friendly name is exposed by Torn's markup here (data-title is empty),
+  // so names are user-assigned once via the panel and remembered from then on.
+
+  function parseBranchIcon(btn) {
+    const id = btn.getAttribute('i-data');
+    if (!id) return null;
+    const factorEl = btn.querySelector('.factor');
+    const text = factorEl ? factorEl.textContent.trim() : '';
+    const m = text.match(/(\d+)/);
+    const level = m ? parseInt(m[1], 10) : null;
+    return { id, level, raw: text };
+  }
+
+  function scanBranchIcons() {
+    const buttons = document.querySelectorAll('button.branch-icon[i-data]');
+    const out = {};
+    buttons.forEach((btn) => {
+      const parsed = parseBranchIcon(btn);
+      if (parsed) out[parsed.id] = parsed;
+    });
+    return out;
+  }
+
+  function getBranchNameMap() {
+    return store.get('branchNameMap', {}) || {};
+  }
+
+  function branchLabel(id) {
+    const map = getBranchNameMap();
+    return map[id] || `Branch icon (${id})`;
+  }
+
+  function saveBranchName(id, name) {
+    const map = getBranchNameMap();
+    if (map[id] === name) return;
+    map[id] = name;
+    store.set('branchNameMap', map);
+  }
+
+  // Auto-capture the friendly branch name from Torn's own hover tooltip
+  // (visible in-game as e.g. "Steadfast Branch"), instead of asking the
+  // user to type it in. A generation token + proximity check prevent a
+  // slow-to-fade tooltip from a previously-hovered icon being wrongly
+  // attributed to whichever icon is hovered next.
+  let hoverGeneration = 0;
+
+  function watchForBranchTooltip(id, anchorRect) {
+    const myGeneration = ++hoverGeneration;
+    let attempts = 0;
+
+    const timer = setInterval(() => {
+      attempts++;
+      if (myGeneration !== hoverGeneration) {
+        clearInterval(timer); // mouse moved to a different icon - abandon this watch
+        return;
+      }
+
+      const candidates = document.querySelectorAll('body *');
+      for (const el of candidates) {
+        if (el.children.length > 0) continue;
+        const text = (el.textContent || '').trim();
+        const m = text.match(/^(.+?)\s+Branch$/);
+        if (!m || el.offsetParent === null) continue;
+
+        const r = el.getBoundingClientRect();
+        const dx = Math.max(anchorRect.left - r.right, r.left - anchorRect.right, 0);
+        const dy = Math.max(anchorRect.top - r.bottom, r.top - anchorRect.bottom, 0);
+        // Tooltip should be reasonably close to the icon that triggered it.
+        if (dx > 150 || dy > 150) continue;
+
+        if (myGeneration !== hoverGeneration) { clearInterval(timer); return; }
+        saveBranchName(id, m[1].trim());
+        clearInterval(timer);
+        if (panelApi && panelApi.refreshBranchNames) panelApi.refreshBranchNames();
+        return;
+      }
+
+      if (attempts >= 10) clearInterval(timer);
+    }, 100);
+  }
+
+  function attachBranchIconHoverCapture() {
+    let activeWatchId = null;
+    document.addEventListener('mouseover', (e) => {
+      const btn = e.target.closest && e.target.closest('button.branch-icon[i-data]');
+      if (!btn) return;
+      const id = btn.getAttribute('i-data');
+      if (!id) return;
+      const map = getBranchNameMap();
+      if (map[id]) return; // already known, no need to re-watch
+      if (id === activeWatchId) return; // mouseover re-fired for a child element within the same icon - ignore
+      activeWatchId = id;
+      watchForBranchTooltip(id, btn.getBoundingClientRect());
+    });
+    document.addEventListener('mouseout', (e) => {
+      const btn = e.target.closest && e.target.closest('button.branch-icon[i-data]');
+      if (!btn) return;
+      // Only clear activeWatchId once the mouse has actually left the button
+      // (not just moved between its internal child elements).
+      if (btn.contains(e.relatedTarget)) return;
+      if (btn.getAttribute('i-data') === activeWatchId) activeWatchId = null;
+    });
+  }
+
+  let domScanTimer = null;
+  let domObserver = null;
+
+  function scheduleDomScan(delay = 700) {
+    if (domScanTimer) clearTimeout(domScanTimer);
+    domScanTimer = setTimeout(() => runDomScan(false, null), delay);
+  }
+
+  function runDomScan(manual = false, statusCb = null) {
+    const currentReads = scanUpgradeButtons();
+    const currentBranchReads = scanBranchIcons();
+    const seenCount = Object.keys(currentReads).length;
+    const seenBranchCount = Object.keys(currentBranchReads).length;
+
+    if (seenCount === 0 && seenBranchCount === 0) {
+      if (manual && statusCb) {
+        statusCb('No upgrade buttons found. Open Faction > Upgrades and select a branch.');
+      }
+      return;
+    }
+
+    const snapshot = store.get('domSnapshot', {}) || {};
+    const branchSnapshot = store.get('domBranchSnapshot', {}) || {};
+    const changes = [];
+
+    for (const [id, curr] of Object.entries(currentReads)) {
+      const prev = snapshot[id];
+      if (!prev) {
+        // First time seeing this specific upgrade node - establish baseline only.
+        continue;
+      }
+      if (curr.raw !== prev.raw) {
+        if (curr.level !== null && prev.level !== null && curr.level !== prev.level) {
+          changes.push(`${curr.name}: level ${prev.level} -> ${curr.level} (now ${Number(curr.cost).toLocaleString()} respect).`);
+        } else {
+          changes.push(`${curr.name || id} changed.`);
+        }
+      }
+    }
+
+    for (const [id, curr] of Object.entries(currentBranchReads)) {
+      const prev = branchSnapshot[id];
+      if (!prev) continue; // baseline only on first sighting
+      if (curr.level !== null && prev.level !== null && curr.level !== prev.level) {
+        changes.push(`${branchLabel(id)}: x${prev.level} -> x${curr.level}.`);
+      }
+    }
+
+    // Merge current readings into the persisted snapshots (don't drop
+    // entries for branches not currently on screen).
+    const merged = Object.assign({}, snapshot, currentReads);
+    store.set('domSnapshot', merged);
+    const mergedBranch = Object.assign({}, branchSnapshot, currentBranchReads);
+    store.set('domBranchSnapshot', mergedBranch);
+
+    const totalKnown = Object.keys(merged).length;
+
+    if (changes.length > 0) {
+      const msg = changes.slice(0, 8).join('\n');
+      toast(msg, 'success');
+      osNotify('Torn Faction Upgrade Change', changes.join(' | '));
+      if (statusCb) statusCb(`${changes.length} change(s) found (${new Date().toLocaleTimeString()}).`);
+    } else if (manual) {
+      toast(`No changes in this branch. (${seenCount} upgrade(s) read, ${totalKnown} tracked total.)`, 'info');
+      if (statusCb) statusCb(`No changes. ${seenCount} read here, ${totalKnown} tracked total.`);
+    } else if (statusCb) {
+      statusCb(`Baseline updated. ${seenCount} read here, ${totalKnown} tracked total.`);
+    }
+  }
+
+  function startDomWatcher() {
+    if (domObserver) return;
+    domObserver = new MutationObserver(() => scheduleDomScan());
+    domObserver.observe(document.body, { childList: true, subtree: true });
+    scheduleDomScan(1200);
+  }
+
+  // ============================================================
+  // Shared UI (styles, toast, OS notification, settings panel)
+  // ============================================================
+
+  function ensureStyles() {
+    if (document.getElementById('ffu-style')) return;
+    const style = document.createElement('style');
+    style.id = 'ffu-style';
+    style.textContent = `
+      #ffu-toast-container {
+        position: fixed; bottom: 16px; right: 16px; z-index: 999999;
+        display: flex; flex-direction: column; gap: 8px;
+      }
+      .ffu-toast {
+        background: #1c1c1c; color: #eee; border-left: 4px solid #4caf50;
+        padding: 10px 14px; border-radius: 4px; font-size: 13px; line-height: 1.4;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.4); max-width: 360px;
+        opacity: 0; transform: translateY(10px); transition: opacity .25s ease, transform .25s ease;
+        white-space: pre-wrap;
+      }
+      .ffu-toast.ffu-show { opacity: 1; transform: translateY(0); }
+      .ffu-toast.ffu-info { border-left-color: #2196f3; }
+      .ffu-toast.ffu-error { border-left-color: #f44336; }
+      .ffu-toast b { display: block; margin-bottom: 4px; }
+
+      #ffu-fab {
+        position: absolute;
+        top: 12px;
+        right: 18px; /* overwritten dynamically once BUSTR+'s width is known */
+        height: 28px; min-height: 28px;
+        display: inline-flex; align-items: center; justify-content: center;
+        border-radius: 4px; border: 0; background: transparent; color: #eee;
+        padding: 0 8px; font-size: 15px; cursor: pointer; z-index: 99998;
+        text-shadow: 0 1px 2px rgba(0,0,0,.8);
+      }
+      #ffu-fab:hover { color: #fff; background: rgba(255,255,255,.08); }
+      #ffu-fab.ffu-fab-fallback {
+        position: fixed; bottom: 16px; left: 16px; z-index: 999998;
+        background: #1c1c1c; border: 1px solid #3a3a3a; border-radius: 50%;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.5); top: auto; right: auto;
+      }
+      #ffu-fab.ffu-fab-fallback:hover { background: #2a2a2a; }
+
+      #ffu-panel {
+        position: fixed; top: 60px; right: 16px; z-index: 999998;
+        width: 320px; background: #1c1c1c; color: #eee; border: 1px solid #3a3a3a;
+        border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); font-size: 12px;
+        display: none; overflow: hidden;
+      }
+      #ffu-panel.ffu-open { display: block; }
+      #ffu-panel header {
+        background: #262626; padding: 8px 12px; font-weight: bold; font-size: 13px;
+        display: flex; justify-content: space-between; align-items: center;
+      }
+      #ffu-panel header span.ffu-close { cursor: pointer; color: #999; }
+      #ffu-panel header span.ffu-close:hover { color: #fff; }
+      #ffu-panel .ffu-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+      #ffu-panel label { display: block; margin-bottom: 3px; color: #aaa; }
+      #ffu-panel input[type="text"], #ffu-panel input[type="password"] {
+        width: 100%; box-sizing: border-box; background: #111; border: 1px solid #3a3a3a;
+        color: #eee; padding: 5px 7px; border-radius: 3px; font-size: 12px;
+      }
+      #ffu-panel select {
+        width: 100%; background: #111; border: 1px solid #3a3a3a; color: #eee;
+        padding: 5px 7px; border-radius: 3px; font-size: 12px;
+      }
+      #ffu-panel .ffu-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+      #ffu-panel .ffu-key-row { display: flex; gap: 6px; }
+      #ffu-panel .ffu-key-row input { flex: 1; }
+      #ffu-panel button {
+        cursor: pointer; border: 1px solid #3a3a3a; background: #262626; color: #eee;
+        padding: 5px 9px; border-radius: 3px; font-size: 12px;
+      }
+      #ffu-panel button:hover { background: #333; }
+      #ffu-panel button.ffu-primary { background: #2e7d32; border-color: #2e7d32; }
+      #ffu-panel button.ffu-primary:hover { background: #388e3c; }
+      #ffu-panel .ffu-status { color: #999; font-size: 11px; border-top: 1px solid #333; padding-top: 8px; }
+      #ffu-panel .ffu-checkbox-row { display: flex; align-items: center; gap: 6px; }
+      #ffu-panel .ffu-checkbox-row input { width: auto; }
+      #ffu-panel .ffu-hint { color: #777; font-size: 11px; }
+      #ffu-panel .ffu-api-fields, #ffu-panel .ffu-dom-fields { display: none; flex-direction: column; gap: 8px; }
+      #ffu-panel .ffu-api-fields.ffu-active, #ffu-panel .ffu-dom-fields.ffu-active { display: flex; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function toast(message, type = 'success') {
+    ensureStyles();
+    let container = document.getElementById('ffu-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'ffu-toast-container';
+      document.body.appendChild(container);
+    }
+    const el = document.createElement('div');
+    el.className = `ffu-toast ffu-${type}`;
+    el.innerHTML = `<b>Faction Upgrade Notifier</b>${message.replace(/</g, '&lt;')}`;
+    container.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('ffu-show'));
+    setTimeout(() => {
+      el.classList.remove('ffu-show');
+      setTimeout(() => el.remove(), 300);
+    }, 10000);
+  }
+
+  function osNotify(title, body) {
+    if (!getConfig().notifyDesktop) return;
+    try {
+      GM_notification({ title, text: body, timeout: 12000 });
+    } catch (e) {
+      // unsupported in this context
+    }
+  }
+
+  function positionFabNearBustr(fab) {
+    const bustrBtn = document.getElementById('bustr-plus-toggle');
+    if (!bustrBtn) {
+      fab.classList.add('ffu-fab-fallback');
+      return;
+    }
+    fab.classList.remove('ffu-fab-fallback');
+    const gap = 4;
+    // BUSTR+'s own CSS: position:absolute; right:18px; top:12px.
+    const rightOffset = 18 + bustrBtn.offsetWidth + gap;
+    fab.style.right = `${rightOffset}px`;
+    fab.style.top = '12px';
+  }
+
+  function buildPanel() {
+    ensureStyles();
+
+    const fab = document.createElement('button');
+    fab.id = 'ffu-fab';
+    fab.type = 'button';
+    fab.title = 'Faction Upgrade Notifier settings';
+    fab.textContent = '⚙';
+
+    document.body.appendChild(fab);
+    positionFabNearBustr(fab);
+    // Bustr+ remounts its own toggle at 1s/3s after load; re-measure at the
+    // same marks in case its width/position wasn't settled on first read.
+    setTimeout(() => positionFabNearBustr(fab), 1000);
+    setTimeout(() => positionFabNearBustr(fab), 3000);
+
+    const panel = document.createElement('div');
+    panel.id = 'ffu-panel';
+    panel.innerHTML = `
+      <header>
+        Faction Upgrade Notifier
+        <span class="ffu-close" title="Close">✕</span>
+      </header>
+      <div class="ffu-body">
+        <div>
+          <label for="ffu-mode">Detection mode</label>
+          <select id="ffu-mode">
+            <option value="dom">DOM scrape (no permission needed)</option>
+            <option value="api">Torn API (needs Faction API Access)</option>
+          </select>
+          <div class="ffu-hint" id="ffu-mode-hint"></div>
+        </div>
+
+        <div class="ffu-dom-fields" id="ffu-dom-fields">
+          <div class="ffu-hint">Click through each branch on the Upgrades tab; coverage builds up as you browse. Only reads what's currently on screen.</div>
+          <div class="ffu-row">
+            <button id="ffu-dom-rescan" type="button">Rescan Now</button>
+            <button id="ffu-dom-reset" type="button">Reset Baseline</button>
+          </div>
+          <div id="ffu-branch-names"></div>
+        </div>
+
+        <div class="ffu-api-fields" id="ffu-api-fields">
+          <div>
+            <label for="ffu-apikey">Torn API key</label>
+            <div class="ffu-key-row">
+              <input type="text" id="ffu-apikey" disabled placeholder="Faction API access on request" />
+            </div>
+            <div class="ffu-hint">Ask a faction leader to grant "Access Faction API" on your position to enable this mode.</div>
+          </div>
+          <div class="ffu-row">
+            <button id="ffu-api-check" type="button">Check Now</button>
+            <button id="ffu-api-reset" type="button">Reset Baseline</button>
+          </div>
+        </div>
+
+        <div class="ffu-checkbox-row">
+          <input type="checkbox" id="ffu-desktop-notify" />
+          <label for="ffu-desktop-notify" style="margin:0;">Also show OS notification</label>
+        </div>
+
+        <button id="ffu-save" class="ffu-primary" type="button">Save</button>
+
+        <div class="ffu-status" id="ffu-status">Not checked yet.</div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+
+    const els = {
+      mode: panel.querySelector('#ffu-mode'),
+      modeHint: panel.querySelector('#ffu-mode-hint'),
+      domFields: panel.querySelector('#ffu-dom-fields'),
+      apiFields: panel.querySelector('#ffu-api-fields'),
+      domRescan: panel.querySelector('#ffu-dom-rescan'),
+      domReset: panel.querySelector('#ffu-dom-reset'),
+      branchNames: panel.querySelector('#ffu-branch-names'),
+      apikey: panel.querySelector('#ffu-apikey'),
+      toggleKey: null,
+      apiCheck: panel.querySelector('#ffu-api-check'),
+      apiReset: panel.querySelector('#ffu-api-reset'),
+      desktopNotify: panel.querySelector('#ffu-desktop-notify'),
+      save: panel.querySelector('#ffu-save'),
+      status: panel.querySelector('#ffu-status'),
+      close: panel.querySelector('.ffu-close'),
+    };
+
+    const MODE_HINTS = {
+      dom: 'Reads upgrade buttons only while you have that branch open — no elevated key permission required.',
+      api: 'Polls the Torn API in the background. Requires the key\'s faction position to have "Access Faction API" enabled.',
+    };
+
+    function applyModeVisibility(mode) {
+      els.domFields.classList.toggle('ffu-active', mode === 'dom');
+      els.apiFields.classList.toggle('ffu-active', mode === 'api');
+      els.modeHint.textContent = MODE_HINTS[mode] || '';
+    }
+
+    function renderBranchNames() {
+      const branchSnapshot = store.get('domBranchSnapshot', {}) || {};
+      const nameMap = getBranchNameMap();
+      const ids = Object.keys(branchSnapshot);
+
+      if (ids.length === 0) {
+        els.branchNames.innerHTML = '<div class="ffu-hint">No Core branch icons read yet.</div>';
+        return;
+      }
+
+      els.branchNames.innerHTML = '<div class="ffu-hint" style="margin-top:4px;">Detected branch names (hover each icon in-game to auto-fill):</div>' +
+        ids.map((id) => {
+          const info = branchSnapshot[id];
+          const name = nameMap[id] || '(hover this icon in-game to detect)';
+          return `<div class="ffu-row" style="margin-top:4px; justify-content: space-between;">
+            <span>${name}</span>
+            <span class="ffu-hint">x${info.level ?? '?'}</span>
+          </div>`;
+        }).join('');
+    }
+
+    function loadIntoForm() {
+      const cfg = getConfig();
+      els.mode.value = cfg.mode;
+      els.apikey.value = cfg.apiKey;
+      els.desktopNotify.checked = !!cfg.notifyDesktop;
+      applyModeVisibility(cfg.mode);
+      renderBranchNames();
+    }
+
+    function setStatus(text) {
+      els.status.textContent = text;
+    }
+
+    fab.addEventListener('click', () => {
+      loadIntoForm();
+      panel.classList.toggle('ffu-open');
+    });
+    els.close.addEventListener('click', () => panel.classList.remove('ffu-open'));
+
+    els.mode.addEventListener('change', () => applyModeVisibility(els.mode.value));
+
+    els.save.addEventListener('click', () => {
+      store.set('mode', els.mode.value);
+      store.set('apiKey', els.apikey.value.trim());
+      store.set('notifyDesktop', els.desktopNotify.checked);
+      toast('Settings saved.', 'info');
+      setStatus('Settings saved.');
+      activateMode();
+    });
+
+    els.domRescan.addEventListener('click', () => {
+      runDomScan(true, setStatus);
+      renderBranchNames();
+    });
+    els.domReset.addEventListener('click', () => {
+      store.set('domSnapshot', {});
+      store.set('domBranchSnapshot', {});
+      store.set('branchNameMap', {});
+      setStatus('Snapshot and detected names cleared. Browse branches again to rebuild.');
+      toast('Snapshot cleared.', 'info');
+      renderBranchNames();
+    });
+
+    els.apiCheck.addEventListener('click', async () => {
+      setStatus('Checking...');
+      try {
+        await checkViaApi(true, setStatus);
+      } catch (err) {
+        setStatus(`Error: ${err.message}`);
+        toast(err.message, 'error');
+      }
+    });
+    els.apiReset.addEventListener('click', () => {
+      store.set('apiSnapshot', null);
+      setStatus('API snapshot cleared. Next check establishes a new baseline.');
+      toast('Snapshot cleared.', 'info');
+    });
+
+    loadIntoForm();
+    return { setStatus, refreshBranchNames: renderBranchNames };
+  }
+
+  // ---------- Mode activation ----------
+
+  let panelApi = null;
+  let apiPollTimer = null;
+  const API_POLL_MINUTES = 10;
+
+  function activateMode() {
+    const { mode } = getConfig();
+
+    if (apiPollTimer) {
+      clearInterval(apiPollTimer);
+      apiPollTimer = null;
+    }
+    if (domObserver) {
+      domObserver.disconnect();
+      domObserver = null;
+    }
+
+    if (mode === 'dom') {
+      startDomWatcher();
+    } else {
+      checkViaApi(false, panelApi && panelApi.setStatus).catch((err) => {
+        console.warn('[FactionUpgradeNotifier]', err.message);
+      });
+      apiPollTimer = setInterval(() => {
+        checkViaApi(false, panelApi && panelApi.setStatus).catch((err) => {
+          console.warn('[FactionUpgradeNotifier]', err.message);
+        });
+      }, API_POLL_MINUTES * 60 * 1000);
+    }
+  }
+
+  // ---------- Boot ----------
+
+  function init() {
+    panelApi = buildPanel();
+    attachBranchIconHoverCapture();
+
+    GM_registerMenuCommand('Open Faction Upgrade Notifier panel', () => {
+      document.getElementById('ffu-panel').classList.add('ffu-open');
+    });
+
+    activateMode();
+  }
+
+  init();
+})();
