@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.1.1
+// @version      1.2.0
 // @description  Add quality and bonus percentages to the item market, auction house, and bazaars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -13,6 +13,22 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
+// CHANGELOG 1.2.0:
+// - Reverted the bonus text from an absolutely-positioned image overlay back to normal
+//   block-flow placement under the item title (closer to the original design). Three
+//   overlay placements in a row (under title / bottom of image / top of image) each
+//   collided with something else on the tile. This script is already the
+//   post-filtering-removal, display-only build, so passively showing these numbers was
+//   most likely never the actual cause of the originally reported infinite-scroll bug —
+//   that was more plausibly tied to the quality *filtering* logic that's since been
+//   removed. If infinite-scroll misbehavior does reoccur, that's the next thing to
+//   isolate, rather than continuing to fight overlay placement.
+//
+// CHANGELOG 1.1.2:
+// - Bonus box moved from the bottom of the image to just below the quality badge at the
+//   top. It was overlapping Torn's own damage/accuracy stat overlay, which is itself
+//   positioned over the bottom of the image.
+//
 // CHANGELOG 1.1.1:
 // - Bonus overlay repositioned to anchor on the image wrapper (bottom, same positioning
 //   context as the quality badge) instead of the title element, and given a background
@@ -412,8 +428,7 @@
             return;
         }
 
-        // Get title element (kept as a sanity check that this tile matches the expected
-        // structure; no longer used as the bonus overlay's anchor point, see below).
+        // Get title element for bonus insertion.
         const titleEl = qs(selectors.title, el);
         if (!titleEl) return;
 
@@ -421,38 +436,20 @@
         const existing = qs('.openmarket-bonuses', el);
         if (existing) existing.remove();
 
-        // Create bonus container.
+        // FIX (1.2.0): reverted to normal block-flow placement under the title, matching
+        // the original design, instead of an absolutely-positioned overlay. Three overlay
+        // attempts in a row each collided with something else on the tile in turn — the
+        // row below, Torn's own damage/accuracy stat icons, and the item image itself.
+        // This script is already the post-filtering-removal, display-only version (per
+        // snickelfritz's own account), so the passive act of showing these numbers was
+        // most likely never what caused the originally reported infinite-scroll issue —
+        // that was more plausibly tied to the quality *filtering* logic that's since been
+        // removed. Normal flow is the one placement that can't visually collide with
+        // anything else on the tile, at the cost of adding a small, fixed amount of height
+        // per tile (same as the original script did).
         const bonusContainer = create('div', {
             className: 'openmarket-bonuses',
-            style: {
-                // FIX: absolutely positioned so this never adds height to the tile. Normal
-                // block-flow insertion here previously grew every tile's height right after
-                // a batch of items loaded, which could trick Item Market's infinite scroll
-                // into thinking the user had scrolled further than they had, auto-loading
-                // more pages on its own.
-                //
-                // FIX: anchored to the bottom of the image wrapper (same positioning context
-                // as the quality badge) instead of below the title element. Anchoring under
-                // the title caused the overlay to spill down into the tile in the row below
-                // it on tightly-packed grid layouts, overlapping and misattributing bonus
-                // text to the wrong item.
-                //
-                // FIX: given a background pill (reusing the same themed background as the
-                // quality badge) so the bonus text has guaranteed contrast against whatever
-                // item image happens to be behind it, instead of relying on the bonus text
-                // colour alone being readable over an arbitrary image.
-                position: 'absolute',
-                left: '2px',
-                right: '2px',
-                bottom: '2px',
-                padding: '1px 3px',
-                borderRadius: '3px',
-                background: getQualityBoxBg(),
-                lineHeight: '1.3',
-                zIndex: '2',
-                pointerEvents: 'none',
-                overflow: 'hidden'
-            }
+            style: { lineHeight: '1.3' }
         });
 
         // Add bonus elements to container.
@@ -460,7 +457,22 @@
             bonusContainer.appendChild(createBonusEl(bonus));
         });
 
-        // Insert quality box on image wrapper.
+        // Insert bonus container.
+        if (bonusContainer.children.length > 0) {
+            if (data.insertBefore) {
+                titleEl.insertBefore(bonusContainer, data.insertBefore);
+            } else {
+                titleEl.appendChild(bonusContainer);
+            }
+        }
+
+        // Hide elements if specified.
+        (data.hideElements || []).forEach(hideEl => {
+            if (hideEl) hideEl.style.display = 'none';
+        });
+
+        // Insert quality box on image wrapper. This overlay is unaffected by the above —
+        // it's confirmed working well and stays as-is.
         const imageWrapper = qs(selectors.imageWrapper, el);
 
         // FIX: clear any stale quality box before reinserting — needed now that recycled
@@ -469,20 +481,6 @@
         if (existingQualityBox) existingQualityBox.remove();
 
         insertQualityBox(imageWrapper, quality, maxRange);
-
-        // Insert bonus container into the image wrapper (below the quality badge).
-        if (bonusContainer.children.length > 0 && imageWrapper) {
-            const wrapperStyle = window.getComputedStyle(imageWrapper);
-            if (wrapperStyle.position === 'static') {
-                imageWrapper.style.position = 'relative';
-            }
-            imageWrapper.appendChild(bonusContainer);
-        }
-
-        // Hide elements if specified.
-        (data.hideElements || []).forEach(hideEl => {
-            if (hideEl) hideEl.style.display = 'none';
-        });
 
         markProcessed(el, key);
     }
