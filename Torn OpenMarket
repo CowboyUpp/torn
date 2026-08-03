@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         OpenMarket
-// @namespace    https://greasyfork.org/en/users/1608691-cowboyup
+// @name         Torn OpenMarket
+// @namespace    https://greasyfork.org/en/scripts/589775-openmarket
 // @version      1.1.0
 // @description  Add quality and bonus percentages to the item market, auction house, and bazaars.
-// @author       https://www.torn.com/forums.php#p=threads&f=67&t=16469095
+// @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
 // @match        https://www.torn.com/bazaar.php*
@@ -13,7 +13,7 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
-// CHANGELOG 1.1.0 (cowboyup fixes):
+// CHANGELOG 1.1.0 (audit fixes):
 // - Bonus overlay is now absolutely positioned instead of being inserted into normal
 //   block flow. A previous version reportedly caused Item Market's infinite scroll to
 //   keep auto-loading pages, because injecting normal-flow content into every tile grew
