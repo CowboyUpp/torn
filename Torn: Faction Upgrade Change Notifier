@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn: Faction Upgrade Change Notifier
-// @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.6.0
+// @namespace    https://github.com/CowboyUpp/torn
+// @version      4.7.0
 // @description  Notifies (toast + OS notification) when your faction's upgrades change. DOM mode reads button.wai-upgrade-btn aria-labels on the Upgrades tab - no special permission needed. Settings toggle sits next to BUSTR+ in the faction toolbar.
-// @author       cowboyup
+// @author       Selbaer (cowboyup)
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -17,11 +17,14 @@
 (function () {
   'use strict';
 
+  const VERSION = '4.7.0';
+
   // ---------- Predefined defaults ----------
   const DEFAULTS = {
     MODE: 'dom',            // 'dom' (no API access needed) or 'api' (needs Faction API Access)
     API_KEY: '',
     NOTIFY_DESKTOP: true,
+    THEME: 'dark',
   };
 
   const NS = 'ffu_';
@@ -41,6 +44,7 @@
       mode: store.get('mode', DEFAULTS.MODE),
       apiKey: store.get('apiKey', DEFAULTS.API_KEY),
       notifyDesktop: store.get('notifyDesktop', DEFAULTS.NOTIFY_DESKTOP),
+      theme: store.get('theme', DEFAULTS.THEME),
     };
   }
 
@@ -374,12 +378,31 @@
     const style = document.createElement('style');
     style.id = 'ffu-style';
     style.textContent = `
+      #ffu-panel, #ffu-toast-container {
+        --ffu-bg: #1c1c1c;
+        --ffu-bg-header: #262626;
+        --ffu-fg: #eee;
+        --ffu-border: #3a3a3a;
+        --ffu-muted: #999;
+        --ffu-hint: #777;
+        --ffu-input-bg: #111;
+      }
+      #ffu-panel.ffu-light, #ffu-toast-container.ffu-light {
+        --ffu-bg: #f7f7f7;
+        --ffu-bg-header: #ececec;
+        --ffu-fg: #242424;
+        --ffu-border: #c9c9c9;
+        --ffu-muted: #666;
+        --ffu-hint: #777;
+        --ffu-input-bg: #fff;
+      }
+
       #ffu-toast-container {
         position: fixed; bottom: 16px; right: 16px; z-index: 999999;
         display: flex; flex-direction: column; gap: 8px;
       }
       .ffu-toast {
-        background: #1c1c1c; color: #eee; border-left: 4px solid #4caf50;
+        background: var(--ffu-bg, #1c1c1c); color: var(--ffu-fg, #eee); border-left: 4px solid #4caf50;
         padding: 10px 14px; border-radius: 4px; font-size: 13px; line-height: 1.4;
         box-shadow: 0 2px 8px rgba(0,0,0,0.4); max-width: 360px;
         opacity: 0; transform: translateY(10px); transition: opacity .25s ease, transform .25s ease;
@@ -410,43 +433,45 @@
 
       #ffu-panel {
         position: fixed; top: 60px; right: 16px; z-index: 999998;
-        width: 320px; background: #1c1c1c; color: #eee; border: 1px solid #3a3a3a;
+        width: 320px; background: var(--ffu-bg); color: var(--ffu-fg); border: 1px solid var(--ffu-border);
         border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); font-size: 12px;
         display: none; overflow: hidden;
       }
       #ffu-panel.ffu-open { display: block; }
       #ffu-panel header {
-        background: #262626; padding: 8px 12px; font-weight: bold; font-size: 13px;
+        background: var(--ffu-bg-header); padding: 8px 12px; font-weight: bold; font-size: 13px;
         display: flex; justify-content: space-between; align-items: center;
       }
-      #ffu-panel header span.ffu-close { cursor: pointer; color: #999; }
-      #ffu-panel header span.ffu-close:hover { color: #fff; }
+      #ffu-panel header .ffu-header-actions { display: flex; align-items: center; gap: 8px; }
+      #ffu-panel header span.ffu-theme-toggle, #ffu-panel header span.ffu-close { cursor: pointer; color: var(--ffu-muted); }
+      #ffu-panel header span.ffu-theme-toggle:hover, #ffu-panel header span.ffu-close:hover { color: var(--ffu-fg); }
       #ffu-panel .ffu-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-      #ffu-panel label { display: block; margin-bottom: 3px; color: #aaa; }
+      #ffu-panel label { display: block; margin-bottom: 3px; color: var(--ffu-muted); }
       #ffu-panel input[type="text"], #ffu-panel input[type="password"] {
-        width: 100%; box-sizing: border-box; background: #111; border: 1px solid #3a3a3a;
-        color: #eee; padding: 5px 7px; border-radius: 3px; font-size: 12px;
+        width: 100%; box-sizing: border-box; background: var(--ffu-input-bg); border: 1px solid var(--ffu-border);
+        color: var(--ffu-fg); padding: 5px 7px; border-radius: 3px; font-size: 12px;
       }
       #ffu-panel select {
-        width: 100%; background: #111; border: 1px solid #3a3a3a; color: #eee;
+        width: 100%; background: var(--ffu-input-bg); border: 1px solid var(--ffu-border); color: var(--ffu-fg);
         padding: 5px 7px; border-radius: 3px; font-size: 12px;
       }
       #ffu-panel .ffu-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
       #ffu-panel .ffu-key-row { display: flex; gap: 6px; }
       #ffu-panel .ffu-key-row input { flex: 1; }
       #ffu-panel button {
-        cursor: pointer; border: 1px solid #3a3a3a; background: #262626; color: #eee;
+        cursor: pointer; border: 1px solid var(--ffu-border); background: var(--ffu-bg-header); color: var(--ffu-fg);
         padding: 5px 9px; border-radius: 3px; font-size: 12px;
       }
-      #ffu-panel button:hover { background: #333; }
-      #ffu-panel button.ffu-primary { background: #2e7d32; border-color: #2e7d32; }
+      #ffu-panel button:hover { filter: brightness(1.2); }
+      #ffu-panel button.ffu-primary { background: #2e7d32; border-color: #2e7d32; color: #fff; }
       #ffu-panel button.ffu-primary:hover { background: #388e3c; }
-      #ffu-panel .ffu-status { color: #999; font-size: 11px; border-top: 1px solid #333; padding-top: 8px; }
+      #ffu-panel .ffu-status { color: var(--ffu-muted); font-size: 11px; border-top: 1px solid var(--ffu-border); padding-top: 8px; }
       #ffu-panel .ffu-checkbox-row { display: flex; align-items: center; gap: 6px; }
       #ffu-panel .ffu-checkbox-row input { width: auto; }
-      #ffu-panel .ffu-hint { color: #777; font-size: 11px; }
+      #ffu-panel .ffu-hint { color: var(--ffu-hint); font-size: 11px; }
       #ffu-panel .ffu-api-fields, #ffu-panel .ffu-dom-fields { display: none; flex-direction: column; gap: 8px; }
       #ffu-panel .ffu-api-fields.ffu-active, #ffu-panel .ffu-dom-fields.ffu-active { display: flex; }
+      #ffu-panel .ffu-version { color: var(--ffu-hint); font-size: 10px; text-align: right; }
     `;
     document.head.appendChild(style);
   }
@@ -459,6 +484,7 @@
       container.id = 'ffu-toast-container';
       document.body.appendChild(container);
     }
+    container.classList.toggle('ffu-light', getConfig().theme === 'light');
     const el = document.createElement('div');
     el.className = `ffu-toast ffu-${type}`;
     el.innerHTML = `<b>Faction Upgrade Notifier</b>${message.replace(/</g, '&lt;')}`;
@@ -514,7 +540,10 @@
     panel.innerHTML = `
       <header>
         Faction Upgrade Notifier
-        <span class="ffu-close" title="Close">✕</span>
+        <span class="ffu-header-actions">
+          <span class="ffu-theme-toggle" id="ffu-theme-toggle" title="Toggle light/dark">☾</span>
+          <span class="ffu-close" title="Close">✕</span>
+        </span>
       </header>
       <div class="ffu-body">
         <div>
@@ -557,6 +586,7 @@
         <button id="ffu-save" class="ffu-primary" type="button">Save</button>
 
         <div class="ffu-status" id="ffu-status">Not checked yet.</div>
+        <div class="ffu-version">Version ${VERSION}</div>
       </div>
     `;
     document.body.appendChild(panel);
@@ -577,6 +607,7 @@
       save: panel.querySelector('#ffu-save'),
       status: panel.querySelector('#ffu-status'),
       close: panel.querySelector('.ffu-close'),
+      themeToggle: panel.querySelector('#ffu-theme-toggle'),
     };
 
     const MODE_HINTS = {
@@ -588,6 +619,15 @@
       els.domFields.classList.toggle('ffu-active', mode === 'dom');
       els.apiFields.classList.toggle('ffu-active', mode === 'api');
       els.modeHint.textContent = MODE_HINTS[mode] || '';
+    }
+
+    function applyTheme(theme) {
+      const isLight = theme === 'light';
+      panel.classList.toggle('ffu-light', isLight);
+      els.themeToggle.textContent = isLight ? '☀' : '☾';
+      els.themeToggle.title = isLight ? 'Switch to dark theme' : 'Switch to light theme';
+      const toastContainer = document.getElementById('ffu-toast-container');
+      if (toastContainer) toastContainer.classList.toggle('ffu-light', isLight);
     }
 
     function renderBranchNames() {
@@ -617,6 +657,7 @@
       els.apikey.value = cfg.apiKey;
       els.desktopNotify.checked = !!cfg.notifyDesktop;
       applyModeVisibility(cfg.mode);
+      applyTheme(cfg.theme);
       renderBranchNames();
     }
 
@@ -631,6 +672,12 @@
     els.close.addEventListener('click', () => panel.classList.remove('ffu-open'));
 
     els.mode.addEventListener('change', () => applyModeVisibility(els.mode.value));
+
+    els.themeToggle.addEventListener('click', () => {
+      const next = getConfig().theme === 'light' ? 'dark' : 'light';
+      store.set('theme', next);
+      applyTheme(next);
+    });
 
     els.save.addEventListener('click', () => {
       store.set('mode', els.mode.value);
