@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.1.0
+// @version      1.1.1
 // @description  Add quality and bonus percentages to the item market, auction house, and bazaars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -13,6 +13,12 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
+// CHANGELOG 1.1.1:
+// - Bonus overlay repositioned to anchor on the image wrapper (bottom, same positioning
+//   context as the quality badge) instead of the title element, and given a background
+//   pill matching the quality badge's themed background. Fixes bonus text overlapping
+//   into the tile below it and being unreadable against item images.
+//
 // CHANGELOG 1.1.0 (audit fixes):
 // - Bonus overlay is now absolutely positioned instead of being inserted into normal
 //   block flow. A previous version reportedly caused Item Market's infinite scroll to
@@ -406,7 +412,8 @@
             return;
         }
 
-        // Get title element for bonus insertion.
+        // Get title element (kept as a sanity check that this tile matches the expected
+        // structure; no longer used as the bonus overlay's anchor point, see below).
         const titleEl = qs(selectors.title, el);
         if (!titleEl) return;
 
@@ -418,45 +425,39 @@
         const bonusContainer = create('div', {
             className: 'openmarket-bonuses',
             style: {
-                lineHeight: '1',
                 // FIX: absolutely positioned so this never adds height to the tile. Normal
                 // block-flow insertion here previously grew every tile's height right after
                 // a batch of items loaded, which could trick Item Market's infinite scroll
                 // into thinking the user had scrolled further than they had, auto-loading
                 // more pages on its own.
+                //
+                // FIX: anchored to the bottom of the image wrapper (same positioning context
+                // as the quality badge) instead of below the title element. Anchoring under
+                // the title caused the overlay to spill down into the tile in the row below
+                // it on tightly-packed grid layouts, overlapping and misattributing bonus
+                // text to the wrong item.
+                //
+                // FIX: given a background pill (reusing the same themed background as the
+                // quality badge) so the bonus text has guaranteed contrast against whatever
+                // item image happens to be behind it, instead of relying on the bonus text
+                // colour alone being readable over an arbitrary image.
                 position: 'absolute',
-                top: '100%',
-                left: '0',
-                whiteSpace: 'nowrap',
+                left: '2px',
+                right: '2px',
+                bottom: '2px',
+                padding: '1px 3px',
+                borderRadius: '3px',
+                background: getQualityBoxBg(),
+                lineHeight: '1.3',
                 zIndex: '2',
-                pointerEvents: 'none'
+                pointerEvents: 'none',
+                overflow: 'hidden'
             }
         });
 
         // Add bonus elements to container.
         bonuses.forEach(bonus => {
             bonusContainer.appendChild(createBonusEl(bonus));
-        });
-
-        // Insert bonus container.
-        if (bonusContainer.children.length > 0) {
-            // FIX: titleEl needs a positioning context for the absolutely-positioned
-            // overlay above to anchor correctly, same trick already used for imageWrapper.
-            const titleStyle = window.getComputedStyle(titleEl);
-            if (titleStyle.position === 'static') {
-                titleEl.style.position = 'relative';
-            }
-
-            if (data.insertBefore) {
-                titleEl.insertBefore(bonusContainer, data.insertBefore);
-            } else {
-                titleEl.appendChild(bonusContainer);
-            }
-        }
-
-        // Hide elements if specified.
-        (data.hideElements || []).forEach(hideEl => {
-            if (hideEl) hideEl.style.display = 'none';
         });
 
         // Insert quality box on image wrapper.
@@ -468,6 +469,20 @@
         if (existingQualityBox) existingQualityBox.remove();
 
         insertQualityBox(imageWrapper, quality, maxRange);
+
+        // Insert bonus container into the image wrapper (below the quality badge).
+        if (bonusContainer.children.length > 0 && imageWrapper) {
+            const wrapperStyle = window.getComputedStyle(imageWrapper);
+            if (wrapperStyle.position === 'static') {
+                imageWrapper.style.position = 'relative';
+            }
+            imageWrapper.appendChild(bonusContainer);
+        }
+
+        // Hide elements if specified.
+        (data.hideElements || []).forEach(hideEl => {
+            if (hideEl) hideEl.style.display = 'none';
+        });
 
         markProcessed(el, key);
     }
