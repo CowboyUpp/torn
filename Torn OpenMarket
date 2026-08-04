@@ -11,6 +11,8 @@
 // @grant        none
 // @run-at       document-start
 // @license      GNU GPLv3
+// @updateURL    https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.user.js
 // ==/UserScript==
 
 // CHANGELOG 1.2.0:
