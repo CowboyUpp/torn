@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.2.0
+// @version      1.2.1
 // @description  Add quality and bonus percentages to the item market, auction house, and bazaars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -11,8 +11,8 @@
 // @grant        none
 // @run-at       document-start
 // @license      GNU GPLv3
-// @updateURL    https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.meta.js
-// @downloadURL  https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.user.js
+// @downloadURL https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.user.js
+// @updateURL https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.meta.js
 // ==/UserScript==
 
 // CHANGELOG 1.2.0:
@@ -102,7 +102,7 @@
         itemMarket: {
             root: '#item-market-root',
             tile: '[class*="itemTile___"]',
-            imageWrapper: '[class*="imageWrapper___"]',
+            imageWrapper: '[class*="tileImage___"]',
             title: 'div > [class*="title___"]',
             price: '[class*="priceAndTotal___"] span',
             statsContainer: '[class*="properties___"]',
