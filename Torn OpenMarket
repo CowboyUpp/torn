@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.2.1
+// @version      1.2.2
 // @description  Add quality and bonus percentages to the item market, auction house, and bazaars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,13 +15,32 @@
 // @updateURL https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.meta.js
 // ==/UserScript==
 
+// CHANGELOG 1.2.2:
+// - waitForRoot()'s pending setTimeout is now tracked per-handler (pendingTimeoutId) and
+//   cancelled in teardownCurrentHandler(). Previously, rapid SPA navigation between market
+//   pages could leave an old handler's root-polling loop running in the background even
+//   after its observers were disconnected, since only observers were being cleaned up.
+// - getUnitFromDescription() now escapes regex metacharacters in the bonus value before
+//   building its pattern. A decimal value like "1.5" previously went into the regex
+//   unescaped, so the "." matched any character instead of a literal dot, risking a false
+//   "%" match against unrelated description text.
+//
+// CHANGELOG 1.2.1:
+// - Fixed Item Market quality badges silently disappearing (no console error, no crash).
+//   Torn renamed the item tile's image-wrapper class from "imageWrapper___xxxx" to
+//   "tileImage___xxxx". insertQualityBox() no-ops silently when its container is null,
+//   so the badge just stopped appearing with zero indication why. Title/price/stats
+//   selectors were all still valid, this was the only broken piece. Confirmed via live
+//   DOM inspection: the element wrapping just the <img> (siblings with the actions/buy
+//   button wrapper) now carries the "tileImage___" prefix instead.
+//
 // CHANGELOG 1.2.0:
 // - Reverted the bonus text from an absolutely-positioned image overlay back to normal
 //   block-flow placement under the item title (closer to the original design). Three
 //   overlay placements in a row (under title / bottom of image / top of image) each
 //   collided with something else on the tile. This script is already the
 //   post-filtering-removal, display-only build, so passively showing these numbers was
-//   most likely never the actual cause of the originally reported infinite-scroll bug —
+//   most likely never the actual cause of the originally reported infinite-scroll bug --
 //   that was more plausibly tied to the quality *filtering* logic that's since been
 //   removed. If infinite-scroll misbehavior does reoccur, that's the next thing to
 //   isolate, rather than continuing to fight overlay placement.
@@ -102,6 +121,10 @@
         itemMarket: {
             root: '#item-market-root',
             tile: '[class*="itemTile___"]',
+            // FIX (1.2.1): Torn renamed this tile's image-wrapper class from
+            // "imageWrapper___xxxx" to "tileImage___xxxx". This is the direct wrapper
+            // around just the <img> (not the outer "baseItemTileWrapper___" which also
+            // contains the buy button / actions row) -- same role as before, new name.
             imageWrapper: '[class*="tileImage___"]',
             title: 'div > [class*="title___"]',
             price: '[class*="priceAndTotal___"] span',
@@ -510,7 +533,12 @@
     // This could be expanded to include more info, like ' turns'.
     function getUnitFromDescription(description, value) {
         if (!description || value === undefined || value === null) return '';
-        const pattern = new RegExp(String(value) + '\\s*%');
+        // FIX (1.2.2): escape regex metacharacters in the value before building the
+        // pattern. A decimal bonus value like "1.5" previously went into the regex
+        // unescaped, so the "." matched any character instead of a literal dot,
+        // risking a false "%" match against unrelated description text.
+        const escapedValue = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(escapedValue + '\\s*%');
         if (pattern.test(description)) return '%';
         return '';
     }
@@ -615,7 +643,12 @@
     // FIX: bounded wait for a page's root element to mount. Needed because after an SPA
     // navigation (see setupRouteWatcher below) the new page's React root may not exist
     // yet at the moment we try to initialise its handler.
-    function waitForRoot(selector, callback, attemptsLeft = 10) {
+    // FIX (1.2.2): accepts an optional onTimeoutId callback so the caller can capture and
+    // later cancel the pending setTimeout. Without this, rapid SPA navigation could leave
+    // an old handler's root-polling loop running in the background even after
+    // teardownCurrentHandler() disconnected its observers, since timeouts were previously
+    // untracked and never cleared.
+    function waitForRoot(selector, callback, attemptsLeft = 10, onTimeoutId = null) {
         const root = qs(selector);
         if (root) {
             callback(root);
@@ -625,7 +658,8 @@
             debugWarn('Could not find root element for selector', selector, '- page structure may have changed, or navigation did not lead to a supported page.');
             return;
         }
-        setTimeout(() => waitForRoot(selector, callback, attemptsLeft - 1), 300);
+        const timeoutId = setTimeout(() => waitForRoot(selector, callback, attemptsLeft - 1, onTimeoutId), 300);
+        if (onTimeoutId) onTimeoutId(timeoutId);
     }
 
     // ITEM MARKET
@@ -646,6 +680,7 @@
         cache: [],
         selectors: SELECTORS.itemMarket,
         observer: null, // FIX: tracked so it can be disconnected on SPA re-navigation
+        pendingTimeoutId: null, // FIX (1.2.2): tracked so a stale root-polling loop can be cancelled on teardown
 
         // FIX: bounds cache growth and is called instead of pushing directly to `cache`.
         pushCache(newItems) {
@@ -719,6 +754,7 @@
             // FIX: waitForRoot instead of a single qs()+return, so init() can succeed even
             // if this handler is (re)activated before the SPA has finished mounting the page.
             waitForRoot(this.selectors.root, (root) => {
+                self.pendingTimeoutId = null;
                 // Scrolling the page loads in new items, so check for DOM changes and re-process.
                 const observer = new MutationObserver(() => {
                     self.processAll();
@@ -730,7 +766,7 @@
                 observer.observe(root, { childList: true, subtree: true });
                 self.observer = observer;
                 self.processAll();
-            });
+            }, 10, (timeoutId) => { self.pendingTimeoutId = timeoutId; });
         }
     };
 
@@ -739,6 +775,7 @@
     const auctionHouse = {
         selectors: SELECTORS.auctionHouse,
         observer: null, // FIX: tracked so it can be disconnected on SPA re-navigation
+        pendingTimeoutId: null, // FIX (1.2.2): tracked so a stale root-polling loop can be cancelled on teardown
 
         processAll() {
             if (!isPageActive()) return;
@@ -779,6 +816,7 @@
             // The observer is set off each time the counter ticks down,
             // but it's only once a second, so whatever.
             waitForRoot(this.selectors.root, (root) => {
+                self.pendingTimeoutId = null;
                 const observer = new MutationObserver(() => {
                     self.processAll();
                 });
@@ -787,7 +825,7 @@
                 self.observer = observer;
 
                 self.processAll();
-            });
+            }, 10, (timeoutId) => { self.pendingTimeoutId = timeoutId; });
         }
     };
 
@@ -797,6 +835,7 @@
         selectors: SELECTORS.bazaar,
         outerObserver: null, // FIX: tracked so it can be disconnected on SPA re-navigation
         innerObserver: null, // FIX: tracked so it can be disconnected on SPA re-navigation
+        pendingTimeoutId: null, // FIX (1.2.2): tracked so a stale root-polling loop can be cancelled on teardown
 
         processAll() {
             if (!isPageActive()) return;
@@ -839,6 +878,7 @@
             // at some point. Maybe the extra logic was related to a now fixed bazaar bug with
             // large images.
             waitForRoot(this.selectors.root, (root) => {
+                self.pendingTimeoutId = null;
                 const outerObserver = new MutationObserver((_, obs) => {
                     const container = qs(self.selectors.itemsContainer, root);
                     if (!container) return;
@@ -856,7 +896,7 @@
 
                 outerObserver.observe(root, { childList: true, subtree: true });
                 self.outerObserver = outerObserver;
-            });
+            }, 10, (timeoutId) => { self.pendingTimeoutId = timeoutId; });
         }
     };
 
@@ -881,6 +921,15 @@
                 currentHandler[key] = null;
             }
         });
+        // FIX (1.2.2): cancel any still-pending waitForRoot() poll. Without this, rapid
+        // SPA navigation (e.g. quickly switching between Item Market, Auction House, and
+        // Bazaar) could leave an old handler's root-detection loop running in the
+        // background indefinitely, since observers were the only thing being cleaned up
+        // here before.
+        if (currentHandler.pendingTimeoutId) {
+            clearTimeout(currentHandler.pendingTimeoutId);
+            currentHandler.pendingTimeoutId = null;
+        }
     }
 
     function activateHandlerForCurrentUrl() {
