@@ -556,7 +556,7 @@
       .map((item) => {
         const badges = [
           item.equipped ? `<span class="${APP_ID}-badge is-equipped">Equipped</span>` : "",
-          item.factionOwned ? `<span class="${APP_ID}-badge">Faction</span>` : "",
+          item.faction_owned ? `<span class="${APP_ID}-badge">Faction</span>` : "",
         ].join("");
         const itemRef = item.uid ? `UID ${formatNumber(item.uid)}` : `ID ${formatNumber(item.id)}`;
 
