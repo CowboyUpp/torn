@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.4
+// @version      1.9.6
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,7 +22,7 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.9.4";
+  const SCRIPT_VERSION = "1.9.6";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -629,8 +629,73 @@
       </div>`;
   }
 
+  // Every render() fully replaces panel.innerHTML, which would otherwise
+  // silently drop keyboard focus, cursor position, and scroll position on
+  // every state change (typing a search character, switching category,
+  // toggling theme, an in-flight request resolving, etc). This captures
+  // whichever of those apply before the rebuild and reapplies them after,
+  // generically, rather than special-casing just the search input.
+  function capturePanelState() {
+    if (!panel) return null;
+    const captured = {};
+
+    const active = document.activeElement;
+    if (active && panel.contains(active)) {
+      let selector = null;
+      if (active.dataset.action) selector = `[data-action="${CSS.escape(active.dataset.action)}"]`;
+      else if (active.dataset.category) selector = `[data-category="${CSS.escape(active.dataset.category)}"]`;
+      else if (active.id) selector = `#${CSS.escape(active.id)}`;
+      else if (active.matches(`.${APP_ID}-search input`)) selector = `.${APP_ID}-search input`;
+      else if (active.matches(`.${APP_ID}-category-select`)) selector = `.${APP_ID}-category-select`;
+
+      if (selector) {
+        captured.focusSelector = selector;
+        if (typeof active.selectionStart === "number") {
+          captured.selectionStart = active.selectionStart;
+          captured.selectionEnd = active.selectionEnd;
+        }
+      }
+    }
+
+    const content = panel.querySelector(`.${APP_ID}-content`);
+    if (content) captured.contentScrollTop = content.scrollTop;
+    const categories = panel.querySelector(`.${APP_ID}-categories`);
+    if (categories) captured.categoriesScrollLeft = categories.scrollLeft;
+
+    return captured;
+  }
+
+  function restorePanelState(captured) {
+    if (!captured || !panel) return;
+
+    if (captured.focusSelector) {
+      const element = panel.querySelector(captured.focusSelector);
+      if (element) {
+        element.focus({ preventScroll: true });
+        if (typeof captured.selectionStart === "number" && typeof element.setSelectionRange === "function") {
+          try {
+            element.setSelectionRange(captured.selectionStart, captured.selectionEnd);
+          } catch {
+            /* Some input types reject setSelectionRange; losing the cursor
+               position is harmless, the value itself is unaffected. */
+          }
+        }
+      }
+    }
+
+    if (typeof captured.contentScrollTop === "number") {
+      const content = panel.querySelector(`.${APP_ID}-content`);
+      if (content) content.scrollTop = captured.contentScrollTop;
+    }
+    if (typeof captured.categoriesScrollLeft === "number") {
+      const categories = panel.querySelector(`.${APP_ID}-categories`);
+      if (categories) categories.scrollLeft = captured.categoriesScrollLeft;
+    }
+  }
+
   function render() {
     if (!panel) return;
+    const capturedState = capturePanelState();
     const items = filteredItems();
     const hasItemsThisPage = state.items.length > 0;
     const pageStart = hasItemsThisPage ? state.offset + 1 : 0;
@@ -654,6 +719,7 @@
           ${renderSettings()}
         </div>`;
       keyInput = panel.querySelector(`#${APP_ID}-key-input`);
+      restorePanelState(capturedState);
       return;
     }
 
@@ -732,6 +798,7 @@
       </div>`;
 
     keyInput = panel.querySelector(`#${APP_ID}-key-input`);
+    restorePanelState(capturedState);
   }
 
   function openPanel() {
@@ -1426,6 +1493,27 @@
 
     const nativeStyle = document.createElement("style");
     nativeStyle.textContent = `
+      /* ============================================================
+       * nativeStyle: eight override passes, applied in source order.
+       * Each pass narrows the one(s) before it on the SAME selectors
+       * (e.g. .tti-shell width/height is set in passes 1, 3, 4, and 5).
+       * Later passes win on tie, and some use !important to guarantee
+       * that on top of source order alone. If a rule isn't behaving
+       * as expected, check every pass below for the same selector
+       * before assuming there's only one place to look.
+       *
+       *   PASS 1 — Torn-native dark treatment          (this pass, below)
+       *   PASS 2 — Torn light theme                     (search "PASS 2")
+       *   PASS 3 — Compact layout / native-control sampling ("PASS 3")
+       *   PASS 4 — Final density pass                   ("PASS 4")
+       *   PASS 5 — Content-sized utility window          ("PASS 5")
+       *   PASS 6 — Torn control finish                   ("PASS 6")
+       *   PASS 7 — Stable typography / real item artwork ("PASS 7")
+       *   PASS 8 — Empty-category state + toast           ("PASS 8")
+       *
+       * A change to any layout/sizing selector should be checked
+       * against all eight passes, not just the one being edited.
+       * ============================================================ */
       #${APP_ID}-root {
         font-family: Arial, Helvetica, sans-serif;
       }
@@ -1715,7 +1803,8 @@
         .${APP_ID}-settings { padding: 18px 12px; }
       }
 
-      /* Torn light theme. Theme is detected from Torn when the viewer opens
+      /* PASS 2 — Torn light theme. Theme is detected from Torn when the
+         viewer opens
          and whenever the site's theme classes change. */
       #${APP_ID}-root.${APP_ID}-theme-light .${APP_ID}-panel {
         background: rgba(20, 20, 20, .38);
@@ -1903,7 +1992,8 @@
         background: #f2e4e4;
       }
 
-      /* Compact layout and native-control sampling, following the Activity Log
+      /* PASS 3 — Compact layout and native-control sampling, following the
+         Activity Log
          Filter pattern. */
       #${APP_ID}-root {
         --tti-native-height: 34px;
@@ -2032,7 +2122,7 @@
         .${APP_ID}-refresh span { font-size: 14px; }
       }
 
-      /* Final density pass: compact, with Torn-like control radii. */
+      /* PASS 4 — Final density pass: compact, with Torn-like control radii. */
       #${APP_ID}-root .${APP_ID}-panel { padding: 28px 12px; }
       #${APP_ID}-root .${APP_ID}-shell {
         width: min(600px, calc(100% - 24px));
@@ -2179,7 +2269,7 @@
         }
       }
 
-      /* Content-sized utility window: no empty full-height canvas. */
+      /* PASS 5 — Content-sized utility window: no empty full-height canvas. */
       #${APP_ID}-root .${APP_ID}-panel {
         padding: 54px 12px 12px;
         align-items: start;
@@ -2233,7 +2323,8 @@
         #${APP_ID}-root .${APP_ID}-content { max-height: 300px; }
       }
 
-      /* Torn control finish: sampling can report a square radius on some
+      /* PASS 6 — Torn control finish: sampling can report a square radius on
+         some
          pages, so interactive controls use a stable radius of their own. */
       #${APP_ID}-root button,
       #${APP_ID}-root select,
@@ -2261,7 +2352,7 @@
         text-shadow: none !important;
       }
 
-      /* Stable typography and real Torn item artwork. */
+      /* PASS 7 — Stable typography and real Torn item artwork. */
       #${APP_ID}-root,
       #${APP_ID}-root * {
         font-family: Arial, Helvetica, sans-serif !important;
@@ -2344,7 +2435,7 @@
         min-width: 82px;
       }
 
-      /* Empty-category state: added last so it wins over every chip
+      /* PASS 8 — Empty-category state: added last so it wins over every chip
          background/hover rule defined above, regardless of theme layer. */
       #${APP_ID}-root .${APP_ID}-chip.is-empty {
         opacity: .35 !important;
@@ -2582,11 +2673,6 @@
       if (event.target.matches(`.${APP_ID}-search input`)) {
         state.query = event.target.value;
         render();
-        requestAnimationFrame(() => {
-          const input = panel.querySelector(`.${APP_ID}-search input`);
-          input?.focus();
-          input?.setSelectionRange(state.query.length, state.query.length);
-        });
       }
     });
     panel.addEventListener("change", (event) => {
