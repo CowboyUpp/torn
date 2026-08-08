@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.2
+// @version      1.9.3
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,7 +22,7 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.9.2";
+  const SCRIPT_VERSION = "1.9.3";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -360,6 +360,11 @@
     }).format(new Date(timestamp * 1000));
   }
 
+  // Handle for whichever inventory request is currently in flight, so a
+  // rapid category switch or page change can cancel the previous one rather
+  // than letting it keep running against Torn's servers in the background.
+  let activeApiRequest = null;
+
   function apiRequest(url, apiKey) {
     return new Promise((resolve, reject) => {
       const headers = {
@@ -368,7 +373,7 @@
       };
 
       if (typeof GM_xmlhttpRequest === "function") {
-        GM_xmlhttpRequest({
+        activeApiRequest = GM_xmlhttpRequest({
           method: "GET",
           url,
           headers,
@@ -382,14 +387,31 @@
           },
           onerror: () => reject(new Error("Could not reach the Torn API.")),
           ontimeout: () => reject(new Error("The Torn API request timed out.")),
+          onabort: () => reject(new Error("Request cancelled.")),
         });
         return;
       }
 
-      fetch(url, { headers })
-        .then((response) => response.json())
+      const controller = new AbortController();
+      activeApiRequest = { abort: () => controller.abort() };
+      fetch(url, { headers, signal: controller.signal })
+        .then((response) => {
+          if (!response.ok) {
+            return response.text().then((body) => {
+              const detail = body ? `: ${body.slice(0, 200)}` : "";
+              throw new Error(`Torn API returned ${response.status}${detail}`);
+            });
+          }
+          return response.json();
+        })
         .then(resolve)
-        .catch(() => reject(new Error("Could not reach the Torn API.")));
+        .catch((error) => {
+          if (error?.name === "AbortError") {
+            reject(new Error("Request cancelled."));
+          } else {
+            reject(error instanceof Error ? error : new Error("Could not reach the Torn API."));
+          }
+        });
     });
   }
 
@@ -402,6 +424,9 @@
       setTimeout(() => keyInput?.focus(), 0);
       return;
     }
+
+    activeApiRequest?.abort();
+    activeApiRequest = null;
 
     const token = ++state.requestToken;
     state.loading = true;
@@ -497,7 +522,7 @@
     }).join("");
   }
 
-  function renderCards() {
+  function renderCards(items) {
     if (state.loading) {
       return Array.from(
         { length: 8 },
@@ -518,7 +543,6 @@
         </div>`;
     }
 
-    const items = filteredItems();
     if (!items.length) {
       return `
         <div class="${APP_ID}-empty">
@@ -532,7 +556,7 @@
       .map((item) => {
         const badges = [
           item.equipped ? `<span class="${APP_ID}-badge is-equipped">Equipped</span>` : "",
-          item.faction_owned ? `<span class="${APP_ID}-badge">Faction</span>` : "",
+          item.factionOwned ? `<span class="${APP_ID}-badge">Faction</span>` : "",
         ].join("");
         const itemRef = item.uid ? `UID ${formatNumber(item.uid)}` : `ID ${formatNumber(item.id)}`;
 
@@ -610,8 +634,9 @@
   function render() {
     if (!panel) return;
     const items = filteredItems();
-    const pageStart = state.total ? state.offset + 1 : 0;
-    const pageEnd = Math.min(state.offset + state.items.length, state.total);
+    const hasItemsThisPage = state.items.length > 0;
+    const pageStart = hasItemsThisPage ? state.offset + 1 : 0;
+    const pageEnd = hasItemsThisPage ? state.offset + state.items.length : 0;
     const totalQuantity = items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
     const hasPrevious = state.offset > 0;
     // When the API doesn't report a usable _metadata.total, don't assume
@@ -690,12 +715,12 @@
         </section>
 
         <main class="${APP_ID}-content">
-          <div class="${APP_ID}-grid">${renderCards()}</div>
+          <div class="${APP_ID}-grid">${renderCards(items)}</div>
         </main>
 
         <footer class="${APP_ID}-footer">
           <span>
-            ${state.total ? `Showing ${formatNumber(pageStart)}–${formatNumber(pageEnd)} of ${formatNumber(state.total)}${state.totalKnown ? "" : "+"}` : "Official Torn API v2"}
+            ${hasItemsThisPage ? `Showing ${formatNumber(pageStart)}–${formatNumber(pageEnd)} of ${formatNumber(state.total)}${state.totalKnown ? "" : "+"}` : "Official Torn API v2"}
           </span>
           ${
             hasPagination
@@ -1438,8 +1463,6 @@
     `;
     document.head.appendChild(style);
 
-    // Torn-native dark treatment. Kept as a final override so the functional
-    // layout remains resilient if Torn changes its surrounding page styles.
     const nativeStyle = document.createElement("style");
     nativeStyle.textContent = `
       #${APP_ID}-root {
@@ -2501,6 +2524,7 @@
     clearTimeout(launcherFallbackTimer);
     launcherFallbackTimer = null;
     launcher?.classList.remove("is-visible");
+    navigationObserver?.disconnect();
     if (root) {
       root.hidden = true;
       root.style.display = "none";
@@ -2522,6 +2546,12 @@
       root.hidden = false;
       root.style.removeProperty("display");
     }
+    // Re-establish observation in case we previously disconnected while off
+    // the travel page (see deactivateOutsideTravelPage).
+    navigationObserver?.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
     const itemLinks = [...document.querySelectorAll("a[href]")].filter(isOfficialItemsLink);
     // Torn removes Items once a flight begins. Clone Traveling instead so the
     // Inventory trigger remains inside the same native desktop/mobile menu.
@@ -2663,8 +2693,6 @@
       }
     });
 
-    installNavigationButton();
-
     navigationObserver = new MutationObserver(() => {
       clearTimeout(navigationTimer);
       navigationTimer = setTimeout(() => {
@@ -2672,10 +2700,8 @@
         syncTheme();
       }, 120);
     });
-    navigationObserver.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-    });
+
+    installNavigationButton();
 
     const syncPageScope = () => {
       if (isTravelPage()) installNavigationButton();
