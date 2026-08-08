@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.4
+// @version      4.9.5
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.4';
+    const VERSION = '4.9.5';
     // TODO after deploying cct-sync-worker.js: replace both this URL and the
     // @connect host above with your real *.workers.dev address (or custom
     // domain). Cross-device sync stays fully inert — no requests fired, no
@@ -57,6 +57,10 @@
     // here means "why is sync failing?" gets answered immediately in the UI
     // instead of surfacing later as an opaque HTTP 400 from the server.
     const SYNC_TOKEN_RE = /^[a-zA-Z0-9_-]{16,64}$/;
+    // Shared with gmRequest's own GM_xmlhttpRequest timeout so every network
+    // call this script makes — Torn's own API included — fails the same way
+    // after the same wait, instead of some paths hanging indefinitely.
+    const FETCH_TIMEOUT_MS = 15000;
 
     // Verified against real API responses, not assumed. See torn/logtypes:
     // 9010 = Crime success, 9150 = Crime fail (new). Critical fails fragment across
@@ -337,6 +341,33 @@
         renderCorrectionLog();
     }
 
+    // Shared tail for every chain-update path that only wants to log/persist/
+    // re-render when the value actually moved (native badge sync, the counts
+    // fallback's final delta). Assumes `chain` has ALREADY been reassigned to
+    // its new (clamped) value by the caller — this only decides whether that
+    // change is worth announcing. Returns whether a change was recorded, so
+    // callers can gate a source-specific follow-up (e.g. saveLastEvent) on it.
+    function commitChainIfChanged(source, oldChain, detail, reason) {
+        if (chain === oldChain) return false;
+        logCorrection(source, oldChain, chain, detail, reason);
+        saveChain();
+        render(true);
+        return true;
+    }
+
+    // Sibling to commitChainIfChanged for paths that persist/re-render every
+    // time they run regardless of whether the value moved (manual entry,
+    // parsed outcome text) — logCorrection is still skipped when unchanged,
+    // but saveChain/render always fire so the UI reflects the latest input.
+    // Assumes `chain` has already been reassigned by the caller.
+    function commitChainAlways(source, oldChain, detail, reason) {
+        const changed = chain !== oldChain;
+        if (changed) logCorrection(source, oldChain, chain, detail, reason);
+        saveChain();
+        render(true);
+        return changed;
+    }
+
     function relativeTime(ts) {
         const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
         if (diffSec < 5) return 'just now';
@@ -472,6 +503,17 @@
         });
     }
 
+    // Wraps page fetch() with the same timeout behavior gmRequest gets for
+    // free from GM_xmlhttpRequest's own `timeout` option. Bare fetch() has no
+    // built-in timeout, so a stalled Torn API response previously left
+    // fetchCrimeLogPage()/fetchOfficialItemPrice() hanging indefinitely — e.g.
+    // blocking resolveUnknownItemPrices()'s whole item loop on one bad request.
+    function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    }
+
     function syncStatusEl() {
         return document.querySelector('#cct-sync-status');
     }
@@ -482,11 +524,6 @@
         if (el) el.textContent = text;
     }
 
-    // Pushes any local records newer than the push cursor, oldest-first, capped
-    // at SYNC_PUSH_BATCH_MAX per call. The cursor only advances to the newest
-    // timestamp actually included in a *successful* push — a large offline
-    // backlog simply catches up over a few cycles rather than risking an
-    // oversized request or losing track of a failed batch.
     // Turns the Worker's { error: "..." } response body into something a
     // non-technical status line can show, instead of just a bare HTTP code —
     // this is what actually let the invalid-token case below get diagnosed
@@ -502,6 +539,35 @@
         return `HTTP ${status}`;
     }
 
+    // Shared request/error-handling path for both push and pull: fires the
+    // GM request, and on any non-2xx status or thrown error sets the status
+    // line + logs a diagnostic entry using the caller-supplied labels/keys.
+    // Callers only handle their own success path (advancing the push cursor,
+    // merging pulled records) — everything else funnels through here.
+    async function syncRequest(method, endpoint, { data, failLabel, diagKey, retryStatus, diagErrKey } = {}) {
+        try {
+            const res = await gmRequest({
+                method,
+                url: `${SYNC_WORKER_URL}${endpoint}`,
+                headers: data ? { 'Content-Type': 'application/json' } : undefined,
+                data,
+            });
+            if (res.status >= 200 && res.status < 300) return { ok: true, res };
+            setSyncStatus(`${failLabel} failed: ${describeSyncError(res.status, res.responseText)}`);
+            logDiagnostic(diagKey, { status: res.status, body: String(res.responseText || '').slice(0, 300) });
+            return { ok: false };
+        } catch (err) {
+            setSyncStatus(retryStatus);
+            logDiagnostic(diagErrKey, String(err && err.message || err));
+            return { ok: false };
+        }
+    }
+
+    // Pushes any local records newer than the push cursor, oldest-first, capped
+    // at SYNC_PUSH_BATCH_MAX per call. The cursor only advances to the newest
+    // timestamp actually included in a *successful* push — a large offline
+    // backlog simply catches up over a few cycles rather than risking an
+    // oversized request or losing track of a failed batch.
     async function pushProfitRecords() {
         if (!syncEnabled || !syncToken || !profitRecords.length) return;
 
@@ -511,25 +577,18 @@
             .slice(0, SYNC_PUSH_BATCH_MAX);
         if (!pending.length) return;
 
-        try {
-            const res = await gmRequest({
-                method: 'POST',
-                url: `${SYNC_WORKER_URL}/records`,
-                headers: { 'Content-Type': 'application/json' },
-                data: JSON.stringify({ token: syncToken, records: pending }),
-            });
-            if (res.status >= 200 && res.status < 300) {
-                const newest = Math.max(...pending.map((r) => new Date(r.ts).getTime()));
-                saveSyncPushCursor(newest);
-                setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
-            } else {
-                setSyncStatus(`Push failed: ${describeSyncError(res.status, res.responseText)}`);
-                logDiagnostic('sync-push-failed', { status: res.status, body: String(res.responseText || '').slice(0, 300) });
-            }
-        } catch (err) {
-            setSyncStatus('Push failed — will retry');
-            logDiagnostic('sync-push-error', String(err && err.message || err));
-        }
+        const result = await syncRequest('POST', '/records', {
+            data: JSON.stringify({ token: syncToken, records: pending }),
+            failLabel: 'Push',
+            diagKey: 'sync-push-failed',
+            retryStatus: 'Push failed — will retry',
+            diagErrKey: 'sync-push-error',
+        });
+        if (!result.ok) return;
+
+        const newest = Math.max(...pending.map((r) => new Date(r.ts).getTime()));
+        saveSyncPushCursor(newest);
+        setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
     }
 
     // Pulls the token's full record set and merges by id — safe even if the
@@ -552,45 +611,39 @@
     async function pullProfitRecords() {
         if (!syncEnabled || !syncToken) return;
 
-        try {
-            const res = await gmRequest({
-                method: 'GET',
-                url: `${SYNC_WORKER_URL}/records?token=${encodeURIComponent(syncToken)}`,
-            });
-            if (res.status < 200 || res.status >= 300) {
-                setSyncStatus(`Pull failed: ${describeSyncError(res.status, res.responseText)}`);
-                logDiagnostic('sync-pull-failed', { status: res.status, body: String(res.responseText || '').slice(0, 300) });
-                return;
-            }
-            let body;
-            try { body = JSON.parse(res.responseText); } catch (_) { body = null; }
-            const incoming = (body && Array.isArray(body.records)) ? body.records : [];
-            if (!incoming.length) {
-                setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
-                return;
-            }
+        const result = await syncRequest('GET', `/records?token=${encodeURIComponent(syncToken)}`, {
+            failLabel: 'Pull',
+            diagKey: 'sync-pull-failed',
+            retryStatus: 'Pull failed — will retry',
+            diagErrKey: 'sync-pull-error',
+        });
+        if (!result.ok) return;
 
-            const existingIds = new Set(profitRecords.map((r) => r.id));
-            let mergedCount = 0;
-            for (const r of incoming) {
-                if (existingIds.has(r.id)) continue;
-                profitRecords.push(r);
-                existingIds.add(r.id);
-                mergedCount++;
-            }
-
-            if (mergedCount > 0) {
-                profitRecords.sort((a, b) => new Date(b.ts) - new Date(a.ts));
-                saveProfitData();
-                renderProfitPopover();
-            }
-            setSyncStatus(mergedCount
-                ? `Synced ✓ pulled ${mergedCount} from other device${mergedCount === 1 ? '' : 's'}`
-                : `Synced ✓ ${relativeTime(Date.now())}`);
-        } catch (err) {
-            setSyncStatus('Pull failed — will retry');
-            logDiagnostic('sync-pull-error', String(err && err.message || err));
+        let body;
+        try { body = JSON.parse(result.res.responseText); } catch (_) { body = null; }
+        const incoming = (body && Array.isArray(body.records)) ? body.records : [];
+        if (!incoming.length) {
+            setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
+            return;
         }
+
+        const existingIds = new Set(profitRecords.map((r) => r.id));
+        let mergedCount = 0;
+        for (const r of incoming) {
+            if (existingIds.has(r.id)) continue;
+            profitRecords.push(r);
+            existingIds.add(r.id);
+            mergedCount++;
+        }
+
+        if (mergedCount > 0) {
+            profitRecords.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+            saveProfitData();
+            renderProfitPopover();
+        }
+        setSyncStatus(mergedCount
+            ? `Synced ✓ pulled ${mergedCount} from other device${mergedCount === 1 ? '' : 's'}`
+            : `Synced ✓ ${relativeTime(Date.now())}`);
     }
 
     // Shared entry point for both the periodic timers and the manual
@@ -889,7 +942,7 @@
             return null;
         }
         try {
-            const res = await fetch(`https://api.torn.com/torn/${encodeURIComponent(id)}?selections=items&key=${encodeURIComponent(key)}`);
+            const res = await fetchWithTimeout(`https://api.torn.com/torn/${encodeURIComponent(id)}?selections=items&key=${encodeURIComponent(key)}`);
             const data = await res.json();
             if (data?.error) {
                 // Code 16 = "Access level of this key is not high enough" — this is a
@@ -1072,18 +1125,15 @@
         }
 
         chain = clampChain(chain);
-        if (chain !== oldChain) {
-            const reasonMap = { critical: 'Detected critical fail message', fail: 'Detected fail message', success: 'Detected success message' };
-            logCorrection('text', oldChain, chain, outcome.text, reasonMap[outcome.type] || 'Detected outcome message');
+        const reasonMap = { critical: 'Detected critical fail message', fail: 'Detected fail message', success: 'Detected success message' };
+        if (commitChainAlways('text', oldChain, outcome.text, reasonMap[outcome.type] || 'Detected outcome message')) {
             resetResultCounterTracking();
         }
-        saveChain();
         saveLastEvent({
             signature: `${outcome.type}:${hashText(outcome.text)}`,
             time: Date.now(),
             type: outcome.type,
         });
-        render(true);
     }
 
     function chainColor(n) {
@@ -1164,13 +1214,9 @@
         if (!badge) return false;
         pendingCriticalConfirm = null;
         pendingResultCountReseed = null;
-        if (badge.value !== chain) {
-            const oldChain = chain;
-            chain = clampChain(badge.value);
-            logCorrection('native', oldChain, chain, null, `Torn's own chain badge read ${badge.value}`);
-            saveChain();
-            render(true);
-        }
+        const oldChain = chain;
+        chain = clampChain(badge.value);
+        commitChainIfChanged('native', oldChain, null, `Torn's own chain badge read ${badge.value}`);
         return true;
     }
 
@@ -1363,6 +1409,13 @@
             // and wiped a legitimate 61-chain. Require the *next* reading to still show
             // criticalFails at this same elevated value before actually applying the
             // reset; a transient/corrupted render won't usually repeat itself twice in a row.
+            //
+            // NOTE: lastResultCounts/confirmedCriticalFails are (re)assigned here even
+            // though canApplyResultDeltas may already have done so above — deliberately
+            // NOT deduplicated. canApplyResultDeltas requires dSuccess>=0 && dFail>=0,
+            // which is a weaker condition than reaching this branch; criticalDelta>0 can
+            // legitimately occur alongside a negative dSuccess/dFail (canApplyResultDeltas
+            // false), in which case this is the only place that advances the baseline.
             if (pendingCriticalConfirm && pendingCriticalConfirm.criticalFails === current.criticalFails) {
                 chain = 0;
                 criticalConfirmedReset = true;
@@ -1407,16 +1460,13 @@
         }
 
         chain = clampChain(chain);
-        if (chain !== oldChain) {
-            const reason = buildCountsReason({ dSuccess, dFail, criticalConfirmedReset });
-            logCorrection('counts', oldChain, chain, { dSuccess, dFail, criticalDelta, current }, reason);
-            saveChain();
+        const reason = buildCountsReason({ dSuccess, dFail, criticalConfirmedReset });
+        if (commitChainIfChanged('counts', oldChain, { dSuccess, dFail, criticalDelta, current }, reason)) {
             saveLastEvent({
                 signature: `counts:${current.successes}:${current.fails}:${current.criticalFails}`,
                 time: Date.now(),
                 type: 'counts',
             });
-            render(true);
         }
         return true;
     }
@@ -2284,9 +2334,7 @@
             const oldChain = chain;
             chain = clampChain(input.value);
             input.value = chain;
-            if (chain !== oldChain) logCorrection('manual', oldChain, chain, null, 'Set manually in Settings');
-            saveChain();
-            render(true);
+            commitChainAlways('manual', oldChain, null, 'Set manually in Settings');
         });
 
         el.querySelector('#cct-log-clear').addEventListener('click', () => {
@@ -2400,12 +2448,19 @@
             if (!synced && !applyResultCountDeltaFallback({ source: 'mutation-observer', mutations })) {
                 for (const mutation of mutations) {
                     for (const node of mutation.addedNodes) inspectPossibleOutcomeNode(node);
-                    if (mutation.type === 'characterData') inspectPossibleOutcomeNode(mutation.target);
                 }
             }
         });
 
-        observer.observe(root, { childList: true, characterData: true, subtree: true });
+        // Deliberately NOT observing characterData: outcome/chain detection
+        // above only ever reads element text via textContent/querySelectorAll
+        // (childList additions), never diffs individual text-node mutations.
+        // Enabling characterData here fired the whole callback — including a
+        // findCrimesApp()/readResultCounts() DOM query pass — on every single
+        // text-node change in the crimes subtree (keystrokes, timers, animated
+        // counters), which is a lot of unnecessary work for a signal nothing
+        // downstream actually consumes.
+        observer.observe(root, { childList: true, subtree: true });
     }
 
     // Fetches one page (up to 100 entries) of crime-outcome log entries. Verified
@@ -2420,7 +2475,7 @@
         const idsParam = LOG_IDS_ALL.join(',');
         let url = `https://api.torn.com/user/?selections=log&log=${idsParam}&key=${encodeURIComponent(key)}`;
         if (to) url += `&to=${to}`;
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url);
         const data = await res.json();
         if (data.error) {
             const err = new Error(data.error.error || 'Torn API error');
@@ -2480,12 +2535,8 @@
             pendingCriticalConfirm = null;
             resetResultCounterTracking();
 
-            if (chain !== oldChain) {
-                const reason = `${result.successCount} success${result.successCount === 1 ? '' : 'es'}, ${result.failCount} fail${result.failCount === 1 ? '' : 's'} since last reset${trigger ? ` (${trigger})` : ''}`;
-                logCorrection('log', oldChain, chain, result, reason);
-                saveChain();
-                render(true);
-            }
+            const reason = `${result.successCount} success${result.successCount === 1 ? '' : 'es'}, ${result.failCount} fail${result.failCount === 1 ? '' : 's'} since last reset${trigger ? ` (${trigger})` : ''}`;
+            commitChainIfChanged('log', oldChain, result, reason);
             return { ok: true, chain };
         } catch (e) {
             console.log(`[CCT v${VERSION}] log sync failed:`, e.message, e.code || '');
