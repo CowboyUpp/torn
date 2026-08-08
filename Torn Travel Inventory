@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.3
+// @version      1.9.4
 // @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
 // @author       cowboyup [1496324]
 // @license      MIT
@@ -22,7 +22,7 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.9.3";
+  const SCRIPT_VERSION = "1.9.4";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
@@ -168,11 +168,9 @@
 
   let root;
   let panel;
-  let launcher;
   let keyInput;
   let navigationObserver;
   let navigationTimer;
-  let launcherFallbackTimer;
   let toastTimer;
 
   function gmGet(key, fallback = "") {
@@ -886,42 +884,6 @@
       }
       /* Inventory takes Traveling's slot in Torn's navigation. */
       .${APP_ID}-travel-source { display: none !important; }
-      .${APP_ID}-launcher {
-        pointer-events: auto;
-        position: fixed;
-        right: max(18px, env(safe-area-inset-right));
-        bottom: max(18px, env(safe-area-inset-bottom));
-        display: flex;
-        align-items: center;
-        gap: 9px;
-        min-height: 46px;
-        padding: 0 17px 0 12px;
-        border: 1px solid rgba(255,255,255,.16);
-        border-radius: 8px;
-        color: #fff;
-        background: linear-gradient(145deg, #b52828, #8d1e1e);
-        box-shadow: 0 9px 24px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.12);
-        cursor: pointer;
-        font: 700 13px/1 Inter, "Segoe UI", sans-serif;
-        letter-spacing: .02em;
-        transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
-      }
-      .${APP_ID}-launcher:hover {
-        transform: translateY(-2px);
-        filter: brightness(1.1);
-        box-shadow: 0 12px 28px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.12);
-      }
-      .${APP_ID}-launcher:active { transform: translateY(0); }
-      .${APP_ID}-launcher:not(.is-visible) { display: none; }
-      .${APP_ID}-launcher-icon {
-        display: grid;
-        place-items: center;
-        width: 25px;
-        height: 25px;
-        border-radius: 5px;
-        background: rgba(0,0,0,.22);
-        font-size: 16px;
-      }
       .${APP_ID}-panel {
         pointer-events: none;
         position: absolute;
@@ -1435,7 +1397,6 @@
       }
       .${APP_ID}-danger:hover { background: rgba(200,50,50,.12); }
       @media (max-width: 640px) {
-        .${APP_ID}-launcher { right: 12px; bottom: 12px; min-height: 43px; padding-right: 13px; }
         .${APP_ID}-panel { padding: 0; }
         .${APP_ID}-shell { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; }
         .${APP_ID}-header { min-height: 66px; padding: 11px 13px; }
@@ -2508,22 +2469,10 @@
     anchor.setAttribute("title", "Inventory");
   }
 
-  function updateLauncherVisibility(navFound) {
-    if (!launcher) return;
-    // Keep the trigger in Torn's native navigation; a floating button can
-    // overlap the desktop chat controls and the PDA quick-action bar.
-    clearTimeout(launcherFallbackTimer);
-    launcherFallbackTimer = null;
-    launcher.classList.remove("is-visible");
-  }
-
   function deactivateOutsideTravelPage() {
     document
       .querySelectorAll(`.${APP_ID}-native-nav`)
       .forEach((navigationItem) => navigationItem.remove());
-    clearTimeout(launcherFallbackTimer);
-    launcherFallbackTimer = null;
-    launcher?.classList.remove("is-visible");
     navigationObserver?.disconnect();
     if (root) {
       root.hidden = true;
@@ -2605,9 +2554,7 @@
       sourceNode.insertAdjacentElement("afterend", clone);
     }
 
-    const navFound = sourceLinks.length > 0;
-    updateLauncherVisibility(navFound);
-    return navFound;
+    return sourceLinks.length > 0;
   }
 
   function install() {
@@ -2618,17 +2565,10 @@
     root = document.createElement("div");
     root.id = `${APP_ID}-root`;
     root.innerHTML = `
-      <button type="button" class="${APP_ID}-launcher" aria-label="Open travel inventory (Alt+I)" title="Travel Inventory (Alt+I)">
-        <span class="${APP_ID}-launcher-icon" aria-hidden="true">🎒</span>
-        Inventory
-      </button>
       <section class="${APP_ID}-panel" role="dialog" aria-modal="true" aria-label="Personal Inventory" aria-hidden="true"></section>
     `;
     document.body.appendChild(root);
     syncTheme();
-
-    launcher = root.querySelector(`.${APP_ID}-launcher`);
-    launcher.addEventListener("click", () => openPanel());
 
     panel = root.querySelector(`.${APP_ID}-panel`);
     panel.addEventListener("click", (event) => {
