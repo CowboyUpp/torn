@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.0
+// @version      1.3.1
 // @description  A hub for your Torn scripts that is currently duct-taped together and running on sheer willpower. Things might break, dragons might appear, but at least it's trying. Work in progress!
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -16,25 +16,26 @@
     'use strict';
 
     // =========================================================================
-    // TORN SCRIPT HUB  v1.3.0
+    // TORN SCRIPT HUB  v1.3.1
     //
     // FULL CHANGELOG
     // -------------------------------------------------------------------------
-    // v1.3.0 - Real DOM structure from live page dump. Clones the exact
-    //          .area-desktop___ / .area-row___ block of #nav-calendar and
-    //          inserts immediately after it. Perfect native look, correct
-    //          hub icon, no badges, single instance, left sidebar only.
+    // v1.3.1 - Desktop left completely untouched (perfect). PDA: hide the
+    //          cloned row on narrow / mobile layouts so the broken second
+    //          icon row disappears. No other desktop changes.
     //
-    // v1.2.9 - Self-contained pill (abandoned clone again). Still imperfect.
-    // v1.2.8 - Restored clone attempt – failed to find template reliably.
-    // v1.2.7 - Normal font-weight self-contained. "AOL button" look.
+    // v1.3.0 - Real DOM structure from live page dump. Clones #nav-calendar
+    //          .area-desktop block and inserts immediately after it.
+    //          Desktop look perfect.
+    //
+    // v1.2.9 - Self-contained pill. Imperfect look.
+    // v1.2.8 - Clone attempt failed reliably.
+    // v1.2.7 - Normal-weight self-contained ("AOL button").
     // v1.2.6 - Mobile empty-slot force-visibility.
-    // v1.2.5 - Self-contained row, left-sidebar only.
+    // v1.2.5 - Self-contained, left-sidebar only.
     // v1.2.4 - Removed badge, restored hub icon.
     // v1.2.3 - Native clone (perfect when it worked).
-    // v1.2.x - Various insertion / floating / queue fixes.
-    // v1.1.x - Queue / sandbox / alignment.
-    // v1.0.0 - Initial event-bus + queue safety.
+    // v1.2.x / v1.1.x / v1.0.0 - Earlier queue, floating, insertion work.
     // -------------------------------------------------------------------------
     //
     // Satellite registration:
@@ -43,7 +44,7 @@
     //   }));
     // =========================================================================
 
-    const HUB_VERSION = '1.3.0';
+    const HUB_VERSION = '1.3.1';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -156,9 +157,8 @@
     function createNativeRow(template) {
         const row = template.cloneNode(true);
         row.id = IDS.ROW;
-        row.classList.remove('active___xlAlO'); // never mark as active page
+        row.classList.remove('active___xlAlO');
 
-        // Kill the original link so it doesn't navigate
         const link = row.querySelector('a');
         if (link) {
             link.removeAttribute('href');
@@ -169,10 +169,8 @@
             });
         }
 
-        // Replace the icon inside .svgIconWrap / .defaultIcon
         const iconWrap = row.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
         if (iconWrap) {
-            // If it's an svg or img, replace it; if it's a container, clear and put our svg inside
             if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') {
                 iconWrap.replaceWith(createHubIcon());
             } else {
@@ -181,12 +179,10 @@
             }
         }
 
-        // Set the label text
         const nameEl = row.querySelector('[class*="linkName"]');
         if (nameEl) {
             nameEl.textContent = 'Scripts';
         } else {
-            // Fallback – any text node that looks like a label
             const spans = row.querySelectorAll('span');
             for (const s of spans) {
                 if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
@@ -196,7 +192,6 @@
             }
         }
 
-        // Strip any notification badges / amounts that came with the clone
         row.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
 
         row.setAttribute('role', 'button');
@@ -355,7 +350,7 @@
     }, true);
 
     // =========================================================================
-    // STYLES – only dropdown + icon sizing. Row itself is 100% native.
+    // STYLES
     // =========================================================================
     function installStyles() {
         if (document.getElementById(IDS.STYLE)) return;
@@ -369,6 +364,21 @@
                 display: block !important;
             }
 
+            /* ===== PDA / mobile: hide the broken top-bar clone ===== */
+            /* Desktop left sidebar is never affected by these rules. */
+            @media (max-width: 1000px) {
+                #tsh-sidebar-row {
+                    display: none !important;
+                }
+            }
+            /* Extra safety for Torn's own responsive classes */
+            body:not(.with-sidebar) #tsh-sidebar-row,
+            .areas-mobile #tsh-sidebar-row,
+            [class*="areas-mobile"] #tsh-sidebar-row {
+                display: none !important;
+            }
+
+            /* Dropdown */
             .tsh-menu {
                 position: fixed;
                 z-index: 2147483647;
@@ -427,27 +437,23 @@
     }
 
     // =========================================================================
-    // MOUNT
+    // MOUNT – identical to the perfect v1.3.0 desktop logic
     // =========================================================================
     function mount() {
         if (!document.body) return false;
 
-        // Clean every previous instance
         document.querySelectorAll('#' + IDS.ROW).forEach(el => el.remove());
         const oldMenu = document.getElementById(IDS.MENU);
         if (oldMenu) oldMenu.remove();
 
-        // The reliable template from the live DOM
         const calendar = document.getElementById('nav-calendar');
         if (!calendar || !calendar.parentNode) return false;
 
         installStyles();
 
         const row = createNativeRow(calendar);
-        // Insert immediately after the real Calendar block
         calendar.parentNode.insertBefore(row, calendar.nextSibling);
 
-        // Single-instance safety
         const all = document.querySelectorAll('#' + IDS.ROW);
         if (all.length > 1) {
             for (let i = 0; i < all.length - 1; i++) all[i].remove();
