@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.0.5
+// @version      1.0.6
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
 // @author       cowboyup
 // @license      MIT
@@ -21,7 +21,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.0.5';
+  const VERSION = '1.0.6';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -65,6 +65,7 @@
     observerStarted: false,
     hardnessObserverStarted: false,
     bustConfirmSkipperStarted: false,
+    pathWatcherStarted: false,
   };
 
   const store = {
@@ -277,33 +278,63 @@
       #bustr-plus-panel .status { color: var(--bustr-plus-color, #85b200); font-weight: 700; }
       #bustr-plus-panel .version { color: var(--bustr-muted); font-size: 10px; text-align: right; }
       #bustr-plus-panel .icon-btn { width: 28px; min-width: 28px; padding: 0; display: inline-grid; place-items: center; }
-      #bustr-plus-toggle {
+      #bustr-plus-navitem {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 4px 0;
+      }
+      #bustr-plus-navitem .bustr-plus-navitem-link {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        width: 50px;
+        min-height: 44px;
+        padding: 4px 2px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: #999;
+        cursor: pointer;
+        font: 700 9px/1.1 Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: .02em;
+        text-align: center;
+      }
+      #bustr-plus-navitem .bustr-plus-navitem-link:hover,
+      #bustr-plus-navitem .bustr-plus-navitem-link:focus-visible {
+        color: #ccc;
+        background: rgba(255,255,255,.06);
+        outline: none;
+      }
+      #bustr-plus-navitem .bustr-plus-navitem-iconwrap {
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        width: 34px;
+        height: 34px;
+      }
+      #bustr-plus-navitem .bustr-plus-navitem-iconwrap svg {
+        display: block;
+        fill: currentColor;
+      }
+      #bustr-plus-navitem .bustr-plus-navitem-label {
+        white-space: nowrap;
+      }
+      #bustr-plus-navitem.bustr-plus-navitem-fallback {
+        position: fixed;
         z-index: 99998;
-        height: 28px;
-        min-height: 28px;
-        margin: 0 4px;
-        border-radius: 4px;
-        border: 0;
-        background: transparent;
+        right: 10px;
+        bottom: 14px;
+        padding: 0;
+        background: rgba(24,24,24,.9);
+        border-radius: 8px;
+        box-shadow: 0 6px 18px rgba(0,0,0,.4);
+      }
+      #bustr-plus-navitem.bustr-plus-navitem-fallback .bustr-plus-navitem-link {
         color: #eee;
-        padding: 0 8px;
-        font: 700 12px Arial, sans-serif;
-        line-height: 1;
-        cursor: pointer;
-        vertical-align: middle;
-        text-shadow: 0 1px 2px rgba(0,0,0,.8);
-      }
-      #bustr-plus-toggle:hover {
-        color: #fff;
-        background: rgba(255,255,255,.08);
-      }
-      #bustr-plus-toggle.bustr-plus-floating {
-        position: absolute;
-        right: 18px;
-        top: 12px;
       }
       #body .users-list-title {
         display: flex;
@@ -382,26 +413,74 @@
     return (window.visualViewport ? visualViewport.width : window.innerWidth) > 1000 ? 'desktop' : 'mobile';
   }
 
-  function ensureToggleButton() {
-    const existing = document.getElementById('bustr-plus-toggle');
-    if (existing) {
-      mountToggleButton(existing);
-      return;
-    }
-    const button = document.createElement('button');
-    button.id = 'bustr-plus-toggle';
-    button.type = 'button';
-    button.textContent = 'BUSTR+';
-    button.title = 'Open BUSTR+ settings';
-    button.addEventListener('click', () => renderPanel(false));
-    mountToggleButton(button);
-    setTimeout(() => mountToggleButton(button), 1000);
-    setTimeout(() => mountToggleButton(button), 3000);
+  function isJailPage() {
+    return window.location.pathname === '/jailview.php';
   }
 
-  function mountToggleButton(button) {
-    button.classList.add('bustr-plus-floating');
-    document.body.appendChild(button);
+  function buildToggleElement() {
+    const wrap = document.createElement('div');
+    wrap.id = 'bustr-plus-navitem';
+    wrap.innerHTML = `
+      <button type="button" id="bustr-plus-toggle" class="bustr-plus-navitem-link" title="Open BUSTR+ settings">
+        <span class="bustr-plus-navitem-iconwrap">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20">
+            <path d="M8,10V7a4,4,0,0,1,8,0v3h.5A1.5,1.5,0,0,1,18,11.5v7A1.5,1.5,0,0,1,16.5,20h-9A1.5,1.5,0,0,1,6,18.5v-7A1.5,1.5,0,0,1,7.5,10Zm2,0h4V7a2,2,0,0,0-4,0Zm2,4.35a1.35,1.35,0,0,1,.75,2.47V18h-1.5V16.82A1.35,1.35,0,0,1,12,14.35Z"></path>
+          </svg>
+        </span>
+        <span class="bustr-plus-navitem-label">BUSTR+</span>
+      </button>
+    `;
+    wrap.querySelector('#bustr-plus-toggle').addEventListener('click', () => renderPanel(false));
+    return wrap;
+  }
+
+  function ensureToggleButton() {
+    if (!isJailPage()) return;
+    let wrap = document.getElementById('bustr-plus-navitem');
+    if (!wrap) wrap = buildToggleElement();
+    mountToggleButton(wrap);
+  }
+
+  function mountToggleButton(wrap) {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+      wrap.classList.remove('bustr-plus-navitem-fallback');
+      if (wrap.parentElement !== sidebar) sidebar.appendChild(wrap);
+    } else {
+      wrap.classList.add('bustr-plus-navitem-fallback');
+      if (wrap.parentElement !== document.body) document.body.appendChild(wrap);
+    }
+  }
+
+  function removeToggleButton() {
+    document.getElementById('bustr-plus-navitem')?.remove();
+  }
+
+  function removeSettingsPanel() {
+    document.getElementById('bustr-plus-panel')?.remove();
+    hideHelpTip();
+  }
+
+  function updateToggleVisibility() {
+    if (isJailPage()) {
+      ensureToggleButton();
+    } else {
+      removeToggleButton();
+      removeSettingsPanel();
+    }
+  }
+
+  function startPathWatcher() {
+    if (state.pathWatcherStarted) return;
+    state.pathWatcherStarted = true;
+    let lastPath = window.location.pathname;
+    setInterval(() => {
+      if (window.location.pathname === lastPath) return;
+      lastPath = window.location.pathname;
+      updateToggleVisibility();
+      renderApiKeyGenerator();
+    }, 500);
+    window.addEventListener('popstate', updateToggleVisibility, { passive: true });
   }
 
   function renderPanel(forceOpen) {
@@ -745,27 +824,113 @@
     }
   }
 
-  function requestJson(url) {
-    if (typeof GM_xmlhttpRequest === 'function') {
-      return new Promise((resolve, reject) => {
+  async function requestJson(url) {
+    const text = await universalGet(url);
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      throw new Error('Bad Torn API response');
+    }
+  }
+
+  // Tries GM_xmlhttpRequest first (desktop Tampermonkey/Greasemonkey), then
+  // Torn PDA's injected PDA_httpGet bridge, then a plain fetch as a last resort.
+  // Each tier has its own timeout guard: on PDA, GM_xmlhttpRequest can exist as a
+  // function without ever actually firing onload/onerror, so a "typeof === function"
+  // check alone is not enough to trust it.
+  async function universalGet(url, timeoutMs = 8000) {
+    const tiers = [];
+    if (typeof GM_xmlhttpRequest === 'function') tiers.push(() => gmGet(url, timeoutMs));
+    if (typeof PDA_httpGet === 'function') tiers.push(() => pdaGet(url, timeoutMs));
+    tiers.push(() => fetchGet(url, timeoutMs));
+
+    let lastErr;
+    for (const tier of tiers) {
+      try {
+        return await tier();
+      } catch (err) {
+        lastErr = err;
+        debugLog('network tier failed, trying next', err.message);
+      }
+    }
+    throw lastErr || new Error('All Torn API request methods failed');
+  }
+
+  function gmGet(url, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('GM_xmlhttpRequest timed out (possible inactive PDA stub)'));
+      }, timeoutMs);
+      try {
         GM_xmlhttpRequest({
           method: 'GET',
           url,
           anonymous: true,
           onload: (response) => {
-            try {
-              resolve(JSON.parse(response.responseText));
-            } catch (err) {
-              reject(new Error('Bad Torn API response'));
-            }
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(response.responseText);
           },
-          onerror: () => reject(new Error('Torn API request failed')),
-          ontimeout: () => reject(new Error('Torn API request timed out')),
-          timeout: 15000,
+          onerror: () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error('GM_xmlhttpRequest failed'));
+          },
+          ontimeout: () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error('GM_xmlhttpRequest timed out'));
+          },
+          timeout: timeoutMs,
         });
+      } catch (err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+  }
+
+  function pdaGet(url, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('PDA_httpGet timed out'));
+      }, timeoutMs);
+      try {
+        PDA_httpGet(url, (response) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (typeof response === 'string' && response) resolve(response);
+          else reject(new Error('PDA_httpGet returned no data'));
+        });
+      } catch (err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+  }
+
+  function fetchGet(url, timeoutMs) {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    return fetch(url, { credentials: 'omit', signal: controller ? controller.signal : undefined })
+      .then((response) => response.text())
+      .finally(() => {
+        if (timer) clearTimeout(timer);
       });
-    }
-    return fetch(url, { credentials: 'omit' }).then((response) => response.json());
   }
 
   function extractBustTimestamps(data) {
@@ -821,6 +986,7 @@
   }
 
   function renderAll() {
+    updateToggleVisibility();
     renderNavStats();
     renderColorClass();
     applyQuickBustLinks();
@@ -1151,7 +1317,7 @@
       new MutationObserver((mutations) => {
         if (mutations.every((mutation) => {
           const targetEl = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
-          return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel, #bustr-plus-toggle');
+          return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel, #bustr-plus-navitem');
         })) return;
         scheduleHardnessRender();
       }).observe(target, { childList: true, subtree: true });
@@ -1171,15 +1337,16 @@
     armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
     injectStyles();
-    ensureToggleButton();
+    updateToggleVisibility();
     renderApiKeyGenerator();
     await loadBustData(false);
     renderAll();
     scanExistingBustSuccesses();
-    if (!state.apiKey && window.location.hash.includes('bustrPlus=openSettings')) renderPanel(true);
+    if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings')) renderPanel(true);
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
+    startPathWatcher();
     window.addEventListener('resize', renderAll, { passive: true });
     window.addEventListener('hashchange', renderApiKeyGenerator, { passive: true });
     window.addEventListener('pageshow', () => {
