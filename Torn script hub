@@ -1,276 +1,222 @@
 // ==UserScript==
-// @name        Torn Script Hub
-// @namespace   https://greasyfork.org/users/cowboyup
-// @version     1.1.3
-// @description A hub for your Torn scripts that is currently duct-taped together and running on sheer willpower. Things might break, dragons might appear, but at least it's trying. Work in progress!
-// @author      cowboyup
-// @match       https://www.torn.com/*
-// @run-at      document-start
-// @grant       none
-// @license     MIT
+// @name         Torn Script Hub
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      1.3.0
+// @description  A hub for your Torn scripts that is currently duct-taped together and running on sheer willpower. Things might break, dragons might appear, but at least it's trying. Work in progress!
+// @author       cowboyup
+// @match        https://www.torn.com/*
+// @run-at       document-start
+// @grant        none
+// @license      MIT
+// @downloadURL  https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.user.js
+// @updateURL    https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     // =========================================================================
-    // TORN SCRIPT HUB
+    // TORN SCRIPT HUB  v1.3.0
     //
-    // Changelog:
-    // v1.1.3 - Restored documentElement fallback alongside window scope for queue 
-    //          drainage to ensure the sidebar mount succeeds even if timing shifts.
-    // v1.1.2 - Switched registration queue from documentElement to window to bypass 
-    //          Tampermonkey sandbox isolation barriers between independent scripts.
-    // v1.1.1 - Added immediate execution to the queue registration bridge to ensure 
-    //          satellite scripts registering at document-start are caught reliably.
-    // v1.1.0 - Updated sidebar button height and alignment to match native items, 
-    //          added humorous GreasyFork description, and prepped satellite boilerplate.
-    // v1.0.0 - Initial release featuring event-bus architecture and queue safety.
+    // FULL CHANGELOG
+    // -------------------------------------------------------------------------
+    // v1.3.0 - Real DOM structure from live page dump. Clones the exact
+    //          .area-desktop___ / .area-row___ block of #nav-calendar and
+    //          inserts immediately after it. Perfect native look, correct
+    //          hub icon, no badges, single instance, left sidebar only.
     //
-    // Deliberately independent of any particular userscript.
+    // v1.2.9 - Self-contained pill (abandoned clone again). Still imperfect.
+    // v1.2.8 - Restored clone attempt – failed to find template reliably.
+    // v1.2.7 - Normal font-weight self-contained. "AOL button" look.
+    // v1.2.6 - Mobile empty-slot force-visibility.
+    // v1.2.5 - Self-contained row, left-sidebar only.
+    // v1.2.4 - Removed badge, restored hub icon.
+    // v1.2.3 - Native clone (perfect when it worked).
+    // v1.2.x - Various insertion / floating / queue fixes.
+    // v1.1.x - Queue / sandbox / alignment.
+    // v1.0.0 - Initial event-bus + queue safety.
+    // -------------------------------------------------------------------------
     //
-    // Communication:
-    //    document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
-    //        detail: {
-    //            id: 'my-script',
-    //            name: 'My Script',
-    //            version: '1.0.0',
-    //            open: function () { ... }
-    //        }
-    //    }));
+    // Satellite registration:
+    //   document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+    //     detail: { id, name, version, icon, order, open }
+    //   }));
     // =========================================================================
 
-    const HUB_VERSION = '1.1.3';
-
+    const HUB_VERSION = '1.3.0';
     const EVENTS = Object.freeze({
-        REGISTER: 'torn-script-hub:register',
+        REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
-        READY: 'torn-script-hub:ready'
+        READY:      'torn-script-hub:ready'
     });
-
     const IDS = Object.freeze({
-        ROW: 'tsh-sidebar-row',
-        MENU: 'tsh-menu',
+        ROW:   'tsh-sidebar-row',
+        MENU:  'tsh-menu',
         STYLE: 'tsh-style'
     });
 
-    // =========================================================================
-    // REGISTRY
-    // =========================================================================
-
     const registry = new Map();
+    let readyFired = false;
 
     // =========================================================================
-    // LOAD-ORDER-SAFE QUEUE (Window + Document Fallback)
+    // QUEUE
     // =========================================================================
-
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
-    function getQueue() {
+    function ensureQueue(target) {
+        if (!target[QUEUE_PROPERTY] || !Array.isArray(target[QUEUE_PROPERTY])) {
+            target[QUEUE_PROPERTY] = [];
+        }
+        const q = target[QUEUE_PROPERTY];
+        if (!q.__tshPatched) {
+            const originalPush = q.push.bind(q);
+            q.push = function (...items) {
+                const result = originalPush(...items);
+                items.forEach(item => registerScript(item));
+                return result;
+            };
+            q.__tshPatched = true;
+        }
+        return q;
+    }
+
+    function getQueues() {
         const queues = [];
-
-        if (window[QUEUE_PROPERTY] && Array.isArray(window[QUEUE_PROPERTY])) {
-            queues.push(window[QUEUE_PROPERTY]);
-        }
-
-        const root = document.documentElement;
-        if (root && root[QUEUE_PROPERTY] && Array.isArray(root[QUEUE_PROPERTY])) {
-            queues.push(root[QUEUE_PROPERTY]);
-        }
-
-        if (queues.length === 0) {
-            window[QUEUE_PROPERTY] = [];
-            return window[QUEUE_PROPERTY];
-        }
-
-        // Return the first active queue found
-        return queues[0];
+        if (typeof window !== 'undefined') queues.push(ensureQueue(window));
+        if (document.documentElement) queues.push(ensureQueue(document.documentElement));
+        return queues;
     }
 
     function drainQueue() {
-        const queue = getQueue();
-
-        if (!Array.isArray(queue) || queue.length === 0) {
-            return;
-        }
-
-        const pending = queue.splice(0, queue.length);
-        pending.forEach(registerScript);
+        getQueues().forEach(queue => {
+            if (!queue.length) return;
+            const pending = queue.splice(0, queue.length);
+            pending.forEach(registerScript);
+        });
     }
 
     // =========================================================================
     // REGISTRATION
     // =========================================================================
-
     function normalizeRegistration(detail) {
-        if (!detail || typeof detail !== 'object') {
-            return null;
-        }
-
-        const id = String(detail.id || '').trim();
+        if (!detail || typeof detail !== 'object') return null;
+        const id   = String(detail.id   || '').trim();
         const name = String(detail.name || '').trim();
-
-        if (!id || !name) {
-            return null;
-        }
-
-        if (typeof detail.open !== 'function') {
-            return null;
-        }
-
+        if (!id || !name) return null;
+        if (typeof detail.open !== 'function') return null;
         return {
-            id,
-            name,
+            id, name,
             version: detail.version ? String(detail.version) : '',
-            icon: detail.icon || null,
-            order: Number.isFinite(detail.order)
-                ? detail.order
-                : 1000,
-            open: detail.open
+            icon:    detail.icon || null,
+            order:   Number.isFinite(detail.order) ? detail.order : 1000,
+            open:    detail.open
         };
     }
 
     function registerScript(detail) {
         const script = normalizeRegistration(detail);
-
-        if (!script) {
-            return;
-        }
-
+        if (!script) return;
         registry.set(script.id, script);
         renderMenu();
     }
 
     function unregisterScript(detail) {
-        if (!detail) {
-            return;
-        }
-
-        const id = typeof detail === 'string'
-            ? detail
-            : String(detail.id || '').trim();
-
-        if (!id) {
-            return;
-        }
-
+        if (!detail) return;
+        const id = typeof detail === 'string' ? detail : String(detail.id || '').trim();
+        if (!id) return;
         registry.delete(id);
         renderMenu();
     }
 
-    // =========================================================================
-    // EVENT BRIDGE
-    // =========================================================================
-
-    document.addEventListener(EVENTS.REGISTER, function (event) {
-        if (!event || !event.detail) {
-            return;
-        }
-
-        registerScript(event.detail);
-    });
-
-    document.addEventListener(EVENTS.UNREGISTER, function (event) {
-        if (!event || !event.detail) {
-            return;
-        }
-
-        unregisterScript(event.detail);
-    });
+    document.addEventListener(EVENTS.REGISTER, e => { if (e?.detail) registerScript(e.detail); });
+    document.addEventListener(EVENTS.UNREGISTER, e => { if (e?.detail) unregisterScript(e.detail); });
 
     // =========================================================================
-    // SIDEBAR DETECTION
+    // HUB ICON
     // =========================================================================
-
-    function findTornToolsSettings() {
-        return document.querySelector('.tt-settings.pill');
-    }
-
-    function findSidebarInsertionPoint() {
-        const ttSettings = findTornToolsSettings();
-
-        if (ttSettings && ttSettings.parentNode) {
-            return {
-                parent: ttSettings.parentNode,
-                reference: ttSettings
-            };
-        }
-
-        const desktopNav = document.querySelector(
-            '[id^="nav-"]'
-        );
-
-        if (desktopNav && desktopNav.parentNode) {
-            return {
-                parent: desktopNav.parentNode,
-                reference: desktopNav
-            };
-        }
-
-        return null;
-    }
-
-    // =========================================================================
-    // SVG ICON
-    // =========================================================================
-
-    function createIcon() {
-        const svg = document.createElementNS(
-            'http://www.w3.org/2000/svg',
-            'svg'
-        );
-
+    function createHubIcon() {
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.setAttribute('viewBox', '0 0 128 128');
         svg.setAttribute('class', 'tsh-svg');
         svg.setAttribute('aria-hidden', 'true');
-
+        svg.setAttribute('width', '18');
+        svg.setAttribute('height', '18');
         svg.innerHTML = [
-            '<path d="M34 14h60l20 20v60l-20 20H34L14 94V34z" fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round" opacity="0.3"/>',
+            '<path d="M34 14h60l20 20v60l-20 20H34L14 94V34z" fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round" opacity="0.35"/>',
             '<circle cx="64" cy="64" r="22" fill="none" stroke="currentColor" stroke-width="10" stroke-dasharray="8 4"/>',
             '<circle cx="64" cy="64" r="8" fill="currentColor"/>',
             '<path d="M26 40V26h14M102 40V26H88M26 88v14h14M102 88v14H88" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>'
         ].join('');
-
         return svg;
     }
 
     // =========================================================================
-    // ROW
+    // CREATE ROW BY CLONING #nav-calendar (exact native structure)
     // =========================================================================
-
-    function createRow() {
-        const row = document.createElement('div');
-
-        row.className = 'tt-settings pill tsh-row';
+    function createNativeRow(template) {
+        const row = template.cloneNode(true);
         row.id = IDS.ROW;
+        row.classList.remove('active___xlAlO'); // never mark as active page
+
+        // Kill the original link so it doesn't navigate
+        const link = row.querySelector('a');
+        if (link) {
+            link.removeAttribute('href');
+            link.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                toggleMenu();
+            });
+        }
+
+        // Replace the icon inside .svgIconWrap / .defaultIcon
+        const iconWrap = row.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
+        if (iconWrap) {
+            // If it's an svg or img, replace it; if it's a container, clear and put our svg inside
+            if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') {
+                iconWrap.replaceWith(createHubIcon());
+            } else {
+                iconWrap.innerHTML = '';
+                iconWrap.appendChild(createHubIcon());
+            }
+        }
+
+        // Set the label text
+        const nameEl = row.querySelector('[class*="linkName"]');
+        if (nameEl) {
+            nameEl.textContent = 'Scripts';
+        } else {
+            // Fallback – any text node that looks like a label
+            const spans = row.querySelectorAll('span');
+            for (const s of spans) {
+                if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
+                    s.textContent = 'Scripts';
+                    break;
+                }
+            }
+        }
+
+        // Strip any notification badges / amounts that came with the clone
+        row.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
+
         row.setAttribute('role', 'button');
         row.setAttribute('tabindex', '0');
         row.setAttribute('aria-haspopup', 'menu');
         row.setAttribute('aria-expanded', 'false');
+        row.title = 'Torn Script Hub';
+        row.style.cursor = 'pointer';
 
-        row.appendChild(createIcon());
-
-        const label = document.createElement('span');
-        label.textContent = 'Scripts';
-
-        row.appendChild(label);
-
-        row.addEventListener('click', function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-
+        row.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
             toggleMenu();
         });
-
-        row.addEventListener('keydown', function (event) {
-            if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
+        row.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
                 toggleMenu();
             }
-
-            if (event.key === 'Escape') {
-                closeMenu();
-            }
+            if (e.key === 'Escape') closeMenu();
         });
 
         return row;
@@ -279,274 +225,175 @@
     // =========================================================================
     // MENU
     // =========================================================================
-
     function getSortedScripts() {
-        return Array.from(registry.values()).sort(function (a, b) {
-            if (a.order !== b.order) {
-                return a.order - b.order;
-            }
-
+        return Array.from(registry.values()).sort((a, b) => {
+            if (a.order !== b.order) return a.order - b.order;
             return a.name.localeCompare(b.name);
         });
     }
 
     function createMenu() {
         const menu = document.createElement('div');
-
         menu.id = IDS.MENU;
         menu.className = 'tsh-menu';
         menu.setAttribute('role', 'menu');
-
         return menu;
     }
 
     function renderMenu() {
         const menu = document.getElementById(IDS.MENU);
-
-        if (!menu) {
-            return;
-        }
-
+        if (!menu) return;
         menu.textContent = '';
-
         const scripts = getSortedScripts();
 
         if (scripts.length === 0) {
             const empty = document.createElement('div');
-
             empty.className = 'tsh-empty';
             empty.textContent = 'No registered scripts';
-
             menu.appendChild(empty);
             return;
         }
 
-        scripts.forEach(function (script) {
+        scripts.forEach(script => {
             const item = document.createElement('button');
-
             item.type = 'button';
             item.className = 'tsh-item';
             item.setAttribute('role', 'menuitem');
 
             const icon = document.createElement('span');
             icon.className = 'tsh-item-icon';
-
-            if (typeof script.icon === 'string' && script.icon.trim()) {
-                icon.textContent = script.icon;
-            } else {
-                icon.textContent = '›';
-            }
-
+            icon.textContent = (typeof script.icon === 'string' && script.icon.trim()) ? script.icon : '›';
             item.appendChild(icon);
 
             const text = document.createElement('span');
             text.className = 'tsh-item-text';
             text.textContent = script.name;
-
             item.appendChild(text);
 
             if (script.version) {
                 const version = document.createElement('span');
-
                 version.className = 'tsh-item-version';
                 version.textContent = 'v' + script.version;
-
                 item.appendChild(version);
             }
 
-            item.addEventListener('click', function (event) {
-                event.preventDefault();
-                event.stopPropagation();
-
+            item.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
                 closeMenu();
-
-                try {
-                    script.open();
-                } catch (error) {
-                    console.error(
-                        '[Torn Script Hub] Failed to open "' +
-                        script.name +
-                        '"',
-                        error
-                    );
-                }
+                try { script.open(); }
+                catch (err) { console.error('[Torn Script Hub] Failed to open "' + script.name + '"', err); }
             });
-
             menu.appendChild(item);
         });
     }
 
     function positionMenu() {
-        const row = document.getElementById(IDS.ROW);
+        const row  = document.getElementById(IDS.ROW);
         const menu = document.getElementById(IDS.MENU);
-
-        if (!row || !menu) {
-            return;
-        }
+        if (!row || !menu) return;
 
         const rect = row.getBoundingClientRect();
+        const menuWidth = menu.offsetWidth || 240;
 
-        menu.style.left = Math.round(rect.right + 6) + 'px';
-        menu.style.top = Math.round(rect.top) + 'px';
+        let left = rect.right + 8;
+        if (left + menuWidth > window.innerWidth - 10) {
+            left = rect.left - menuWidth - 8;
+        }
+        left = Math.max(8, left);
+
+        let top = rect.top;
+        if (top + 280 > window.innerHeight) {
+            top = Math.max(8, window.innerHeight - 300);
+        }
+
+        menu.style.left = Math.round(left) + 'px';
+        menu.style.top  = Math.round(top) + 'px';
     }
 
     function openMenu() {
-        const row = document.getElementById(IDS.ROW);
+        const row  = document.getElementById(IDS.ROW);
         const menu = document.getElementById(IDS.MENU);
-
-        if (!row || !menu) {
-            return;
-        }
-
+        if (!row || !menu) return;
         renderMenu();
         positionMenu();
-
         menu.classList.add('tsh-open');
-
         row.setAttribute('aria-expanded', 'true');
     }
 
     function closeMenu() {
-        const row = document.getElementById(IDS.ROW);
+        const row  = document.getElementById(IDS.ROW);
         const menu = document.getElementById(IDS.MENU);
-
-        if (!row || !menu) {
-            return;
-        }
-
+        if (!row || !menu) return;
         menu.classList.remove('tsh-open');
-
         row.setAttribute('aria-expanded', 'false');
     }
 
     function toggleMenu() {
         const menu = document.getElementById(IDS.MENU);
-
-        if (!menu) {
-            return;
-        }
-
-        if (menu.classList.contains('tsh-open')) {
-            closeMenu();
-        } else {
-            openMenu();
-        }
+        if (!menu) return;
+        menu.classList.contains('tsh-open') ? closeMenu() : openMenu();
     }
 
-    // =========================================================================
-    // OUTSIDE CLICK / ESCAPE
-    // =========================================================================
-
-    document.addEventListener('click', function (event) {
-        const row = document.getElementById(IDS.ROW);
+    document.addEventListener('click', e => {
+        const row  = document.getElementById(IDS.ROW);
         const menu = document.getElementById(IDS.MENU);
-
-        if (!row || !menu) {
-            return;
-        }
-
-        if (
-            event.target !== row &&
-            !row.contains(event.target) &&
-            !menu.contains(event.target)
-        ) {
+        if (!row || !menu) return;
+        if (e.target !== row && !row.contains(e.target) && !menu.contains(e.target)) {
             closeMenu();
         }
     }, true);
 
-    document.addEventListener('keydown', function (event) {
-        if (event.key === 'Escape') {
-            closeMenu();
-        }
-    });
-
-    window.addEventListener('resize', function () {
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+    window.addEventListener('resize', () => {
         const menu = document.getElementById(IDS.MENU);
-
-        if (menu && menu.classList.contains('tsh-open')) {
-            positionMenu();
-        }
+        if (menu && menu.classList.contains('tsh-open')) positionMenu();
     });
+    window.addEventListener('scroll', () => {
+        const menu = document.getElementById(IDS.MENU);
+        if (menu && menu.classList.contains('tsh-open')) positionMenu();
+    }, true);
 
     // =========================================================================
-    // STYLES
+    // STYLES – only dropdown + icon sizing. Row itself is 100% native.
     // =========================================================================
-
     function installStyles() {
-        if (document.getElementById(IDS.STYLE)) {
-            return;
-        }
+        if (document.getElementById(IDS.STYLE)) return;
 
         const style = document.createElement('style');
-
         style.id = IDS.STYLE;
-
         style.textContent = `
-            .tsh-row {
-                cursor: pointer !important;
-                user-select: none;
-                display: flex !important;
-                align-items: center !important;
-                box-sizing: border-box !important;
-                height: 21px !important;
-                min-height: 21px !important;
-                max-height: 21px !important;
-                padding: 0 8px !important;
-                margin-bottom: 2px !important;
-                font-size: 12px !important;
-            }
-
-            .tsh-row .tsh-svg {
-                width: 12px !important;
-                height: 12px !important;
-                min-width: 12px !important;
-                min-height: 12px !important;
-                margin-right: 6px !important;
-                fill: currentColor;
-                flex: 0 0 auto;
+            #tsh-sidebar-row .tsh-svg {
+                width: 18px !important;
+                height: 18px !important;
                 display: block !important;
-            }
-
-            .tsh-row > span {
-                white-space: nowrap;
-                line-height: 1 !important;
-                display: inline-block !important;
             }
 
             .tsh-menu {
                 position: fixed;
-                z-index: 2147483000;
-                min-width: 230px;
-                max-width: 330px;
-                padding: 5px;
+                z-index: 2147483647;
+                min-width: 240px;
+                max-width: 340px;
+                padding: 6px;
                 display: none;
-
-                background: var(--tsh-bg);
-                color: var(--tsh-text);
-
-                border: 1px solid var(--tsh-border);
-                border-radius: 6px;
-
-                box-shadow:
-                    0 4px 16px rgba(0, 0, 0, .35),
-                    0 1px 3px rgba(0, 0, 0, .25);
-
+                background: var(--tsh-bg, #f5f5f5);
+                color: var(--tsh-text, #222);
+                border: 1px solid var(--tsh-border, #bbb);
+                border-radius: 8px;
+                box-shadow: 0 8px 28px rgba(0,0,0,.4);
                 font-family: Arial, Helvetica, sans-serif;
             }
-
-            .tsh-menu.tsh-open {
-                display: block;
-            }
+            .tsh-menu.tsh-open { display: block; }
 
             .tsh-item {
                 width: 100%;
-                min-height: 34px;
+                min-height: 36px;
                 display: flex;
                 align-items: center;
-                padding: 6px 9px;
+                padding: 7px 10px;
                 margin: 0;
                 border: 0;
-                border-radius: 4px;
+                border-radius: 5px;
                 background: transparent;
                 color: inherit;
                 font: inherit;
@@ -554,133 +401,117 @@
                 text-align: left;
                 cursor: pointer;
             }
-
-            .tsh-item:hover,
-            .tsh-item:focus {
-                background: var(--tsh-hover);
+            .tsh-item:hover, .tsh-item:focus {
+                background: var(--tsh-hover, rgba(0,0,0,.09));
                 outline: none;
             }
-
-            .tsh-item-icon {
-                width: 20px;
-                margin-right: 7px;
-                text-align: center;
-                opacity: .75;
-            }
-
-            .tsh-item-text {
-                flex: 1;
-                overflow: hidden;
-                white-space: nowrap;
-                text-overflow: ellipsis;
-            }
-
-            .tsh-item-version {
-                margin-left: 8px;
-                opacity: .5;
-                font-size: 10px;
-            }
-
-            .tsh-empty {
-                padding: 9px 11px;
-                opacity: .55;
-                font-size: 12px;
-            }
+            .tsh-item-icon { width: 22px; margin-right: 8px; text-align: center; opacity: .8; }
+            .tsh-item-text { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+            .tsh-item-version { margin-left: 8px; opacity: .5; font-size: 10px; }
+            .tsh-empty { padding: 10px 12px; opacity: .55; font-size: 12px; }
 
             :root {
                 --tsh-bg: #f5f5f5;
                 --tsh-text: #222;
                 --tsh-border: #bbb;
-                --tsh-hover: rgba(0, 0, 0, .09);
+                --tsh-hover: rgba(0,0,0,.09);
             }
-
             body.dark-mode {
                 --tsh-bg: #252525;
                 --tsh-text: #eee;
                 --tsh-border: #4a4a4a;
-                --tsh-hover: rgba(255, 255, 255, .10);
+                --tsh-hover: rgba(255,255,255,.10);
             }
         `;
-
         (document.head || document.documentElement).appendChild(style);
     }
 
     // =========================================================================
     // MOUNT
     // =========================================================================
-
-    let mounted = false;
-
     function mount() {
-        if (mounted) {
-            return true;
-        }
+        if (!document.body) return false;
 
-        if (!document.body) {
-            return false;
-        }
+        // Clean every previous instance
+        document.querySelectorAll('#' + IDS.ROW).forEach(el => el.remove());
+        const oldMenu = document.getElementById(IDS.MENU);
+        if (oldMenu) oldMenu.remove();
 
-        if (document.getElementById(IDS.ROW)) {
-            mounted = true;
-            return true;
-        }
-
-        const insertion = findSidebarInsertionPoint();
-
-        if (!insertion) {
-            return false;
-        }
+        // The reliable template from the live DOM
+        const calendar = document.getElementById('nav-calendar');
+        if (!calendar || !calendar.parentNode) return false;
 
         installStyles();
 
-        const row = createRow();
-        const menu = createMenu();
+        const row = createNativeRow(calendar);
+        // Insert immediately after the real Calendar block
+        calendar.parentNode.insertBefore(row, calendar.nextSibling);
 
-        insertion.parent.insertBefore(row, insertion.reference.nextSibling);
+        // Single-instance safety
+        const all = document.querySelectorAll('#' + IDS.ROW);
+        if (all.length > 1) {
+            for (let i = 0; i < all.length - 1; i++) all[i].remove();
+        }
+
+        const menu = createMenu();
         document.body.appendChild(menu);
 
-        mounted = true;
         renderMenu();
 
-        document.dispatchEvent(
-            new CustomEvent(EVENTS.READY, {
+        if (!readyFired) {
+            readyFired = true;
+            document.dispatchEvent(new CustomEvent(EVENTS.READY, {
                 detail: { version: HUB_VERSION }
-            })
-        );
-
+            }));
+        }
         return true;
     }
 
+    // =========================================================================
+    // WATCHER
+    // =========================================================================
     function startSidebarWatcher() {
-        if (mount()) {
-            return;
+        let rafPending = false;
+        const tryMount = () => {
+            if (rafPending) return;
+            rafPending = true;
+            requestAnimationFrame(() => {
+                rafPending = false;
+                const existing = document.getElementById(IDS.ROW);
+                if (!existing || !document.body.contains(existing)) {
+                    mount();
+                }
+            });
+        };
+
+        if (document.body) {
+            mount();
+        } else {
+            const bodyWatcher = new MutationObserver(() => {
+                if (document.body) {
+                    bodyWatcher.disconnect();
+                    mount();
+                }
+            });
+            bodyWatcher.observe(document.documentElement, { childList: true });
         }
 
-        const observer = new MutationObserver(function () {
-            if (mount()) {
-                observer.disconnect();
-            }
-        });
-
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true
-        });
+        const observer = new MutationObserver(tryMount);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
 
         let attempts = 0;
-        const timer = window.setInterval(function () {
-            if (mounted || attempts++ > 60) {
-                window.clearInterval(timer);
+        const timer = setInterval(() => {
+            if (attempts++ > 60) {
+                clearInterval(timer);
                 return;
             }
-            mount();
-        }, 500);
+            tryMount();
+        }, 400);
     }
 
     // =========================================================================
     // START
     // =========================================================================
-
     drainQueue();
 
     if (document.readyState === 'loading') {
@@ -688,5 +519,4 @@
     } else {
         startSidebarWatcher();
     }
-
 })();
