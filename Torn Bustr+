@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.0.6
+// @version      1.0.7
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
 // @author       cowboyup
 // @license      MIT
@@ -21,7 +21,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -443,7 +443,8 @@
 
   function mountToggleButton(wrap) {
     const sidebar = document.getElementById('sidebar');
-    if (sidebar) {
+    const sidebarVisible = !!sidebar && sidebar.offsetParent !== null && sidebar.getClientRects().length > 0;
+    if (sidebarVisible) {
       wrap.classList.remove('bustr-plus-navitem-fallback');
       if (wrap.parentElement !== sidebar) sidebar.appendChild(wrap);
     } else {
