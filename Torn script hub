@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        Torn Script Hub
 // @namespace   https://greasyfork.org/users/cowboyup
-// @version     1.0.0
-// @description Standalone launcher hub for registered Torn userscripts.
+// @version     1.1.3
+// @description A hub for your Torn scripts that is currently duct-taped together and running on sheer willpower. Things might break, dragons might appear, but at least it's trying. Work in progress!
 // @author      cowboyup
 // @match       https://www.torn.com/*
 // @run-at      document-start
@@ -16,6 +16,17 @@
     // =========================================================================
     // TORN SCRIPT HUB
     //
+    // Changelog:
+    // v1.1.3 - Restored documentElement fallback alongside window scope for queue 
+    //          drainage to ensure the sidebar mount succeeds even if timing shifts.
+    // v1.1.2 - Switched registration queue from documentElement to window to bypass 
+    //          Tampermonkey sandbox isolation barriers between independent scripts.
+    // v1.1.1 - Added immediate execution to the queue registration bridge to ensure 
+    //          satellite scripts registering at document-start are caught reliably.
+    // v1.1.0 - Updated sidebar button height and alignment to match native items, 
+    //          added humorous GreasyFork description, and prepped satellite boilerplate.
+    // v1.0.0 - Initial release featuring event-bus architecture and queue safety.
+    //
     // Deliberately independent of any particular userscript.
     //
     // Communication:
@@ -27,11 +38,9 @@
     //            open: function () { ... }
     //        }
     //    }));
-    //
-    // No shared window object is used.
     // =========================================================================
 
-    const HUB_VERSION = '1.0.0';
+    const HUB_VERSION = '1.1.3';
 
     const EVENTS = Object.freeze({
         REGISTER: 'torn-script-hub:register',
@@ -52,40 +61,30 @@
     const registry = new Map();
 
     // =========================================================================
-    // LOAD-ORDER-SAFE DOM QUEUE
-    //
-    // CustomEvents are the communication protocol.
-    //
-    // The queue is attached to a DOM node rather than window so that the
-    // registration mechanism remains usable across Tampermonkey sandboxes.
-    //
-    // A script registering before this hub starts places its registration
-    // object here. The hub drains it immediately when initialized.
+    // LOAD-ORDER-SAFE QUEUE (Window + Document Fallback)
     // =========================================================================
 
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     function getQueue() {
+        const queues = [];
+
+        if (window[QUEUE_PROPERTY] && Array.isArray(window[QUEUE_PROPERTY])) {
+            queues.push(window[QUEUE_PROPERTY]);
+        }
+
         const root = document.documentElement;
-
-        if (!root) {
-            return [];
+        if (root && root[QUEUE_PROPERTY] && Array.isArray(root[QUEUE_PROPERTY])) {
+            queues.push(root[QUEUE_PROPERTY]);
         }
 
-        if (!root[QUEUE_PROPERTY]) {
-            root[QUEUE_PROPERTY] = [];
+        if (queues.length === 0) {
+            window[QUEUE_PROPERTY] = [];
+            return window[QUEUE_PROPERTY];
         }
 
-        return root[QUEUE_PROPERTY];
-    }
-
-    function queueRegistration(detail) {
-        if (!detail || typeof detail !== 'object') {
-            return;
-        }
-
-        const queue = getQueue();
-        queue.push(detail);
+        // Return the first active queue found
+        return queues[0];
     }
 
     function drainQueue() {
@@ -95,10 +94,7 @@
             return;
         }
 
-        // Empty first so registrations made while processing the queue
-        // don't get accidentally processed twice.
         const pending = queue.splice(0, queue.length);
-
         pending.forEach(registerScript);
     }
 
@@ -142,7 +138,6 @@
         }
 
         registry.set(script.id, script);
-
         renderMenu();
     }
 
@@ -192,20 +187,6 @@
     }
 
     function findSidebarInsertionPoint() {
-        /*
-         * TornTools' injected settings row is deliberately preferred.
-         *
-         * Observed structure:
-         *
-         *    <div class="tt-settings pill">
-         *        <svg class="tt-svg">...</svg>
-         *        <span>TornTools Settings</span>
-         *    </div>
-         *
-         * This gives us a third-party-injected anchor rather than depending
-         * on Torn's React-generated hashed component classes.
-         */
-
         const ttSettings = findTornToolsSettings();
 
         if (ttSettings && ttSettings.parentNode) {
@@ -214,14 +195,6 @@
                 reference: ttSettings
             };
         }
-
-        /*
-         * Fallback:
-         *
-         * Locate the desktop navigation area and append our row there.
-         * The selector intentionally uses structural information rather
-         * than React component internals.
-         */
 
         const desktopNav = document.querySelector(
             '[id^="nav-"]'
@@ -238,7 +211,7 @@
     }
 
     // =========================================================================
-    // SVG ICON (Original Detailed Hub Design)
+    // SVG ICON
     // =========================================================================
 
     function createIcon() {
@@ -268,10 +241,6 @@
     function createRow() {
         const row = document.createElement('div');
 
-        /*
-         * "tt-settings pill" is intentionally imitated rather than modifying
-         * Torn's own sidebar React components.
-         */
         row.className = 'tt-settings pill tsh-row';
         row.id = IDS.ROW;
         row.setAttribute('role', 'button');
@@ -513,10 +482,6 @@
         style.id = IDS.STYLE;
 
         style.textContent = `
-            /* =============================================================
-             * Torn Script Hub
-             * ============================================================= */
-
             .tsh-row {
                 cursor: pointer !important;
                 user-select: none;
@@ -566,10 +531,7 @@
                     0 4px 16px rgba(0, 0, 0, .35),
                     0 1px 3px rgba(0, 0, 0, .25);
 
-                font-family:
-                    Arial,
-                    Helvetica,
-                    sans-serif;
+                font-family: Arial, Helvetica, sans-serif;
             }
 
             .tsh-menu.tsh-open {
@@ -579,23 +541,17 @@
             .tsh-item {
                 width: 100%;
                 min-height: 34px;
-
                 display: flex;
                 align-items: center;
-
                 padding: 6px 9px;
                 margin: 0;
-
                 border: 0;
                 border-radius: 4px;
-
                 background: transparent;
                 color: inherit;
-
                 font: inherit;
                 font-size: 13px;
                 text-align: left;
-
                 cursor: pointer;
             }
 
@@ -608,7 +564,6 @@
             .tsh-item-icon {
                 width: 20px;
                 margin-right: 7px;
-
                 text-align: center;
                 opacity: .75;
             }
@@ -616,7 +571,6 @@
             .tsh-item-text {
                 flex: 1;
                 overflow: hidden;
-
                 white-space: nowrap;
                 text-overflow: ellipsis;
             }
@@ -632,11 +586,6 @@
                 opacity: .55;
                 font-size: 12px;
             }
-
-            /*
-             * Torn's dark-mode body class is used only for choosing our
-             * independent menu palette. We do not depend on Torn's React CSS.
-             */
 
             :root {
                 --tsh-bg: #f5f5f5;
@@ -688,27 +637,19 @@
         const menu = createMenu();
 
         insertion.parent.insertBefore(row, insertion.reference.nextSibling);
-
         document.body.appendChild(menu);
 
         mounted = true;
-
         renderMenu();
 
         document.dispatchEvent(
             new CustomEvent(EVENTS.READY, {
-                detail: {
-                    version: HUB_VERSION
-                }
+                detail: { version: HUB_VERSION }
             })
         );
 
         return true;
     }
-
-    // =========================================================================
-    // SIDEBAR WAIT
-    // =========================================================================
 
     function startSidebarWatcher() {
         if (mount()) {
@@ -726,18 +667,12 @@
             subtree: true
         });
 
-        /*
-         * Defensive retry in case Torn replaces the sidebar after the first
-         * React render.
-         */
         let attempts = 0;
-
         const timer = window.setInterval(function () {
             if (mounted || attempts++ > 60) {
                 window.clearInterval(timer);
                 return;
             }
-
             mount();
         }, 500);
     }
@@ -746,20 +681,10 @@
     // START
     // =========================================================================
 
-    /*
-     * Drain anything that was registered before the hub initialized.
-     */
     drainQueue();
 
-    /*
-     * document-start can occur before <head>/<body> exists.
-     */
     if (document.readyState === 'loading') {
-        document.addEventListener(
-            'DOMContentLoaded',
-            startSidebarWatcher,
-            { once: true }
-        );
+        document.addEventListener('DOMContentLoaded', startSidebarWatcher, { once: true });
     } else {
         startSidebarWatcher();
     }
