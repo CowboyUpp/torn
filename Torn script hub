@@ -1,57 +1,34 @@
 // ==UserScript==
+
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.4.0
-// @description  A hub for your Torn scripts that is currently duct-taped together and running on sheer willpower. Things might break, dragons might appear, but at least it's trying. Work in progress!
+// @version      1.5.0
+// @description  A hub for your Torn scripts. Desktop: clones sidebar item. Mobile/PDA: integrates as a native Swiper slide. No floating buttons.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
 // @license      MIT
-// @downloadURL  https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.user.js
-// @updateURL    https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.meta.js
+
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     // =========================================================================
-    // TORN SCRIPT HUB  v1.4.0
+    // TORN SCRIPT HUB  v1.5.0
     //
-    // FULL CHANGELOG
+    // CHANGELOG
     // -------------------------------------------------------------------------
-    // v1.4.0 - Real PDA/mobile support instead of hiding the row. #nav-calendar
-    //          is only cloned when it's outside Swiper's managed DOM (desktop);
-    //          when it's inside a .swiper-slide (mobile/tablet), we skip the
-    //          clone-and-insert entirely and build a small self-contained
-    //          floating pill instead, so we never write into Swiper's own
-    //          slide list. Menu positioning is now aware of which mode mounted.
-    //
-    // v1.3.1 - Desktop left completely untouched (perfect). PDA: hide the
-    //          cloned row on narrow / mobile layouts so the broken second
-    //          icon row disappears. No other desktop changes.
-    //
-    // v1.3.0 - Real DOM structure from live page dump. Clones #nav-calendar
-    //          .area-desktop block and inserts immediately after it.
-    //          Desktop look perfect.
-    //
-    // v1.2.9 - Self-contained pill. Imperfect look.
-    // v1.2.8 - Clone attempt failed reliably.
-    // v1.2.7 - Normal-weight self-contained ("AOL button").
-    // v1.2.6 - Mobile empty-slot force-visibility.
-    // v1.2.5 - Self-contained, left-sidebar only.
-    // v1.2.4 - Removed badge, restored hub icon.
-    // v1.2.3 - Native clone (perfect when it worked).
-    // v1.2.x / v1.1.x / v1.0.0 - Earlier queue, floating, insertion work.
-    // -------------------------------------------------------------------------
-    //
-    // Satellite registration:
-    //   document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
-    //     detail: { id, name, version, icon, order, open }
-    //   }));
+    // v1.5.0 - Removed floating fallback pill. Mobile/PDA now integrates as a
+    //          native .swiper-slide inside Torn's Swiper navigation. Calls
+    //          swiper.update() when available. Menu positioning centers above
+    //          the nav item on mobile. Added touchstart close and visibility
+    //          guard for fixed navs. Cleaned up redundant deduplication.
+    // v1.4.0 - Real PDA/mobile support with floating pill.
+    // v1.3.0 - Desktop clone of #nav-calendar.
     // =========================================================================
-
-    const HUB_VERSION = '1.4.0';
+    const HUB_VERSION = '1.5.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -63,550 +40,1145 @@
         STYLE: 'tsh-style'
     });
 
-    const registry = new Map();
+     const registry = new Map();
     let readyFired = false;
-    let mountMode = 'row'; // 'row' (cloned desktop item) | 'fallback' (self-contained pill)
+    let mountMode = 'row'; // 'row' | 'swiper'
 
     // =========================================================================
     // QUEUE
     // =========================================================================
+
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
+ 
+
     function ensureQueue(target) {
+
         if (!target[QUEUE_PROPERTY] || !Array.isArray(target[QUEUE_PROPERTY])) {
+
             target[QUEUE_PROPERTY] = [];
+
         }
+
         const q = target[QUEUE_PROPERTY];
+
         if (!q.__tshPatched) {
+
             const originalPush = q.push.bind(q);
+
             q.push = function (...items) {
+
                 const result = originalPush(...items);
+
                 items.forEach(item => registerScript(item));
+
                 return result;
+
             };
+
             q.__tshPatched = true;
+
         }
+
         return q;
+
     }
+
+ 
 
     function getQueues() {
+
         const queues = [];
+
         if (typeof window !== 'undefined') queues.push(ensureQueue(window));
+
         if (document.documentElement) queues.push(ensureQueue(document.documentElement));
+
         return queues;
+
     }
+
+ 
 
     function drainQueue() {
+
         getQueues().forEach(queue => {
+
             if (!queue.length) return;
+
             const pending = queue.splice(0, queue.length);
+
             pending.forEach(registerScript);
+
         });
+
     }
 
+ 
+
     // =========================================================================
+
     // REGISTRATION
+
     // =========================================================================
+
     function normalizeRegistration(detail) {
+
         if (!detail || typeof detail !== 'object') return null;
+
         const id   = String(detail.id   || '').trim();
+
         const name = String(detail.name || '').trim();
+
         if (!id || !name) return null;
+
         if (typeof detail.open !== 'function') return null;
+
         return {
+
             id, name,
+
             version: detail.version ? String(detail.version) : '',
+
             icon:    detail.icon || null,
+
             order:   Number.isFinite(detail.order) ? detail.order : 1000,
+
             open:    detail.open
+
         };
+
     }
+
+ 
 
     function registerScript(detail) {
+
         const script = normalizeRegistration(detail);
+
         if (!script) return;
+
         registry.set(script.id, script);
+
         renderMenu();
+
     }
+
+ 
 
     function unregisterScript(detail) {
+
         if (!detail) return;
+
         const id = typeof detail === 'string' ? detail : String(detail.id || '').trim();
+
         if (!id) return;
+
         registry.delete(id);
+
         renderMenu();
+
     }
+
+ 
 
     document.addEventListener(EVENTS.REGISTER, e => { if (e?.detail) registerScript(e.detail); });
+
     document.addEventListener(EVENTS.UNREGISTER, e => { if (e?.detail) unregisterScript(e.detail); });
 
+ 
+
     // =========================================================================
+
     // HUB ICON
+
     // =========================================================================
+
     function createHubIcon() {
+
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+
         svg.setAttribute('viewBox', '0 0 128 128');
+
         svg.setAttribute('class', 'tsh-svg');
+
         svg.setAttribute('aria-hidden', 'true');
+
         svg.setAttribute('width', '18');
+
         svg.setAttribute('height', '18');
+
         svg.innerHTML = [
+
             '<path d="M34 14h60l20 20v60l-20 20H34L14 94V34z" fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round" opacity="0.35"/>',
+
             '<circle cx="64" cy="64" r="22" fill="none" stroke="currentColor" stroke-width="10" stroke-dasharray="8 4"/>',
+
             '<circle cx="64" cy="64" r="8" fill="currentColor"/>',
+
             '<path d="M26 40V26h14M102 40V26H88M26 88v14h14M102 88v14H88" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>'
+
         ].join('');
+
         return svg;
+
     }
 
+ 
+
     // =========================================================================
-    // CREATE ROW BY CLONING #nav-calendar (exact native structure)
+
+    // DESKTOP ROW - clone #nav-calendar directly into the sidebar
+
     // =========================================================================
+
     function createNativeRow(template) {
+
         const row = template.cloneNode(true);
+
         row.id = IDS.ROW;
+
         row.classList.remove('active___xlAlO');
 
+ 
+
         const link = row.querySelector('a');
+
         if (link) {
+
             link.removeAttribute('href');
+
             link.addEventListener('click', e => {
+
                 e.preventDefault();
+
                 e.stopPropagation();
+
                 toggleMenu();
+
             });
+
         }
+
+ 
 
         const iconWrap = row.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
+
         if (iconWrap) {
+
             if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') {
+
                 iconWrap.replaceWith(createHubIcon());
+
             } else {
+
                 iconWrap.innerHTML = '';
+
                 iconWrap.appendChild(createHubIcon());
+
             }
+
         }
 
+ 
+
         const nameEl = row.querySelector('[class*="linkName"]');
+
         if (nameEl) {
+
             nameEl.textContent = 'Scripts';
+
         } else {
+
             const spans = row.querySelectorAll('span');
+
             for (const s of spans) {
+
                 if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
+
                     s.textContent = 'Scripts';
+
                     break;
+
                 }
+
             }
+
         }
+
+ 
 
         row.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
 
+ 
+
         row.setAttribute('role', 'button');
+
         row.setAttribute('tabindex', '0');
+
         row.setAttribute('aria-haspopup', 'menu');
+
         row.setAttribute('aria-expanded', 'false');
+
         row.title = 'Torn Script Hub';
+
         row.style.cursor = 'pointer';
 
-        row.addEventListener('click', e => {
-            e.preventDefault();
-            e.stopPropagation();
-            toggleMenu();
-        });
-        row.addEventListener('keydown', e => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                toggleMenu();
-            }
-            if (e.key === 'Escape') closeMenu();
-        });
-
-        return row;
-    }
-
-    // =========================================================================
-    // FALLBACK ROW - self-contained pill, used whenever #nav-calendar lives
-    // inside a .swiper-slide (mobile/tablet). We never clone-and-insert into
-    // Swiper's own managed slide list; Swiper doesn't know about a node added
-    // that way and its slide-count/position math can desync even when nothing
-    // looks visibly wrong. Building an independent element sidesteps that.
-    // =========================================================================
-    function createFallbackRow() {
-        const row = document.createElement('button');
-        row.type = 'button';
-        row.id = IDS.ROW;
-        row.className = 'tsh-fallback-row';
-        row.title = 'Torn Script Hub';
-        row.setAttribute('role', 'button');
-        row.setAttribute('aria-haspopup', 'menu');
-        row.setAttribute('aria-expanded', 'false');
-
-        row.appendChild(createHubIcon());
-
-        const label = document.createElement('span');
-        label.className = 'tsh-fallback-label';
-        label.textContent = 'Scripts';
-        row.appendChild(label);
+ 
 
         row.addEventListener('click', e => {
+
             e.preventDefault();
+
             e.stopPropagation();
+
             toggleMenu();
-        });
-        row.addEventListener('keydown', e => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                toggleMenu();
-            }
-            if (e.key === 'Escape') closeMenu();
+
         });
 
+        row.addEventListener('keydown', e => {
+
+            if (e.key === 'Enter' || e.key === ' ') {
+
+                e.preventDefault();
+
+                toggleMenu();
+
+            }
+
+            if (e.key === 'Escape') closeMenu();
+
+        });
+
+ 
+
         return row;
+
     }
+
+ 
+
+    // =========================================================================
+
+    // MOBILE/PDA SWIPER SLIDE - clone the .swiper-slide containing #nav-calendar
+
+    // and append it as a genuine slide inside Torn's Swiper navigation.
+
+    // =========================================================================
+
+    function createSwiperSlide(templateSlide) {
+
+        const slide = templateSlide.cloneNode(true);
+
+        slide.id = IDS.ROW;
+
+        slide.classList.remove('active___xlAlO');
+
+ 
+
+        const link = slide.querySelector('a');
+
+        if (link) {
+
+            link.removeAttribute('href');
+
+            link.addEventListener('click', e => {
+
+                e.preventDefault();
+
+                e.stopPropagation();
+
+                toggleMenu();
+
+            });
+
+        }
+
+ 
+
+        const iconWrap = slide.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
+
+        if (iconWrap) {
+
+            if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') {
+
+                iconWrap.replaceWith(createHubIcon());
+
+            } else {
+
+                iconWrap.innerHTML = '';
+
+                iconWrap.appendChild(createHubIcon());
+
+            }
+
+        }
+
+ 
+
+        const nameEl = slide.querySelector('[class*="linkName"]');
+
+        if (nameEl) {
+
+            nameEl.textContent = 'Scripts';
+
+        } else {
+
+            const spans = slide.querySelectorAll('span');
+
+            for (const s of spans) {
+
+                if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
+
+                    s.textContent = 'Scripts';
+
+                    break;
+
+                }
+
+            }
+
+        }
+
+ 
+
+        slide.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
+
+ 
+
+        slide.setAttribute('role', 'button');
+
+        slide.setAttribute('tabindex', '0');
+
+        slide.setAttribute('aria-haspopup', 'menu');
+
+        slide.setAttribute('aria-expanded', 'false');
+
+        slide.title = 'Torn Script Hub';
+
+        slide.style.cursor = 'pointer';
+
+ 
+
+        slide.addEventListener('click', e => {
+
+            e.preventDefault();
+
+            e.stopPropagation();
+
+            toggleMenu();
+
+        });
+
+        slide.addEventListener('keydown', e => {
+
+            if (e.key === 'Enter' || e.key === ' ') {
+
+                e.preventDefault();
+
+                toggleMenu();
+
+            }
+
+            if (e.key === 'Escape') closeMenu();
+
+        });
+
+ 
+
+        return slide;
+
+    }
+
+ 
+
     function getSortedScripts() {
+
         return Array.from(registry.values()).sort((a, b) => {
+
             if (a.order !== b.order) return a.order - b.order;
+
             return a.name.localeCompare(b.name);
+
         });
+
     }
+
+ 
 
     function createMenu() {
+
         const menu = document.createElement('div');
+
         menu.id = IDS.MENU;
+
         menu.className = 'tsh-menu';
+
         menu.setAttribute('role', 'menu');
+
         return menu;
+
     }
+
+ 
 
     function renderMenu() {
+
         const menu = document.getElementById(IDS.MENU);
+
         if (!menu) return;
+
         menu.textContent = '';
+
         const scripts = getSortedScripts();
 
+ 
+
         if (scripts.length === 0) {
+
             const empty = document.createElement('div');
+
             empty.className = 'tsh-empty';
+
             empty.textContent = 'No registered scripts';
+
             menu.appendChild(empty);
+
             return;
+
         }
+
+ 
 
         scripts.forEach(script => {
+
             const item = document.createElement('button');
+
             item.type = 'button';
+
             item.className = 'tsh-item';
+
             item.setAttribute('role', 'menuitem');
 
+ 
+
             const icon = document.createElement('span');
+
             icon.className = 'tsh-item-icon';
+
             icon.textContent = (typeof script.icon === 'string' && script.icon.trim()) ? script.icon : '›';
+
             item.appendChild(icon);
 
+ 
+
             const text = document.createElement('span');
+
             text.className = 'tsh-item-text';
+
             text.textContent = script.name;
+
             item.appendChild(text);
 
+ 
+
             if (script.version) {
+
                 const version = document.createElement('span');
+
                 version.className = 'tsh-item-version';
+
                 version.textContent = 'v' + script.version;
+
                 item.appendChild(version);
+
             }
+
+ 
 
             item.addEventListener('click', e => {
+
                 e.preventDefault();
+
                 e.stopPropagation();
+
                 closeMenu();
+
                 try { script.open(); }
+
                 catch (err) { console.error('[Torn Script Hub] Failed to open "' + script.name + '"', err); }
+
             });
+
             menu.appendChild(item);
+
         });
+
     }
+
+ 
 
     function positionMenu() {
+
         const row  = document.getElementById(IDS.ROW);
+
         const menu = document.getElementById(IDS.MENU);
+
         if (!row || !menu) return;
+
+ 
 
         const rect = row.getBoundingClientRect();
+
+        // If the row is not visible (e.g. nav hidden), close menu immediately
+
+        if (rect.width === 0 && rect.height === 0) {
+
+            closeMenu();
+
+            return;
+
+        }
+
+ 
+
         const menuWidth = menu.offsetWidth || 240;
+
         const menuHeight = menu.offsetHeight || 200;
 
+ 
+
         let left, top;
-        if (mountMode === 'fallback') {
-            left = rect.right - menuWidth;
-            left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
-            top = rect.top - menuHeight - 8;
-            if (top < 8) top = rect.bottom + 8;
-        } else {
-            left = rect.right + 8;
+
+        if (mountMode === 'swiper') {
+
+            // Mobile/PDA: align with the slide, menu appears above the bottom nav
+
+            left = rect.left;
+
             if (left + menuWidth > window.innerWidth - 10) {
-                left = rect.left - menuWidth - 8;
+
+                left = rect.right - menuWidth;
+
             }
+
             left = Math.max(8, left);
 
-            top = rect.top;
-            if (top + 280 > window.innerHeight) {
-                top = Math.max(8, window.innerHeight - 300);
+ 
+
+            top = rect.top - menuHeight - 8;
+
+            if (top < 8) top = rect.bottom + 8;
+
+        } else {
+
+            // Desktop: to the right of the sidebar item, or left if no space
+
+            left = rect.right + 8;
+
+            if (left + menuWidth > window.innerWidth - 10) {
+
+                left = rect.left - menuWidth - 8;
+
             }
+
+            left = Math.max(8, left);
+
+ 
+
+            top = rect.top;
+
+            if (top + 280 > window.innerHeight) {
+
+                top = Math.max(8, window.innerHeight - 300);
+
+            }
+
         }
+
+ 
 
         menu.style.left = Math.round(left) + 'px';
+
         menu.style.top  = Math.round(top) + 'px';
+
     }
+
+ 
 
     function openMenu() {
+
         const row  = document.getElementById(IDS.ROW);
+
         const menu = document.getElementById(IDS.MENU);
+
         if (!row || !menu) return;
+
         renderMenu();
+
         positionMenu();
+
         menu.classList.add('tsh-open');
+
         row.setAttribute('aria-expanded', 'true');
+
     }
+
+ 
 
     function closeMenu() {
+
         const row  = document.getElementById(IDS.ROW);
+
         const menu = document.getElementById(IDS.MENU);
+
         if (!row || !menu) return;
+
         menu.classList.remove('tsh-open');
+
         row.setAttribute('aria-expanded', 'false');
+
     }
+
+ 
 
     function toggleMenu() {
+
         const menu = document.getElementById(IDS.MENU);
+
         if (!menu) return;
+
         menu.classList.contains('tsh-open') ? closeMenu() : openMenu();
+
     }
 
-    document.addEventListener('click', e => {
+ 
+
+    // Close on click or touch outside
+
+    function onOutsideInteraction(e) {
+
         const row  = document.getElementById(IDS.ROW);
+
         const menu = document.getElementById(IDS.MENU);
+
         if (!row || !menu) return;
+
         if (e.target !== row && !row.contains(e.target) && !menu.contains(e.target)) {
+
             closeMenu();
+
         }
-    }, true);
+
+    }
+
+    document.addEventListener('click', onOutsideInteraction, true);
+
+    document.addEventListener('touchstart', onOutsideInteraction, { passive: true, capture: true });
+
+ 
 
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+
     window.addEventListener('resize', () => {
+
         const menu = document.getElementById(IDS.MENU);
+
         if (menu && menu.classList.contains('tsh-open')) positionMenu();
+
     });
+
     window.addEventListener('scroll', () => {
+
         const menu = document.getElementById(IDS.MENU);
+
         if (menu && menu.classList.contains('tsh-open')) positionMenu();
+
     }, true);
 
+ 
+
     // =========================================================================
+
     // STYLES
+
     // =========================================================================
+
     function installStyles() {
+
         if (document.getElementById(IDS.STYLE)) return;
 
+ 
+
         const style = document.createElement('style');
+
         style.id = IDS.STYLE;
+
         style.textContent = `
+
             #tsh-sidebar-row .tsh-svg {
+
                 width: 18px !important;
+
                 height: 18px !important;
+
                 display: block !important;
+
             }
 
-            /* ===== PDA / mobile fallback pill ===== */
-            /* Used only when #nav-calendar is inside a .swiper-slide - the
-               desktop clone-and-insert path is never affected by this. */
-            #tsh-sidebar-row.tsh-fallback-row {
-                position: fixed;
-                z-index: 99998;
-                right: 10px;
-                bottom: 14px;
-                display: inline-flex;
-                align-items: center;
-                gap: 7px;
-                min-height: 34px;
-                padding: 0 10px;
-                border: 0;
-                border-radius: 8px;
-                background: rgba(24,24,24,.9);
-                color: #eee;
-                box-shadow: 0 6px 18px rgba(0,0,0,.4);
-                font: 700 11px/1.2 Arial, sans-serif;
-                cursor: pointer;
-            }
-            #tsh-sidebar-row.tsh-fallback-row .tsh-svg {
-                width: 16px !important;
-                height: 16px !important;
-            }
-            .tsh-fallback-label { white-space: nowrap; }
+ 
+
+            #tsh-sidebar-row { cursor: pointer; }
+
+ 
 
             /* Dropdown */
+
             .tsh-menu {
+
                 position: fixed;
+
                 z-index: 2147483647;
+
                 min-width: 240px;
+
                 max-width: 340px;
+
                 padding: 6px;
+
                 display: none;
+
                 background: var(--tsh-bg, #f5f5f5);
+
                 color: var(--tsh-text, #222);
+
                 border: 1px solid var(--tsh-border, #bbb);
+
                 border-radius: 8px;
+
                 box-shadow: 0 8px 28px rgba(0,0,0,.4);
+
                 font-family: Arial, Helvetica, sans-serif;
+
             }
+
             .tsh-menu.tsh-open { display: block; }
 
+ 
+
             .tsh-item {
+
                 width: 100%;
+
                 min-height: 36px;
+
                 display: flex;
+
                 align-items: center;
+
                 padding: 7px 10px;
+
                 margin: 0;
+
                 border: 0;
+
                 border-radius: 5px;
+
                 background: transparent;
+
                 color: inherit;
+
                 font: inherit;
+
                 font-size: 13px;
+
                 text-align: left;
+
                 cursor: pointer;
+
             }
+
             .tsh-item:hover, .tsh-item:focus {
+
                 background: var(--tsh-hover, rgba(0,0,0,.09));
+
                 outline: none;
+
             }
+
             .tsh-item-icon { width: 22px; margin-right: 8px; text-align: center; opacity: .8; }
+
             .tsh-item-text { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
             .tsh-item-version { margin-left: 8px; opacity: .5; font-size: 10px; }
+
             .tsh-empty { padding: 10px 12px; opacity: .55; font-size: 12px; }
 
+ 
+
             :root {
+
                 --tsh-bg: #f5f5f5;
+
                 --tsh-text: #222;
+
                 --tsh-border: #bbb;
+
                 --tsh-hover: rgba(0,0,0,.09);
+
             }
+
             body.dark-mode {
+
                 --tsh-bg: #252525;
+
                 --tsh-text: #eee;
+
                 --tsh-border: #4a4a4a;
+
                 --tsh-hover: rgba(255,255,255,.10);
+
             }
+
         `;
+
         (document.head || document.documentElement).appendChild(style);
+
     }
 
+ 
+
     // =========================================================================
-    // MOUNT - desktop clones #nav-calendar (unchanged, perfect). Mobile/tablet
-    // never touches Swiper's DOM: if #nav-calendar is inside a .swiper-slide,
-    // we skip the clone-and-insert path entirely and mount the self-contained
-    // fallback pill instead.
+
+    // MOUNT
+
     // =========================================================================
+
     function mount() {
+
         if (!document.body) return false;
 
+ 
+
+        // Clean up existing instances
+
         document.querySelectorAll('#' + IDS.ROW).forEach(el => el.remove());
+
         const oldMenu = document.getElementById(IDS.MENU);
+
         if (oldMenu) oldMenu.remove();
+
+ 
 
         installStyles();
 
+ 
+
         const calendar = document.getElementById('nav-calendar');
-        const canCloneDesktop = !!(calendar && calendar.parentNode && !calendar.closest('.swiper-slide'));
+
+        const calendarSlide = calendar ? calendar.closest('.swiper-slide') : null;
+
+        const swiperWrapper = calendarSlide ? calendarSlide.closest('.swiper-wrapper') : null;
+
+        const canCloneDesktop = !!(calendar && calendar.parentNode && !calendarSlide);
+
+ 
 
         let row;
+
         if (canCloneDesktop) {
+
             row = createNativeRow(calendar);
+
             calendar.parentNode.insertBefore(row, calendar.nextSibling);
+
             mountMode = 'row';
+
+        } else if (calendarSlide && swiperWrapper) {
+
+            row = createSwiperSlide(calendarSlide);
+
+            swiperWrapper.insertBefore(row, calendarSlide.nextSibling);
+
+            mountMode = 'swiper';
+
+ 
+
+            // Update Swiper instance if reachable
+
+            try {
+
+                const swiperContainer = swiperWrapper.closest('.swiper') || swiperWrapper.closest('.swiper-container');
+
+                if (swiperContainer && swiperContainer.swiper && typeof swiperContainer.swiper.update === 'function') {
+
+                    swiperContainer.swiper.update();
+
+                }
+
+            } catch (e) {
+
+                console.warn('[Torn Script Hub] Swiper update failed:', e);
+
+            }
+
         } else {
-            row = createFallbackRow();
-            document.body.appendChild(row);
-            mountMode = 'fallback';
+
+            console.warn('[Torn Script Hub] Cannot mount: #nav-calendar not found or not in a recognized menu structure.');
+
+            return false;
+
         }
 
-        const all = document.querySelectorAll('#' + IDS.ROW);
-        if (all.length > 1) {
-            for (let i = 0; i < all.length - 1; i++) all[i].remove();
-        }
+ 
 
         const menu = createMenu();
+
         document.body.appendChild(menu);
 
         renderMenu();
 
+ 
+
         if (!readyFired) {
+
             readyFired = true;
+
             document.dispatchEvent(new CustomEvent(EVENTS.READY, {
+
                 detail: { version: HUB_VERSION }
+
             }));
+
         }
+
         return true;
+
     }
 
+ 
+
     // =========================================================================
+
     // WATCHER
+
     // =========================================================================
+
     function startSidebarWatcher() {
+
         let rafPending = false;
+
+        let mountSuccess = false;
+
+ 
+
         const desiredMode = () => {
+
             const calendar = document.getElementById('nav-calendar');
-            const canCloneDesktop = !!(calendar && calendar.parentNode && !calendar.closest('.swiper-slide'));
-            return canCloneDesktop ? 'row' : 'fallback';
+
+            const calendarSlide = calendar ? calendar.closest('.swiper-slide') : null;
+
+            if (calendar && calendar.parentNode && !calendarSlide) return 'row';
+
+            if (calendarSlide) return 'swiper';
+
+            return null;
+
         };
+
+ 
+
         const tryMount = () => {
+
             if (rafPending) return;
+
             rafPending = true;
+
             requestAnimationFrame(() => {
+
                 rafPending = false;
+
                 const existing = document.getElementById(IDS.ROW);
+
                 const missing = !existing || !document.body.contains(existing);
-                if (missing || mountMode !== desiredMode()) {
-                    mount();
+
+                const mode = desiredMode();
+
+ 
+
+                if (!mode) return;
+
+ 
+
+                if (missing || mountMode !== mode) {
+
+                    if (mount()) {
+
+                        mountSuccess = true;
+
+                    }
+
                 }
+
             });
+
         };
+
+ 
 
         if (document.body) {
+
             mount();
+
         } else {
+
             const bodyWatcher = new MutationObserver(() => {
+
                 if (document.body) {
+
                     bodyWatcher.disconnect();
+
                     mount();
+
                 }
+
             });
+
             bodyWatcher.observe(document.documentElement, { childList: true });
+
         }
 
+ 
+
         const observer = new MutationObserver(tryMount);
+
         observer.observe(document.documentElement, { childList: true, subtree: true });
+
         window.addEventListener('resize', tryMount, { passive: true });
 
+ 
+
         let attempts = 0;
+
         const timer = setInterval(() => {
-            if (attempts++ > 60) {
+
+            if (mountSuccess || attempts++ > 60) {
+
                 clearInterval(timer);
+
                 return;
+
             }
             tryMount();
         }, 400);
     }
-
     // =========================================================================
     // START
     // =========================================================================
     drainQueue();
-
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', startSidebarWatcher, { once: true });
+    document.addEventListener('DOMContentLoaded', startSidebarWatcher, { once: true });
     } else {
-        startSidebarWatcher();
+    startSidebarWatcher();
     }
 })();
