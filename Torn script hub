@@ -1,1184 +1,989 @@
 // ==UserScript==
-
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.0
-// @description  A hub for your Torn scripts. Desktop: clones sidebar item. Mobile/PDA: integrates as a native Swiper slide. No floating buttons.
+// @version      2.0.0
+// @description  The central nervous system for your Torn scripts. Auto-discovers scattered UI, adopts them into one clean dashboard, and hosts every script's preferences.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
 // @license      MIT
-
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    // =========================================================================
-    // TORN SCRIPT HUB  v1.5.0
-    //
-    // CHANGELOG
-    // -------------------------------------------------------------------------
-    // v1.5.0 - Removed floating fallback pill. Mobile/PDA now integrates as a
-    //          native .swiper-slide inside Torn's Swiper navigation. Calls
-    //          swiper.update() when available. Menu positioning centers above
-    //          the nav item on mobile. Added touchstart close and visibility
-    //          guard for fixed navs. Cleaned up redundant deduplication.
-    // v1.4.0 - Real PDA/mobile support with floating pill.
-    // v1.3.0 - Desktop clone of #nav-calendar.
-    // =========================================================================
-    const HUB_VERSION = '1.5.0';
+    const HUB_VERSION = '2.0.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
         READY:      'torn-script-hub:ready'
     });
     const IDS = Object.freeze({
-        ROW:   'tsh-sidebar-row',
-        MENU:  'tsh-menu',
-        STYLE: 'tsh-style'
+        ROW:       'tsh-sidebar-row',
+        MENU:      'tsh-menu',
+        STYLE:     'tsh-style',
+        DASHBOARD: 'tsh-dashboard',
+        DASHBOARD_STYLE: 'tsh-dashboard-style'
     });
 
-     const registry = new Map();
+    const registry = new Map();      // { id -> script object }
+    const adoptedCSS = new Set();    // selectors we hid
     let readyFired = false;
-    let mountMode = 'row'; // 'row' | 'swiper'
+    let mountMode = 'row';
+    let dashboardOpen = false;
 
     // =========================================================================
     // QUEUE
     // =========================================================================
-
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
-
- 
-
     function ensureQueue(target) {
-
         if (!target[QUEUE_PROPERTY] || !Array.isArray(target[QUEUE_PROPERTY])) {
-
             target[QUEUE_PROPERTY] = [];
-
         }
-
         const q = target[QUEUE_PROPERTY];
-
         if (!q.__tshPatched) {
-
             const originalPush = q.push.bind(q);
-
             q.push = function (...items) {
-
                 const result = originalPush(...items);
-
                 items.forEach(item => registerScript(item));
-
                 return result;
-
             };
-
             q.__tshPatched = true;
-
         }
-
         return q;
-
     }
-
- 
-
     function getQueues() {
-
         const queues = [];
-
         if (typeof window !== 'undefined') queues.push(ensureQueue(window));
-
         if (document.documentElement) queues.push(ensureQueue(document.documentElement));
-
         return queues;
-
     }
-
- 
-
     function drainQueue() {
-
         getQueues().forEach(queue => {
-
             if (!queue.length) return;
-
             const pending = queue.splice(0, queue.length);
-
             pending.forEach(registerScript);
-
         });
-
     }
 
- 
-
     // =========================================================================
-
-    // REGISTRATION
-
+    // REGISTRATION (enhanced with prefs & detection meta)
     // =========================================================================
-
     function normalizeRegistration(detail) {
-
         if (!detail || typeof detail !== 'object') return null;
-
         const id   = String(detail.id   || '').trim();
-
         const name = String(detail.name || '').trim();
-
         if (!id || !name) return null;
-
         if (typeof detail.open !== 'function') return null;
 
-        return {
-
+        const entry = {
             id, name,
-
             version: detail.version ? String(detail.version) : '',
-
             icon:    detail.icon || null,
-
             order:   Number.isFinite(detail.order) ? detail.order : 1000,
-
-            open:    detail.open
-
+            open:    detail.open,
+            source:  detail.source || 'registered',
+            active:  detail.active !== false,
+            prefs:   null,
+            detection: detail.detection || null
         };
 
-    }
+        if (detail.prefs && typeof detail.prefs === 'object') {
+            entry.prefs = {
+                fields: Array.isArray(detail.prefs.fields) ? detail.prefs.fields : [],
+                onSave: typeof detail.prefs.onSave === 'function' ? detail.prefs.onSave : null,
+                values: detail.prefs.values || {}
+            };
+            // Seed defaults
+            entry.prefs.fields.forEach(f => {
+                if (!(f.key in entry.prefs.values)) {
+                    entry.prefs.values[f.key] = f.default !== undefined ? f.default : null;
+                }
+            });
+        }
 
- 
+        return entry;
+    }
 
     function registerScript(detail) {
-
         const script = normalizeRegistration(detail);
-
         if (!script) return;
-
         registry.set(script.id, script);
-
         renderMenu();
-
+        if (dashboardOpen) renderDashboard();
     }
-
- 
 
     function unregisterScript(detail) {
-
         if (!detail) return;
-
         const id = typeof detail === 'string' ? detail : String(detail.id || '').trim();
-
         if (!id) return;
-
         registry.delete(id);
-
         renderMenu();
-
+        if (dashboardOpen) renderDashboard();
     }
-
- 
 
     document.addEventListener(EVENTS.REGISTER, e => { if (e?.detail) registerScript(e.detail); });
-
     document.addEventListener(EVENTS.UNREGISTER, e => { if (e?.detail) unregisterScript(e.detail); });
 
- 
+    // =========================================================================
+    // AUTO-DISCOVERY ENGINE
+    // =========================================================================
+    function isNativeTornElement(el) {
+        if (el.id && /^nav-/.test(el.id)) return true;
+        if (el.closest('#sidebarroot, #react-root, .d, .wrapper, .content-wrapper, #header, .chat-box')) return false; // actually we want to be conservative
+        const nativeMarkers = ['swiper', 'torn', 'react', 'angular', 'vue'];
+        const cls = (el.className || '').toString().toLowerCase();
+        if (nativeMarkers.some(m => cls.includes(m))) return true;
+        return false;
+    }
+
+    function generateSelector(el) {
+        if (el.id) return '#' + el.id;
+        let path = '';
+        let curr = el;
+        for (let i = 0; i < 4 && curr && curr !== document.body; i++) {
+            let tag = curr.tagName.toLowerCase();
+            if (curr.className) {
+                const c = curr.className.toString().split(/\s+/).filter(x => x && !x.match(/^active/)).slice(0, 2).join('.');
+                if (c) tag += '.' + c;
+            }
+            path = tag + (path ? ' > ' + path : '');
+            curr = curr.parentElement;
+        }
+        return path;
+    }
+
+    function inferName(el) {
+        const text = (el.textContent || el.title || el.getAttribute('aria-label') || '').trim();
+        if (text && text.length < 40) return text;
+        if (el.id) return el.id.replace(/-/g, ' ').replace(/_/g, ' ');
+        return 'Unknown Script';
+    }
+
+    function scanForScripts() {
+        const detected = [];
+        const seen = new Set();
+
+        // Heuristic 1: fixed / sticky positioned elements that look like buttons or panels
+        document.querySelectorAll('button, a, div').forEach(el => {
+            const style = window.getComputedStyle(el);
+            if (style.position !== 'fixed' && style.position !== 'sticky') return;
+            if (el.closest('#' + IDS.ROW + ', .' + IDS.MENU + ', #' + IDS.DASHBOARD)) return;
+            if (el.offsetWidth < 24 || el.offsetHeight < 24) return;
+            if (el.offsetWidth > 600 || el.offsetHeight > 400) return; // likely a modal container, skip
+            if (isNativeTornElement(el)) return;
+
+            const sel = generateSelector(el);
+            if (seen.has(sel)) return;
+            seen.add(sel);
+
+            detected.push({
+                id: 'tsh-detected-' + Math.random().toString(36).slice(2, 9),
+                name: inferName(el),
+                selector: sel,
+                element: el,
+                source: 'detected'
+            });
+        });
+
+        // Heuristic 2: elements with explicit script-like IDs or classes
+        document.querySelectorAll('[id*="script"], [class*="script"], [id*="helper"], [class*="helper"]').forEach(el => {
+            if (el.closest('#' + IDS.ROW + ', .' + IDS.MENU + ', #' + IDS.DASHBOARD)) return;
+            const sel = generateSelector(el);
+            if (seen.has(sel)) return;
+            seen.add(sel);
+            detected.push({
+                id: 'tsh-detected-' + Math.random().toString(36).slice(2, 9),
+                name: inferName(el),
+                selector: sel,
+                element: el,
+                source: 'detected'
+            });
+        });
+
+        return detected;
+    }
+
+    function adoptDetection(detection) {
+        if (!detection || !detection.selector) return;
+        const id = detection.id;
+        if (registry.has(id)) return;
+
+        // Hide original element via injected CSS
+        const cssId = 'tsh-hide-' + id.replace(/[^a-z0-9]/gi, '');
+        if (!adoptedCSS.has(cssId)) {
+            const sheet = document.getElementById(IDS.STYLE);
+            if (sheet) {
+                sheet.textContent += `\n/* Adopted by TSH */\n${detection.selector} { display: none !important; }`;
+                adoptedCSS.add(cssId);
+            }
+        }
+
+        // Register as a hub-managed script
+        registerScript({
+            id: id,
+            name: detection.name,
+            icon: '🔌',
+            order: 2000,
+            source: 'detected',
+            active: true,
+            detection: detection,
+            open: () => {
+                // Trigger original element click if possible, else unhide briefly
+                const el = document.querySelector(detection.selector);
+                if (el) {
+                    el.style.setProperty('display', '', 'important');
+                    el.click();
+                    setTimeout(() => {
+                        el.style.setProperty('display', 'none', 'important');
+                    }, 100);
+                }
+            }
+        });
+    }
 
     // =========================================================================
-
-    // HUB ICON
-
+    // ICON
     // =========================================================================
-
     function createHubIcon() {
-
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-
         svg.setAttribute('viewBox', '0 0 128 128');
-
         svg.setAttribute('class', 'tsh-svg');
-
         svg.setAttribute('aria-hidden', 'true');
-
         svg.setAttribute('width', '18');
-
         svg.setAttribute('height', '18');
-
         svg.innerHTML = [
-
             '<path d="M34 14h60l20 20v60l-20 20H34L14 94V34z" fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round" opacity="0.35"/>',
-
             '<circle cx="64" cy="64" r="22" fill="none" stroke="currentColor" stroke-width="10" stroke-dasharray="8 4"/>',
-
             '<circle cx="64" cy="64" r="8" fill="currentColor"/>',
-
             '<path d="M26 40V26h14M102 40V26H88M26 88v14h14M102 88v14H88" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>'
-
         ].join('');
-
         return svg;
-
     }
 
- 
-
     // =========================================================================
-
-    // DESKTOP ROW - clone #nav-calendar directly into the sidebar
-
+    // DROPDOWN MENU (quick launch)
     // =========================================================================
-
-    function createNativeRow(template) {
-
-        const row = template.cloneNode(true);
-
-        row.id = IDS.ROW;
-
-        row.classList.remove('active___xlAlO');
-
- 
-
-        const link = row.querySelector('a');
-
-        if (link) {
-
-            link.removeAttribute('href');
-
-            link.addEventListener('click', e => {
-
-                e.preventDefault();
-
-                e.stopPropagation();
-
-                toggleMenu();
-
-            });
-
-        }
-
- 
-
-        const iconWrap = row.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
-
-        if (iconWrap) {
-
-            if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') {
-
-                iconWrap.replaceWith(createHubIcon());
-
-            } else {
-
-                iconWrap.innerHTML = '';
-
-                iconWrap.appendChild(createHubIcon());
-
-            }
-
-        }
-
- 
-
-        const nameEl = row.querySelector('[class*="linkName"]');
-
-        if (nameEl) {
-
-            nameEl.textContent = 'Scripts';
-
-        } else {
-
-            const spans = row.querySelectorAll('span');
-
-            for (const s of spans) {
-
-                if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
-
-                    s.textContent = 'Scripts';
-
-                    break;
-
-                }
-
-            }
-
-        }
-
- 
-
-        row.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
-
- 
-
-        row.setAttribute('role', 'button');
-
-        row.setAttribute('tabindex', '0');
-
-        row.setAttribute('aria-haspopup', 'menu');
-
-        row.setAttribute('aria-expanded', 'false');
-
-        row.title = 'Torn Script Hub';
-
-        row.style.cursor = 'pointer';
-
- 
-
-        row.addEventListener('click', e => {
-
-            e.preventDefault();
-
-            e.stopPropagation();
-
-            toggleMenu();
-
-        });
-
-        row.addEventListener('keydown', e => {
-
-            if (e.key === 'Enter' || e.key === ' ') {
-
-                e.preventDefault();
-
-                toggleMenu();
-
-            }
-
-            if (e.key === 'Escape') closeMenu();
-
-        });
-
- 
-
-        return row;
-
-    }
-
- 
-
-    // =========================================================================
-
-    // MOBILE/PDA SWIPER SLIDE - clone the .swiper-slide containing #nav-calendar
-
-    // and append it as a genuine slide inside Torn's Swiper navigation.
-
-    // =========================================================================
-
-    function createSwiperSlide(templateSlide) {
-
-        const slide = templateSlide.cloneNode(true);
-
-        slide.id = IDS.ROW;
-
-        slide.classList.remove('active___xlAlO');
-
- 
-
-        const link = slide.querySelector('a');
-
-        if (link) {
-
-            link.removeAttribute('href');
-
-            link.addEventListener('click', e => {
-
-                e.preventDefault();
-
-                e.stopPropagation();
-
-                toggleMenu();
-
-            });
-
-        }
-
- 
-
-        const iconWrap = slide.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
-
-        if (iconWrap) {
-
-            if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') {
-
-                iconWrap.replaceWith(createHubIcon());
-
-            } else {
-
-                iconWrap.innerHTML = '';
-
-                iconWrap.appendChild(createHubIcon());
-
-            }
-
-        }
-
- 
-
-        const nameEl = slide.querySelector('[class*="linkName"]');
-
-        if (nameEl) {
-
-            nameEl.textContent = 'Scripts';
-
-        } else {
-
-            const spans = slide.querySelectorAll('span');
-
-            for (const s of spans) {
-
-                if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
-
-                    s.textContent = 'Scripts';
-
-                    break;
-
-                }
-
-            }
-
-        }
-
- 
-
-        slide.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
-
- 
-
-        slide.setAttribute('role', 'button');
-
-        slide.setAttribute('tabindex', '0');
-
-        slide.setAttribute('aria-haspopup', 'menu');
-
-        slide.setAttribute('aria-expanded', 'false');
-
-        slide.title = 'Torn Script Hub';
-
-        slide.style.cursor = 'pointer';
-
- 
-
-        slide.addEventListener('click', e => {
-
-            e.preventDefault();
-
-            e.stopPropagation();
-
-            toggleMenu();
-
-        });
-
-        slide.addEventListener('keydown', e => {
-
-            if (e.key === 'Enter' || e.key === ' ') {
-
-                e.preventDefault();
-
-                toggleMenu();
-
-            }
-
-            if (e.key === 'Escape') closeMenu();
-
-        });
-
- 
-
-        return slide;
-
-    }
-
- 
-
     function getSortedScripts() {
-
-        return Array.from(registry.values()).sort((a, b) => {
-
-            if (a.order !== b.order) return a.order - b.order;
-
-            return a.name.localeCompare(b.name);
-
-        });
-
+        return Array.from(registry.values())
+            .filter(s => s.active)
+            .sort((a, b) => {
+                if (a.order !== b.order) return a.order - b.order;
+                return a.name.localeCompare(b.name);
+            });
     }
-
- 
 
     function createMenu() {
-
         const menu = document.createElement('div');
-
         menu.id = IDS.MENU;
-
         menu.className = 'tsh-menu';
-
         menu.setAttribute('role', 'menu');
-
         return menu;
-
     }
-
- 
 
     function renderMenu() {
-
         const menu = document.getElementById(IDS.MENU);
-
         if (!menu) return;
-
-        menu.textContent = '';
-
+        menu.innerHTML = '';
         const scripts = getSortedScripts();
 
- 
-
         if (scripts.length === 0) {
-
             const empty = document.createElement('div');
-
             empty.className = 'tsh-empty';
-
-            empty.textContent = 'No registered scripts';
-
+            empty.textContent = 'No active scripts';
             menu.appendChild(empty);
+        } else {
+            scripts.forEach(script => {
+                const item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'tsh-item';
+                item.setAttribute('role', 'menuitem');
 
-            return;
+                const icon = document.createElement('span');
+                icon.className = 'tsh-item-icon';
+                icon.textContent = script.icon || '›';
+                item.appendChild(icon);
 
+                const text = document.createElement('span');
+                text.className = 'tsh-item-text';
+                text.textContent = script.name;
+                item.appendChild(text);
+
+                if (script.version) {
+                    const ver = document.createElement('span');
+                    ver.className = 'tsh-item-version';
+                    ver.textContent = 'v' + script.version;
+                    item.appendChild(ver);
+                }
+
+                item.addEventListener('click', e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeMenu();
+                    try { script.open(); } catch (err) {
+                        console.error('[TSH] Failed to open "' + script.name + '"', err);
+                    }
+                });
+                menu.appendChild(item);
+            });
         }
 
- 
+        // Divider
+        const hr = document.createElement('div');
+        hr.className = 'tsh-divider';
+        menu.appendChild(hr);
 
-        scripts.forEach(script => {
-
-            const item = document.createElement('button');
-
-            item.type = 'button';
-
-            item.className = 'tsh-item';
-
-            item.setAttribute('role', 'menuitem');
-
- 
-
-            const icon = document.createElement('span');
-
-            icon.className = 'tsh-item-icon';
-
-            icon.textContent = (typeof script.icon === 'string' && script.icon.trim()) ? script.icon : '›';
-
-            item.appendChild(icon);
-
- 
-
-            const text = document.createElement('span');
-
-            text.className = 'tsh-item-text';
-
-            text.textContent = script.name;
-
-            item.appendChild(text);
-
- 
-
-            if (script.version) {
-
-                const version = document.createElement('span');
-
-                version.className = 'tsh-item-version';
-
-                version.textContent = 'v' + script.version;
-
-                item.appendChild(version);
-
-            }
-
- 
-
-            item.addEventListener('click', e => {
-
-                e.preventDefault();
-
-                e.stopPropagation();
-
-                closeMenu();
-
-                try { script.open(); }
-
-                catch (err) { console.error('[Torn Script Hub] Failed to open "' + script.name + '"', err); }
-
-            });
-
-            menu.appendChild(item);
-
+        // Dashboard link
+        const manage = document.createElement('button');
+        manage.type = 'button';
+        manage.className = 'tsh-item tsh-item-manage';
+        manage.innerHTML = '<span class="tsh-item-icon">🎛️</span><span class="tsh-item-text">Open Dashboard</span>';
+        manage.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeMenu();
+            openDashboard();
         });
-
+        menu.appendChild(manage);
     }
-
- 
 
     function positionMenu() {
-
         const row  = document.getElementById(IDS.ROW);
-
         const menu = document.getElementById(IDS.MENU);
-
         if (!row || !menu) return;
-
- 
-
         const rect = row.getBoundingClientRect();
-
-        // If the row is not visible (e.g. nav hidden), close menu immediately
-
-        if (rect.width === 0 && rect.height === 0) {
-
-            closeMenu();
-
-            return;
-
-        }
-
- 
-
-        const menuWidth = menu.offsetWidth || 240;
-
+        const menuWidth = menu.offsetWidth || 260;
         const menuHeight = menu.offsetHeight || 200;
 
- 
-
         let left, top;
-
         if (mountMode === 'swiper') {
-
-            // Mobile/PDA: align with the slide, menu appears above the bottom nav
-
             left = rect.left;
-
-            if (left + menuWidth > window.innerWidth - 10) {
-
-                left = rect.right - menuWidth;
-
-            }
-
+            if (left + menuWidth > window.innerWidth - 10) left = rect.right - menuWidth;
             left = Math.max(8, left);
-
- 
-
             top = rect.top - menuHeight - 8;
-
             if (top < 8) top = rect.bottom + 8;
-
         } else {
-
-            // Desktop: to the right of the sidebar item, or left if no space
-
             left = rect.right + 8;
-
-            if (left + menuWidth > window.innerWidth - 10) {
-
-                left = rect.left - menuWidth - 8;
-
-            }
-
+            if (left + menuWidth > window.innerWidth - 10) left = rect.left - menuWidth - 8;
             left = Math.max(8, left);
-
- 
-
             top = rect.top;
-
-            if (top + 280 > window.innerHeight) {
-
-                top = Math.max(8, window.innerHeight - 300);
-
-            }
-
+            if (top + 280 > window.innerHeight) top = Math.max(8, window.innerHeight - 300);
         }
-
- 
-
         menu.style.left = Math.round(left) + 'px';
-
         menu.style.top  = Math.round(top) + 'px';
-
     }
-
- 
 
     function openMenu() {
-
         const row  = document.getElementById(IDS.ROW);
-
         const menu = document.getElementById(IDS.MENU);
-
         if (!row || !menu) return;
-
         renderMenu();
-
         positionMenu();
-
         menu.classList.add('tsh-open');
-
         row.setAttribute('aria-expanded', 'true');
-
     }
-
- 
-
     function closeMenu() {
-
         const row  = document.getElementById(IDS.ROW);
-
         const menu = document.getElementById(IDS.MENU);
-
         if (!row || !menu) return;
-
         menu.classList.remove('tsh-open');
-
         row.setAttribute('aria-expanded', 'false');
-
     }
-
- 
-
     function toggleMenu() {
-
         const menu = document.getElementById(IDS.MENU);
-
         if (!menu) return;
-
         menu.classList.contains('tsh-open') ? closeMenu() : openMenu();
-
     }
 
- 
+    // =========================================================================
+    // DASHBOARD (Mission Control)
+    // =========================================================================
+    function openDashboard() {
+        closeMenu();
+        let dash = document.getElementById(IDS.DASHBOARD);
+        if (dash) {
+            dash.classList.add('tsh-dash-open');
+            dashboardOpen = true;
+            renderDashboard();
+            return;
+        }
+        dash = document.createElement('div');
+        dash.id = IDS.DASHBOARD;
+        dash.className = 'tsh-dashboard';
+        dash.innerHTML = `
+            <div class="tsh-dash-backdrop"></div>
+            <div class="tsh-dash-panel">
+                <div class="tsh-dash-header">
+                    <h2>🎯 Script Hub <span class="tsh-dash-ver">v${HUB_VERSION}</span></h2>
+                    <button class="tsh-dash-close" aria-label="Close">✕</button>
+                </div>
+                <div class="tsh-dash-tabs">
+                    <button data-tab="launch" class="tsh-dash-tab active">Launchpad</button>
+                    <button data-tab="prefs" class="tsh-dash-tab">Preferences</button>
+                    <button data-tab="discover" class="tsh-dash-tab">Discovery</button>
+                </div>
+                <div class="tsh-dash-body">
+                    <div data-panel="launch" class="tsh-dash-panel-content active"></div>
+                    <div data-panel="prefs" class="tsh-dash-panel-content"></div>
+                    <div data-panel="discover" class="tsh-dash-panel-content"></div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(dash);
+        dashboardOpen = true;
 
-    // Close on click or touch outside
+        // Close handlers
+        dash.querySelector('.tsh-dash-close').addEventListener('click', closeDashboard);
+        dash.querySelector('.tsh-dash-backdrop').addEventListener('click', closeDashboard);
+        dash.addEventListener('click', e => { if (e.target === dash) closeDashboard(); });
 
-    function onOutsideInteraction(e) {
+        // Tabs
+        dash.querySelectorAll('.tsh-dash-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                dash.querySelectorAll('.tsh-dash-tab').forEach(t => t.classList.remove('active'));
+                dash.querySelectorAll('.tsh-dash-panel-content').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                dash.querySelector(`[data-panel="${tab.dataset.tab}"]`).classList.add('active');
+                if (tab.dataset.tab === 'discover') refreshDiscovery();
+            });
+        });
 
-        const row  = document.getElementById(IDS.ROW);
+        renderDashboard();
+    }
 
-        const menu = document.getElementById(IDS.MENU);
+    function closeDashboard() {
+        const dash = document.getElementById(IDS.DASHBOARD);
+        if (dash) dash.classList.remove('tsh-dash-open');
+        dashboardOpen = false;
+    }
 
-        if (!row || !menu) return;
+    function renderDashboard() {
+        const dash = document.getElementById(IDS.DASHBOARD);
+        if (!dash) return;
+        renderLaunchPanel(dash.querySelector('[data-panel="launch"]'));
+        renderPrefsPanel(dash.querySelector('[data-panel="prefs"]'));
+        // Discovery panel renders on-demand
+    }
 
-        if (e.target !== row && !row.contains(e.target) && !menu.contains(e.target)) {
+    // ----- Launchpad Tab -----
+    function renderLaunchPanel(container) {
+        container.innerHTML = '';
+        const scripts = getSortedScripts();
+        const grid = document.createElement('div');
+        grid.className = 'tsh-dash-grid';
 
-            closeMenu();
-
+        if (!scripts.length) {
+            container.innerHTML = '<div class="tsh-dash-empty">No scripts registered yet.<br>Use the Discovery tab to find and adopt scripts.</div>';
+            return;
         }
 
+        scripts.forEach(script => {
+            const card = document.createElement('div');
+            card.className = 'tsh-dash-card';
+            card.innerHTML = `
+                <div class="tsh-dash-card-icon">${script.icon || '⚡'}</div>
+                <div class="tsh-dash-card-name">${escapeHtml(script.name)}</div>
+                ${script.version ? `<div class="tsh-dash-card-ver">v${escapeHtml(script.version)}</div>` : ''}
+                <div class="tsh-dash-card-source" title="Source">${script.source === 'detected' ? '🔌 Auto' : script.source === 'manual' ? '✋ Manual' : '🔗 Native'}</div>
+            `;
+            card.addEventListener('click', () => {
+                try { script.open(); } catch (e) { console.error(e); }
+            });
+
+            // Toggle active
+            const toggle = document.createElement('button');
+            toggle.className = 'tsh-dash-toggle' + (script.active ? ' active' : '');
+            toggle.textContent = script.active ? 'ON' : 'OFF';
+            toggle.addEventListener('click', e => {
+                e.stopPropagation();
+                script.active = !script.active;
+                renderDashboard();
+                renderMenu();
+                // If deactivating a detected script, unhide its original UI
+                if (!script.active && script.detection) {
+                    unhideOriginal(script.detection.selector);
+                }
+                // If reactivating, re-hide
+                if (script.active && script.detection) {
+                    hideOriginal(script.detection.selector);
+                }
+            });
+            card.appendChild(toggle);
+
+            grid.appendChild(card);
+        });
+        container.appendChild(grid);
     }
 
-    document.addEventListener('click', onOutsideInteraction, true);
-
-    document.addEventListener('touchstart', onOutsideInteraction, { passive: true, capture: true });
-
- 
-
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
-
-    window.addEventListener('resize', () => {
-
-        const menu = document.getElementById(IDS.MENU);
-
-        if (menu && menu.classList.contains('tsh-open')) positionMenu();
-
-    });
-
-    window.addEventListener('scroll', () => {
-
-        const menu = document.getElementById(IDS.MENU);
-
-        if (menu && menu.classList.contains('tsh-open')) positionMenu();
-
-    }, true);
-
- 
-
-    // =========================================================================
-
-    // STYLES
-
-    // =========================================================================
-
-    function installStyles() {
-
-        if (document.getElementById(IDS.STYLE)) return;
-
- 
-
-        const style = document.createElement('style');
-
-        style.id = IDS.STYLE;
-
-        style.textContent = `
-
-            #tsh-sidebar-row .tsh-svg {
-
-                width: 18px !important;
-
-                height: 18px !important;
-
-                display: block !important;
-
-            }
-
- 
-
-            #tsh-sidebar-row { cursor: pointer; }
-
- 
-
-            /* Dropdown */
-
-            .tsh-menu {
-
-                position: fixed;
-
-                z-index: 2147483647;
-
-                min-width: 240px;
-
-                max-width: 340px;
-
-                padding: 6px;
-
-                display: none;
-
-                background: var(--tsh-bg, #f5f5f5);
-
-                color: var(--tsh-text, #222);
-
-                border: 1px solid var(--tsh-border, #bbb);
-
-                border-radius: 8px;
-
-                box-shadow: 0 8px 28px rgba(0,0,0,.4);
-
-                font-family: Arial, Helvetica, sans-serif;
-
-            }
-
-            .tsh-menu.tsh-open { display: block; }
-
- 
-
-            .tsh-item {
-
-                width: 100%;
-
-                min-height: 36px;
-
-                display: flex;
-
-                align-items: center;
-
-                padding: 7px 10px;
-
-                margin: 0;
-
-                border: 0;
-
-                border-radius: 5px;
-
-                background: transparent;
-
-                color: inherit;
-
-                font: inherit;
-
-                font-size: 13px;
-
-                text-align: left;
-
-                cursor: pointer;
-
-            }
-
-            .tsh-item:hover, .tsh-item:focus {
-
-                background: var(--tsh-hover, rgba(0,0,0,.09));
-
-                outline: none;
-
-            }
-
-            .tsh-item-icon { width: 22px; margin-right: 8px; text-align: center; opacity: .8; }
-
-            .tsh-item-text { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-
-            .tsh-item-version { margin-left: 8px; opacity: .5; font-size: 10px; }
-
-            .tsh-empty { padding: 10px 12px; opacity: .55; font-size: 12px; }
-
- 
-
-            :root {
-
-                --tsh-bg: #f5f5f5;
-
-                --tsh-text: #222;
-
-                --tsh-border: #bbb;
-
-                --tsh-hover: rgba(0,0,0,.09);
-
-            }
-
-            body.dark-mode {
-
-                --tsh-bg: #252525;
-
-                --tsh-text: #eee;
-
-                --tsh-border: #4a4a4a;
-
-                --tsh-hover: rgba(255,255,255,.10);
-
-            }
-
+    // ----- Preferences Tab -----
+    function renderPrefsPanel(container) {
+        container.innerHTML = '';
+        const scripts = Array.from(registry.values()).filter(s => s.prefs && s.active).sort((a,b) => a.name.localeCompare(b.name));
+
+        if (!scripts.length) {
+            container.innerHTML = '<div class="tsh-dash-empty">No scripts have registered preferences yet.<br>Scripts using the TSH API will appear here automatically.</div>';
+            return;
+        }
+
+        scripts.forEach(script => {
+            const section = document.createElement('div');
+            section.className = 'tsh-pref-section';
+            const header = document.createElement('div');
+            header.className = 'tsh-pref-header';
+            header.innerHTML = `<span>${script.icon || '⚙️'} ${escapeHtml(script.name)}</span>`;
+            section.appendChild(header);
+
+            const body = document.createElement('div');
+            body.className = 'tsh-pref-body';
+
+            script.prefs.fields.forEach(field => {
+                const wrap = document.createElement('label');
+                wrap.className = 'tsh-pref-field';
+                const label = document.createElement('span');
+                label.className = 'tsh-pref-label';
+                label.textContent = field.label || field.key;
+                wrap.appendChild(label);
+
+                let input;
+                if (field.type === 'toggle' || field.type === 'checkbox') {
+                    input = document.createElement('button');
+                    input.type = 'button';
+                    input.className = 'tsh-pref-toggle' + (script.prefs.values[field.key] ? ' active' : '');
+                    input.textContent = script.prefs.values[field.key] ? 'ON' : 'OFF';
+                    input.addEventListener('click', () => {
+                        script.prefs.values[field.key] = !script.prefs.values[field.key];
+                        input.textContent = script.prefs.values[field.key] ? 'ON' : 'OFF';
+                        input.classList.toggle('active', script.prefs.values[field.key]);
+                        if (script.prefs.onSave) script.prefs.onSave(script.prefs.values);
+                    });
+                } else if (field.type === 'select' && Array.isArray(field.options)) {
+                    input = document.createElement('select');
+                    input.className = 'tsh-pref-select';
+                    field.options.forEach(opt => {
+                        const o = document.createElement('option');
+                        o.value = opt.value !== undefined ? opt.value : opt;
+                        o.textContent = opt.label !== undefined ? opt.label : opt;
+                        if (script.prefs.values[field.key] == o.value) o.selected = true;
+                        input.appendChild(o);
+                    });
+                    input.addEventListener('change', () => {
+                        script.prefs.values[field.key] = input.value;
+                        if (script.prefs.onSave) script.prefs.onSave(script.prefs.values);
+                    });
+                } else {
+                    input = document.createElement('input');
+                    input.className = 'tsh-pref-input';
+                    input.type = field.type === 'number' ? 'number' : 'text';
+                    if (field.min !== undefined) input.min = field.min;
+                    if (field.max !== undefined) input.max = field.max;
+                    input.value = script.prefs.values[field.key] || '';
+                    input.addEventListener('change', () => {
+                        script.prefs.values[field.key] = field.type === 'number' ? Number(input.value) : input.value;
+                        if (script.prefs.onSave) script.prefs.onSave(script.prefs.values);
+                    });
+                }
+
+                wrap.appendChild(input);
+                body.appendChild(wrap);
+            });
+
+            section.appendChild(body);
+            container.appendChild(section);
+        });
+    }
+
+    // ----- Discovery Tab -----
+    function refreshDiscovery() {
+        const container = document.querySelector('#' + IDS.DASHBOARD + ' [data-panel="discover"]');
+        if (!container) return;
+        container.innerHTML = '';
+
+        const detected = scanForScripts().filter(d => !registry.has(d.id));
+
+        // Detected list
+        if (detected.length) {
+            const title = document.createElement('h3');
+            title.className = 'tsh-dash-subtitle';
+            title.textContent = `🔍 Detected ${detected.length} scattered UI element${detected.length===1?'':'s'}`;
+            container.appendChild(title);
+
+            const list = document.createElement('div');
+            list.className = 'tsh-discover-list';
+            detected.forEach(d => {
+                const row = document.createElement('div');
+                row.className = 'tsh-discover-row';
+                row.innerHTML = `
+                    <span class="tsh-discover-name">${escapeHtml(d.name)}</span>
+                    <code class="tsh-discover-sel">${escapeHtml(d.selector)}</code>
+                `;
+                const btn = document.createElement('button');
+                btn.className = 'tsh-discover-btn';
+                btn.textContent = 'Adopt';
+                btn.title = 'Hide original button and control from hub';
+                btn.addEventListener('click', () => {
+                    adoptDetection(d);
+                    refreshDiscovery();
+                });
+                row.appendChild(btn);
+                list.appendChild(row);
+            });
+            container.appendChild(list);
+        } else {
+            const empty = document.createElement('div');
+            empty.className = 'tsh-dash-empty';
+            empty.textContent = 'No scattered script UI detected on this page. All clean!';
+            container.appendChild(empty);
+        }
+
+        // Manual add
+        const manualBox = document.createElement('div');
+        manualBox.className = 'tsh-manual-box';
+        manualBox.innerHTML = '<h3 class="tsh-dash-subtitle">➕ Add Script Manually</h3>';
+        const form = document.createElement('div');
+        form.className = 'tsh-manual-form';
+        form.innerHTML = `
+            <input type="text" class="tsh-pref-input" placeholder="Script Name" id="tsh-manual-name">
+            <input type="text" class="tsh-pref-input" placeholder="Icon (emoji)" id="tsh-manual-icon" value="⚡">
+            <input type="text" class="tsh-pref-input" placeholder="CSS Selector to trigger (optional)" id="tsh-manual-sel">
+            <button class="tsh-discover-btn" id="tsh-manual-add">Add to Hub</button>
         `;
+        manualBox.appendChild(form);
+        container.appendChild(manualBox);
 
-        (document.head || document.documentElement).appendChild(style);
-
+        form.querySelector('#tsh-manual-add').addEventListener('click', () => {
+            const name = form.querySelector('#tsh-manual-name').value.trim();
+            const icon = form.querySelector('#tsh-manual-icon').value.trim() || '⚡';
+            const sel  = form.querySelector('#tsh-manual-sel').value.trim();
+            if (!name) return alert('Name is required');
+            const id = 'tsh-manual-' + Math.random().toString(36).slice(2, 7);
+            const entry = {
+                id, name, icon, source: 'manual', order: 3000,
+                open: () => {
+                    if (sel) {
+                        const el = document.querySelector(sel);
+                        if (el) el.click();
+                    }
+                }
+            };
+            if (sel) {
+                entry.detection = { selector: sel };
+                hideOriginal(sel);
+            }
+            registerScript(entry);
+            refreshDiscovery();
+            form.querySelector('#tsh-manual-name').value = '';
+            form.querySelector('#tsh-manual-sel').value = '';
+        });
     }
 
- 
+    function hideOriginal(selector) {
+        const sheet = document.getElementById(IDS.STYLE);
+        if (sheet && selector) {
+            sheet.textContent += `\n${selector} { display: none !important; }`;
+        }
+    }
+    function unhideOriginal(selector) {
+        // Brute force: rebuild stylesheet without this rule
+        // In practice, just removing the rule is complex; we re-install styles
+        // For simplicity, we rely on the fact that unadopting is rare and
+        // a page refresh restores everything.
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
 
     // =========================================================================
+    // DESKTOP & MOBILE ROW CREATION
+    // =========================================================================
+    function createNativeRow(template) {
+        const row = template.cloneNode(true);
+        row.id = IDS.ROW;
+        row.classList.remove('active___xlAlO');
+        const link = row.querySelector('a');
+        if (link) {
+            link.removeAttribute('href');
+            link.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); toggleMenu(); });
+        }
+        const iconWrap = row.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
+        if (iconWrap) {
+            if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') iconWrap.replaceWith(createHubIcon());
+            else { iconWrap.innerHTML = ''; iconWrap.appendChild(createHubIcon()); }
+        }
+        const nameEl = row.querySelector('[class*="linkName"]');
+        if (nameEl) nameEl.textContent = `Script Hub v${HUB_VERSION}`;
+        else {
+            const spans = row.querySelectorAll('span');
+            for (const s of spans) {
+                if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
+                    s.textContent = `Script Hub v${HUB_VERSION}`; break;
+                }
+            }
+        }
+        row.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
+        row.setAttribute('role', 'button');
+        row.setAttribute('tabindex', '0');
+        row.setAttribute('aria-haspopup', 'menu');
+        row.setAttribute('aria-expanded', 'false');
+        row.title = 'Torn Script Hub';
+        row.style.cursor = 'pointer';
+        row.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); toggleMenu(); });
+        row.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleMenu(); }
+            if (e.key === 'Escape') { closeMenu(); closeDashboard(); }
+        });
+        return row;
+    }
 
+    function createSwiperSlide(templateSlide) {
+        const slide = templateSlide.cloneNode(true);
+        slide.id = IDS.ROW;
+        slide.classList.remove('active___xlAlO');
+        const link = slide.querySelector('a');
+        if (link) {
+            link.removeAttribute('href');
+            link.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); toggleMenu(); });
+        }
+        const iconWrap = slide.querySelector('[class*="svgIconWrap"], [class*="defaultIcon"], svg, img');
+        if (iconWrap) {
+            if (iconWrap.tagName === 'SVG' || iconWrap.tagName === 'IMG') iconWrap.replaceWith(createHubIcon());
+            else { iconWrap.innerHTML = ''; iconWrap.appendChild(createHubIcon()); }
+        }
+        const nameEl = slide.querySelector('[class*="linkName"]');
+        if (nameEl) nameEl.textContent = 'Scripts';
+        else {
+            const spans = slide.querySelectorAll('span');
+            for (const s of spans) {
+                if (s.textContent && s.textContent.trim() && !s.querySelector('svg')) {
+                    s.textContent = 'Scripts'; break;
+                }
+            }
+        }
+        slide.querySelectorAll('[class*="amount"], [class*="badge"], [class*="count"], [class*="notification"], [class*="pill"]').forEach(el => el.remove());
+        slide.setAttribute('role', 'button');
+        slide.setAttribute('tabindex', '0');
+        slide.setAttribute('aria-haspopup', 'menu');
+        slide.setAttribute('aria-expanded', 'false');
+        slide.title = 'Torn Script Hub';
+        slide.style.cursor = 'pointer';
+        slide.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); toggleMenu(); });
+        slide.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleMenu(); }
+            if (e.key === 'Escape') { closeMenu(); closeDashboard(); }
+        });
+        return slide;
+    }
+
+    // =========================================================================
+    // STYLES
+    // =========================================================================
+    function installStyles() {
+        if (document.getElementById(IDS.STYLE)) return;
+        const style = document.createElement('style');
+        style.id = IDS.STYLE;
+        style.textContent = `
+            #tsh-sidebar-row .tsh-svg { width:18px !important; height:18px !important; display:block !important; }
+            #tsh-sidebar-row { cursor:pointer; }
+
+            .tsh-menu { position:fixed; z-index:2147483647; min-width:260px; max-width:340px; padding:6px; display:none; background:var(--tsh-bg,#f5f5f5); color:var(--tsh-text,#222); border:1px solid var(--tsh-border,#bbb); border-radius:8px; box-shadow:0 8px 28px rgba(0,0,0,.4); font-family:Arial,Helvetica,sans-serif; }
+            .tsh-menu.tsh-open { display:block; }
+            .tsh-item { width:100%; min-height:36px; display:flex; align-items:center; padding:7px 10px; margin:0; border:0; border-radius:5px; background:transparent; color:inherit; font:inherit; font-size:13px; text-align:left; cursor:pointer; }
+            .tsh-item:hover,.tsh-item:focus { background:var(--tsh-hover,rgba(0,0,0,.09)); outline:none; }
+            .tsh-item-manage { border-top:1px solid var(--tsh-border,#bbb); margin-top:4px; padding-top:9px; border-radius:0 0 5px 5px; font-weight:700; }
+            .tsh-item-icon { width:22px; margin-right:8px; text-align:center; opacity:.8; }
+            .tsh-item-text { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+            .tsh-item-version { margin-left:8px; opacity:.5; font-size:10px; }
+            .tsh-empty { padding:10px 12px; opacity:.55; font-size:12px; }
+            .tsh-divider { height:1px; background:var(--tsh-border,#bbb); margin:4px 0; opacity:.6; }
+
+            /* Dashboard */
+            .tsh-dashboard { position:fixed; inset:0; z-index:2147483646; display:none; align-items:center; justify-content:center; font-family:Arial,Helvetica,sans-serif; }
+            .tsh-dashboard.tsh-dash-open { display:flex; }
+            .tsh-dash-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.55); }
+            .tsh-dash-panel { position:relative; width:92vw; max-width:720px; max-height:85vh; display:flex; flex-direction:column; background:var(--tsh-bg,#f5f5f5); color:var(--tsh-text,#222); border-radius:12px; box-shadow:0 20px 60px rgba(0,0,0,.5); overflow:hidden; }
+            .tsh-dash-header { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid var(--tsh-border,#bbb); }
+            .tsh-dash-header h2 { margin:0; font-size:18px; }
+            .tsh-dash-ver { opacity:.5; font-size:12px; font-weight:400; }
+            .tsh-dash-close { width:32px; height:32px; border:0; border-radius:6px; background:transparent; color:inherit; font-size:18px; cursor:pointer; }
+            .tsh-dash-close:hover { background:var(--tsh-hover,rgba(0,0,0,.09)); }
+            .tsh-dash-tabs { display:flex; gap:4px; padding:8px 12px 0; border-bottom:1px solid var(--tsh-border,#bbb); background:rgba(0,0,0,.03); }
+            .tsh-dash-tab { padding:8px 14px; border:0; border-radius:6px 6px 0 0; background:transparent; color:inherit; font:inherit; font-size:13px; font-weight:600; cursor:pointer; opacity:.6; }
+            .tsh-dash-tab.active { background:var(--tsh-bg,#f5f5f5); opacity:1; box-shadow:0 -2px 8px rgba(0,0,0,.06); }
+            .tsh-dash-tab:hover { opacity:.9; }
+            .tsh-dash-body { flex:1; overflow-y:auto; padding:16px; }
+            .tsh-dash-panel-content { display:none; }
+            .tsh-dash-panel-content.active { display:block; }
+            .tsh-dash-empty { text-align:center; padding:40px 20px; opacity:.6; font-size:14px; line-height:1.6; }
+            .tsh-dash-subtitle { margin:0 0 12px; font-size:14px; opacity:.8; }
+
+            /* Launchpad Grid */
+            .tsh-dash-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:12px; }
+            .tsh-dash-card { position:relative; display:flex; flex-direction:column; align-items:center; padding:14px 10px; border-radius:10px; background:rgba(0,0,0,.04); border:1px solid var(--tsh-border,#bbb); cursor:pointer; transition:transform .08s,box-shadow .08s; }
+            .tsh-dash-card:hover { transform:translateY(-2px); box-shadow:0 4px 12px rgba(0,0,0,.12); }
+            .tsh-dash-card-icon { font-size:28px; margin-bottom:6px; }
+            .tsh-dash-card-name { font-weight:700; font-size:12px; text-align:center; word-break:break-word; }
+            .tsh-dash-card-ver { font-size:10px; opacity:.5; margin-top:2px; }
+            .tsh-dash-card-source { position:absolute; top:6px; right:6px; font-size:10px; opacity:.4; }
+            .tsh-dash-toggle { position:absolute; top:6px; left:6px; padding:2px 6px; border:0; border-radius:4px; background:#e74c3c; color:#fff; font-size:9px; font-weight:700; cursor:pointer; }
+            .tsh-dash-toggle.active { background:#27ae60; }
+
+            /* Preferences */
+            .tsh-pref-section { margin-bottom:16px; border:1px solid var(--tsh-border,#bbb); border-radius:8px; overflow:hidden; }
+            .tsh-pref-header { padding:10px 14px; background:rgba(0,0,0,.04); font-weight:700; font-size:13px; }
+            .tsh-pref-body { padding:12px 14px; }
+            .tsh-pref-field { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+            .tsh-pref-field:last-child { margin-bottom:0; }
+            .tsh-pref-label { font-size:12px; opacity:.9; flex:1; }
+            .tsh-pref-input { padding:6px 8px; border:1px solid var(--tsh-border,#bbb); border-radius:5px; background:var(--tsh-bg,#fff); color:var(--tsh-text,#222); font-size:12px; min-width:140px; }
+            .tsh-pref-select { padding:6px 8px; border:1px solid var(--tsh-border,#bbb); border-radius:5px; background:var(--tsh-bg,#fff); color:var(--tsh-text,#222); font-size:12px; min-width:140px; }
+            .tsh-pref-toggle { padding:4px 10px; border:0; border-radius:4px; background:#e74c3c; color:#fff; font-size:11px; font-weight:700; cursor:pointer; min-width:50px; }
+            .tsh-pref-toggle.active { background:#27ae60; }
+
+            /* Discovery */
+            .tsh-discover-list { display:flex; flex-direction:column; gap:8px; margin-bottom:20px; }
+            .tsh-discover-row { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:6px; background:rgba(0,0,0,.03); border:1px solid var(--tsh-border,#bbb); }
+            .tsh-discover-name { font-weight:700; font-size:12px; min-width:120px; }
+            .tsh-discover-sel { flex:1; font-size:11px; opacity:.6; font-family:monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+            .tsh-discover-btn { padding:5px 12px; border:0; border-radius:5px; background:#3498db; color:#fff; font-size:12px; font-weight:700; cursor:pointer; }
+            .tsh-discover-btn:hover { background:#2980b9; }
+            .tsh-manual-box { border-top:2px dashed var(--tsh-border,#bbb); padding-top:16px; margin-top:8px; }
+            .tsh-manual-form { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+
+            :root { --tsh-bg:#f5f5f5; --tsh-text:#222; --tsh-border:#bbb; --tsh-hover:rgba(0,0,0,.09); }
+            body.dark-mode { --tsh-bg:#252525; --tsh-text:#eee; --tsh-border:#4a4a4a; --tsh-hover:rgba(255,255,255,.10); }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    // =========================================================================
     // MOUNT
-
     // =========================================================================
-
     function mount() {
-
         if (!document.body) return false;
-
- 
-
-        // Clean up existing instances
-
         document.querySelectorAll('#' + IDS.ROW).forEach(el => el.remove());
-
         const oldMenu = document.getElementById(IDS.MENU);
-
         if (oldMenu) oldMenu.remove();
-
- 
 
         installStyles();
 
- 
-
         const calendar = document.getElementById('nav-calendar');
-
         const calendarSlide = calendar ? calendar.closest('.swiper-slide') : null;
-
         const swiperWrapper = calendarSlide ? calendarSlide.closest('.swiper-wrapper') : null;
-
         const canCloneDesktop = !!(calendar && calendar.parentNode && !calendarSlide);
 
- 
-
         let row;
-
         if (canCloneDesktop) {
-
             row = createNativeRow(calendar);
-
             calendar.parentNode.insertBefore(row, calendar.nextSibling);
-
             mountMode = 'row';
-
         } else if (calendarSlide && swiperWrapper) {
-
             row = createSwiperSlide(calendarSlide);
-
             swiperWrapper.insertBefore(row, calendarSlide.nextSibling);
-
             mountMode = 'swiper';
-
- 
-
-            // Update Swiper instance if reachable
-
             try {
-
                 const swiperContainer = swiperWrapper.closest('.swiper') || swiperWrapper.closest('.swiper-container');
-
                 if (swiperContainer && swiperContainer.swiper && typeof swiperContainer.swiper.update === 'function') {
-
                     swiperContainer.swiper.update();
-
                 }
-
-            } catch (e) {
-
-                console.warn('[Torn Script Hub] Swiper update failed:', e);
-
-            }
-
+            } catch (e) { console.warn('[TSH] Swiper update failed:', e); }
         } else {
-
-            console.warn('[Torn Script Hub] Cannot mount: #nav-calendar not found or not in a recognized menu structure.');
-
+            console.warn('[TSH] Cannot mount: #nav-calendar not found.');
             return false;
-
         }
-
- 
 
         const menu = createMenu();
-
         document.body.appendChild(menu);
-
         renderMenu();
 
- 
-
         if (!readyFired) {
-
             readyFired = true;
-
-            document.dispatchEvent(new CustomEvent(EVENTS.READY, {
-
-                detail: { version: HUB_VERSION }
-
-            }));
-
+            document.dispatchEvent(new CustomEvent(EVENTS.READY, { detail: { version: HUB_VERSION } }));
         }
-
         return true;
-
     }
 
- 
-
     // =========================================================================
-
     // WATCHER
-
     // =========================================================================
-
     function startSidebarWatcher() {
-
         let rafPending = false;
-
         let mountSuccess = false;
 
- 
-
         const desiredMode = () => {
-
             const calendar = document.getElementById('nav-calendar');
-
             const calendarSlide = calendar ? calendar.closest('.swiper-slide') : null;
-
             if (calendar && calendar.parentNode && !calendarSlide) return 'row';
-
             if (calendarSlide) return 'swiper';
-
             return null;
-
         };
-
- 
 
         const tryMount = () => {
-
             if (rafPending) return;
-
             rafPending = true;
-
             requestAnimationFrame(() => {
-
                 rafPending = false;
-
                 const existing = document.getElementById(IDS.ROW);
-
                 const missing = !existing || !document.body.contains(existing);
-
                 const mode = desiredMode();
-
- 
-
                 if (!mode) return;
-
- 
-
                 if (missing || mountMode !== mode) {
-
-                    if (mount()) {
-
-                        mountSuccess = true;
-
-                    }
-
+                    if (mount()) mountSuccess = true;
                 }
-
             });
-
         };
 
- 
-
-        if (document.body) {
-
-            mount();
-
-        } else {
-
+        if (document.body) mount();
+        else {
             const bodyWatcher = new MutationObserver(() => {
-
-                if (document.body) {
-
-                    bodyWatcher.disconnect();
-
-                    mount();
-
-                }
-
+                if (document.body) { bodyWatcher.disconnect(); mount(); }
             });
-
             bodyWatcher.observe(document.documentElement, { childList: true });
-
         }
 
- 
-
         const observer = new MutationObserver(tryMount);
-
         observer.observe(document.documentElement, { childList: true, subtree: true });
-
         window.addEventListener('resize', tryMount, { passive: true });
 
- 
-
         let attempts = 0;
-
         const timer = setInterval(() => {
-
-            if (mountSuccess || attempts++ > 60) {
-
-                clearInterval(timer);
-
-                return;
-
-            }
+            if (mountSuccess || attempts++ > 60) { clearInterval(timer); return; }
             tryMount();
         }, 400);
     }
+
+    // =========================================================================
+    // GLOBAL CLOSE HANDLERS
+    // =========================================================================
+    function onOutside(e) {
+        const row  = document.getElementById(IDS.ROW);
+        const menu = document.getElementById(IDS.MENU);
+        if (!row || !menu) return;
+        if (e.target !== row && !row.contains(e.target) && !menu.contains(e.target)) closeMenu();
+    }
+    document.addEventListener('click', onOutside, true);
+    document.addEventListener('touchstart', onOutside, { passive: true, capture: true });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { closeMenu(); closeDashboard(); }
+    });
+    window.addEventListener('resize', () => {
+        const menu = document.getElementById(IDS.MENU);
+        if (menu && menu.classList.contains('tsh-open')) positionMenu();
+    });
+    window.addEventListener('scroll', () => {
+        const menu = document.getElementById(IDS.MENU);
+        if (menu && menu.classList.contains('tsh-open')) positionMenu();
+    }, true);
+
     // =========================================================================
     // START
     // =========================================================================
     drainQueue();
     if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', startSidebarWatcher, { once: true });
+        document.addEventListener('DOMContentLoaded', startSidebarWatcher, { once: true });
     } else {
-    startSidebarWatcher();
+        startSidebarWatcher();
     }
 })();
