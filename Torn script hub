@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.1
+// @version      1.4.0
 // @description  A hub for your Torn scripts that is currently duct-taped together and running on sheer willpower. Things might break, dragons might appear, but at least it's trying. Work in progress!
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -16,10 +16,17 @@
     'use strict';
 
     // =========================================================================
-    // TORN SCRIPT HUB  v1.3.1
+    // TORN SCRIPT HUB  v1.4.0
     //
     // FULL CHANGELOG
     // -------------------------------------------------------------------------
+    // v1.4.0 - Real PDA/mobile support instead of hiding the row. #nav-calendar
+    //          is only cloned when it's outside Swiper's managed DOM (desktop);
+    //          when it's inside a .swiper-slide (mobile/tablet), we skip the
+    //          clone-and-insert entirely and build a small self-contained
+    //          floating pill instead, so we never write into Swiper's own
+    //          slide list. Menu positioning is now aware of which mode mounted.
+    //
     // v1.3.1 - Desktop left completely untouched (perfect). PDA: hide the
     //          cloned row on narrow / mobile layouts so the broken second
     //          icon row disappears. No other desktop changes.
@@ -44,7 +51,7 @@
     //   }));
     // =========================================================================
 
-    const HUB_VERSION = '1.3.1';
+    const HUB_VERSION = '1.4.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -58,6 +65,7 @@
 
     const registry = new Map();
     let readyFired = false;
+    let mountMode = 'row'; // 'row' (cloned desktop item) | 'fallback' (self-contained pill)
 
     // =========================================================================
     // QUEUE
@@ -218,8 +226,44 @@
     }
 
     // =========================================================================
-    // MENU
+    // FALLBACK ROW - self-contained pill, used whenever #nav-calendar lives
+    // inside a .swiper-slide (mobile/tablet). We never clone-and-insert into
+    // Swiper's own managed slide list; Swiper doesn't know about a node added
+    // that way and its slide-count/position math can desync even when nothing
+    // looks visibly wrong. Building an independent element sidesteps that.
     // =========================================================================
+    function createFallbackRow() {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.id = IDS.ROW;
+        row.className = 'tsh-fallback-row';
+        row.title = 'Torn Script Hub';
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-haspopup', 'menu');
+        row.setAttribute('aria-expanded', 'false');
+
+        row.appendChild(createHubIcon());
+
+        const label = document.createElement('span');
+        label.className = 'tsh-fallback-label';
+        label.textContent = 'Scripts';
+        row.appendChild(label);
+
+        row.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleMenu();
+        });
+        row.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggleMenu();
+            }
+            if (e.key === 'Escape') closeMenu();
+        });
+
+        return row;
+    }
     function getSortedScripts() {
         return Array.from(registry.values()).sort((a, b) => {
             if (a.order !== b.order) return a.order - b.order;
@@ -290,16 +334,25 @@
 
         const rect = row.getBoundingClientRect();
         const menuWidth = menu.offsetWidth || 240;
+        const menuHeight = menu.offsetHeight || 200;
 
-        let left = rect.right + 8;
-        if (left + menuWidth > window.innerWidth - 10) {
-            left = rect.left - menuWidth - 8;
-        }
-        left = Math.max(8, left);
+        let left, top;
+        if (mountMode === 'fallback') {
+            left = rect.right - menuWidth;
+            left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
+            top = rect.top - menuHeight - 8;
+            if (top < 8) top = rect.bottom + 8;
+        } else {
+            left = rect.right + 8;
+            if (left + menuWidth > window.innerWidth - 10) {
+                left = rect.left - menuWidth - 8;
+            }
+            left = Math.max(8, left);
 
-        let top = rect.top;
-        if (top + 280 > window.innerHeight) {
-            top = Math.max(8, window.innerHeight - 300);
+            top = rect.top;
+            if (top + 280 > window.innerHeight) {
+                top = Math.max(8, window.innerHeight - 300);
+            }
         }
 
         menu.style.left = Math.round(left) + 'px';
@@ -364,19 +417,32 @@
                 display: block !important;
             }
 
-            /* ===== PDA / mobile: hide the broken top-bar clone ===== */
-            /* Desktop left sidebar is never affected by these rules. */
-            @media (max-width: 1000px) {
-                #tsh-sidebar-row {
-                    display: none !important;
-                }
+            /* ===== PDA / mobile fallback pill ===== */
+            /* Used only when #nav-calendar is inside a .swiper-slide - the
+               desktop clone-and-insert path is never affected by this. */
+            #tsh-sidebar-row.tsh-fallback-row {
+                position: fixed;
+                z-index: 99998;
+                right: 10px;
+                bottom: 14px;
+                display: inline-flex;
+                align-items: center;
+                gap: 7px;
+                min-height: 34px;
+                padding: 0 10px;
+                border: 0;
+                border-radius: 8px;
+                background: rgba(24,24,24,.9);
+                color: #eee;
+                box-shadow: 0 6px 18px rgba(0,0,0,.4);
+                font: 700 11px/1.2 Arial, sans-serif;
+                cursor: pointer;
             }
-            /* Extra safety for Torn's own responsive classes */
-            body:not(.with-sidebar) #tsh-sidebar-row,
-            .areas-mobile #tsh-sidebar-row,
-            [class*="areas-mobile"] #tsh-sidebar-row {
-                display: none !important;
+            #tsh-sidebar-row.tsh-fallback-row .tsh-svg {
+                width: 16px !important;
+                height: 16px !important;
             }
+            .tsh-fallback-label { white-space: nowrap; }
 
             /* Dropdown */
             .tsh-menu {
@@ -437,7 +503,10 @@
     }
 
     // =========================================================================
-    // MOUNT – identical to the perfect v1.3.0 desktop logic
+    // MOUNT - desktop clones #nav-calendar (unchanged, perfect). Mobile/tablet
+    // never touches Swiper's DOM: if #nav-calendar is inside a .swiper-slide,
+    // we skip the clone-and-insert path entirely and mount the self-contained
+    // fallback pill instead.
     // =========================================================================
     function mount() {
         if (!document.body) return false;
@@ -446,13 +515,21 @@
         const oldMenu = document.getElementById(IDS.MENU);
         if (oldMenu) oldMenu.remove();
 
-        const calendar = document.getElementById('nav-calendar');
-        if (!calendar || !calendar.parentNode) return false;
-
         installStyles();
 
-        const row = createNativeRow(calendar);
-        calendar.parentNode.insertBefore(row, calendar.nextSibling);
+        const calendar = document.getElementById('nav-calendar');
+        const canCloneDesktop = !!(calendar && calendar.parentNode && !calendar.closest('.swiper-slide'));
+
+        let row;
+        if (canCloneDesktop) {
+            row = createNativeRow(calendar);
+            calendar.parentNode.insertBefore(row, calendar.nextSibling);
+            mountMode = 'row';
+        } else {
+            row = createFallbackRow();
+            document.body.appendChild(row);
+            mountMode = 'fallback';
+        }
 
         const all = document.querySelectorAll('#' + IDS.ROW);
         if (all.length > 1) {
@@ -478,13 +555,19 @@
     // =========================================================================
     function startSidebarWatcher() {
         let rafPending = false;
+        const desiredMode = () => {
+            const calendar = document.getElementById('nav-calendar');
+            const canCloneDesktop = !!(calendar && calendar.parentNode && !calendar.closest('.swiper-slide'));
+            return canCloneDesktop ? 'row' : 'fallback';
+        };
         const tryMount = () => {
             if (rafPending) return;
             rafPending = true;
             requestAnimationFrame(() => {
                 rafPending = false;
                 const existing = document.getElementById(IDS.ROW);
-                if (!existing || !document.body.contains(existing)) {
+                const missing = !existing || !document.body.contains(existing);
+                if (missing || mountMode !== desiredMode()) {
                     mount();
                 }
             });
@@ -504,6 +587,7 @@
 
         const observer = new MutationObserver(tryMount);
         observer.observe(document.documentElement, { childList: true, subtree: true });
+        window.addEventListener('resize', tryMount, { passive: true });
 
         let attempts = 0;
         const timer = setInterval(() => {
