@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      2.9.8
-// @description  Aggregates your active Item Market listings into an easy-to-read summary with listing totals, market values and buyback values.
+// @version      3.0.0
+// @description  Aggregates your active Item Market listings into an easy-to-read summary. Hub-integrated with ON/OFF control.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @grant        GM_setValue
@@ -10,46 +10,80 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
-// @downloadURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.user.js
-// @updateURL https://update.greasyfork.org/scripts/585434/Item%20Market%20Portfolio.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     /**************************************************************************
-     * Item Market Portfolio
-     * ------------------------------------------------------------------------
-     * Sections:
-     *  01. Constants
-     *  02. Runtime State
-     *  03. Styles
-     *  04. Utilities
-     *  05. API Helpers
-     *  06. Local Cache
-     *  07. Data Loading
-     *  08. Portfolio Aggregation
-     *  09. UI Rendering
-     *  10. Event Wiring
-     *  11. App Bootstrap
+     * 00. Hub Integration
      **************************************************************************/
+    const HUB_ID = 'item-market-portfolio';
+    const ENABLED_KEY = 'imp_hub_enabled';
+    let enabled = localStorage.getItem(ENABLED_KEY) !== 'false';
+
+    function isHubPresent() {
+        return !!document.getElementById('tsh-sidebar-row');
+    }
+
+    function cleanup() {
+        document.getElementById('tm-market-fixed-toggle')?.remove();
+        document.getElementById('tm-summary-overlay')?.remove();
+    }
+
+    function registerWithHub() {
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+            detail: {
+                id: HUB_ID,
+                name: 'Item Market Portfolio',
+                version: SCRIPT_VERSION,
+                icon: '📊',
+                order: 300,
+                open: () => {
+                    if (!enabled) return;
+                    if (window.location.hash === TARGET_HASH) {
+                        const checkbox = document.getElementById('tm-toggle-checkbox');
+                        const overlay = document.getElementById('tm-summary-overlay');
+                        const toggle = document.getElementById('tm-market-fixed-toggle');
+                        if (checkbox) checkbox.checked = true;
+                        if (overlay) {
+                            overlay.style.display = 'flex';
+                            processMarketSummary({ forceRefresh: false });
+                        }
+                        if (toggle) toggle.style.display = 'none';
+                    } else {
+                        sessionStorage.setItem('imp_autoOpen', '1');
+                        window.location.href = '/page.php?sid=ItemMarket#/viewListing';
+                    }
+                },
+                prefs: {
+                    fields: [
+                        { key: 'enabled', type: 'toggle', label: 'Active', default: true }
+                    ],
+                    values: { enabled },
+                    onSave: (values) => {
+                        enabled = values.enabled;
+                        localStorage.setItem(ENABLED_KEY, enabled ? 'true' : 'false');
+                        if (!enabled) {
+                            cleanup();
+                        } else {
+                            monitorViewAndRoute();
+                        }
+                    }
+                }
+            }
+        }));
+    }
 
     /**************************************************************************
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '2.9.8';
+    const SCRIPT_VERSION = '3.0.0';
     const TARGET_HASH = '#/viewListing';
 
     const TORN_API_HOST = 'api.torn.com';
 
-    // Manual API settings page, and a "custom key" deep link that pre-selects
-    // only the permissions this script actually needs: the user's Item
-    // Market listings, and the (public) item catalog. Both selections must
-    // be listed explicitly — a custom key does NOT automatically include
-    // public selections, they still have to be checked. Full Access is NOT
-    // required. See https://tornapi.tornplayground.eu/ and Torn's own API
-    // docs for the addNewKey query-param format.
     const TORN_API_SETUP_URL = 'https://www.torn.com/preferences.php#tab=api';
     const TORN_CUSTOM_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey'
         + '&title=' + encodeURIComponent('Item Market Portfolio')
@@ -491,12 +525,6 @@
         return url.toString();
     }
 
-    // Defense-in-depth: the `next` pagination link comes from the API
-    // response body, not a hardcoded URL. @connect should already restrict
-    // GM_xmlhttpRequest to api.torn.com, but we also verify the hostname
-    // ourselves before ever attaching the user's API key to a URL, so a
-    // malformed or unexpected `next` link can never smuggle the key
-    // somewhere else.
     function ensureApiKeyInNextUrl(nextUrl) {
         const url = new URL(nextUrl, API.BASE);
         if (url.hostname !== TORN_API_HOST) {
@@ -528,7 +556,6 @@
             });
         });
     }
-
 
     function isRateLimitError(response) {
         const message = String(response?.error?.error || '').toLowerCase();
@@ -795,10 +822,6 @@
 
             const info = itemsDB[itemId] || {};
             const quantity = Number(listing.amount || 1);
-            // listing.price is the PER-UNIT ask price (same convention as
-            // average_price below), so it must be multiplied by quantity to
-            // get the stack's total — previously this used the raw price
-            // as-is, which badly undercounted any listing with amount > 1.
             const totalListed = Number(listing.price || 0) * quantity;
 
             const perUnitMarketValue = listing.average_price !== undefined && listing.average_price !== null
@@ -1134,11 +1157,6 @@
     }
 
     function watchForHeaderAndRelocate(toggleWrap) {
-        // Torn's SPA may not have rendered the header yet at the moment this
-        // script runs. Rather than giving up after one look (which left the
-        // toggle stuck in the fixed bottom-right fallback position), keep
-        // watching the DOM until the header shows up, then move the toggle
-        // into place.
         const observer = new MutationObserver(() => {
             if (relocateToggleIntoHeader(toggleWrap)) {
                 observer.disconnect();
@@ -1147,71 +1165,72 @@
         });
 
         observer.observe(document.body, { childList: true, subtree: true });
-
-        // Safety timeout: stop watching after 15s so this doesn't run
-        // forever if the header never appears (e.g. Torn changed the page).
         setTimeout(() => observer.disconnect(), 15000);
     }
 
     function ensureElementsExist() {
-        if (document.getElementById('tm-market-fixed-toggle')) return;
+        if (!enabled) return;
 
-        const toggleWrap = document.createElement('div');
-        toggleWrap.id = 'tm-market-fixed-toggle';
-        toggleWrap.innerHTML = `
-            <label class="tm-switch">
-                <input type="checkbox" id="tm-toggle-checkbox">
-                <span class="tm-slider"></span>
-            </label>
-            <span>My Listings Summary</span>
-            <span class="tm-version">v${SCRIPT_VERSION}</span>
-        `;
-
-        const headerEl = findItemMarketHeader();
-        if (headerEl) {
-            toggleWrap.classList.add('tm-inline-toggle');
-            headerEl.insertAdjacentElement('afterend', toggleWrap);
-        } else {
-            // Fall back to fixed positioning for now, but keep watching for
-            // the header so the toggle can hop into place once it renders.
-            document.body.appendChild(toggleWrap);
-            watchForHeaderAndRelocate(toggleWrap);
+        // Create overlay if not exists
+        let overlay = document.getElementById('tm-summary-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'tm-summary-overlay';
+            overlay.innerHTML = `
+                <div class="tm-header">
+                    <div class="tm-header-title">
+                        <span>Item Market Portfolio</span>
+                        <span class="tm-header-version">v${SCRIPT_VERSION}</span>
+                    </div>
+                    <div class="tm-header-actions">
+                        <span class="tm-gear" id="tm-settings-btn" title="API settings">&#9881;</span>
+                        <span class="tm-close" id="tm-close-overlay">&times;</span>
+                    </div>
+                </div>
+                <div class="tm-body" id="tm-overlay-body">Initializing...</div>
+            `;
+            document.body.appendChild(overlay);
+            document.getElementById('tm-close-overlay').addEventListener('click', closeOverlay);
+            document.getElementById('tm-settings-btn').addEventListener('click', renderSettingsView);
         }
 
-        const overlay = document.createElement('div');
-        overlay.id = 'tm-summary-overlay';
-        overlay.innerHTML = `
-            <div class="tm-header">
-                <div class="tm-header-title">
-                    <span>Item Market Portfolio</span>
-                    <span class="tm-header-version">v${SCRIPT_VERSION}</span>
-                </div>
-                <div class="tm-header-actions">
-                    <span class="tm-gear" id="tm-settings-btn" title="API settings">&#9881;</span>
-                    <span class="tm-close" id="tm-close-overlay">&times;</span>
-                </div>
-            </div>
-            <div class="tm-body" id="tm-overlay-body">Initializing...</div>
-        `;
-        document.body.appendChild(overlay);
+        // Create toggle only if hub is NOT present
+        if (!isHubPresent() && !document.getElementById('tm-market-fixed-toggle')) {
+            const toggleWrap = document.createElement('div');
+            toggleWrap.id = 'tm-market-fixed-toggle';
+            toggleWrap.innerHTML = `
+                <label class="tm-switch">
+                    <input type="checkbox" id="tm-toggle-checkbox">
+                    <span class="tm-slider"></span>
+                </label>
+                <span>My Listings Summary</span>
+                <span class="tm-version">v${SCRIPT_VERSION}</span>
+            `;
 
-        const checkbox = document.getElementById('tm-toggle-checkbox');
-        checkbox.addEventListener('change', function () {
-            const displayOverlay = document.getElementById('tm-summary-overlay');
-            const toggle = document.getElementById('tm-market-fixed-toggle');
-
-            if (this.checked) {
-                displayOverlay.style.display = 'flex';
-                toggle.style.display = 'none';
-                processMarketSummary({ forceRefresh: false });
+            const headerEl = findItemMarketHeader();
+            if (headerEl) {
+                toggleWrap.classList.add('tm-inline-toggle');
+                headerEl.insertAdjacentElement('afterend', toggleWrap);
             } else {
-                displayOverlay.style.display = 'none';
-                toggle.style.display = 'inline-flex';
+                document.body.appendChild(toggleWrap);
+                watchForHeaderAndRelocate(toggleWrap);
             }
-        });
 
-        document.getElementById('tm-close-overlay').addEventListener('click', closeOverlay);
-        document.getElementById('tm-settings-btn').addEventListener('click', renderSettingsView);
+            const checkbox = document.getElementById('tm-toggle-checkbox');
+            checkbox.addEventListener('change', function () {
+                const displayOverlay = document.getElementById('tm-summary-overlay');
+                const toggle = document.getElementById('tm-market-fixed-toggle');
+
+                if (this.checked) {
+                    displayOverlay.style.display = 'flex';
+                    toggle.style.display = 'none';
+                    processMarketSummary({ forceRefresh: false });
+                } else {
+                    displayOverlay.style.display = 'none';
+                    toggle.style.display = 'inline-flex';
+                }
+            });
+        }
     }
 
     function closeOverlay() {
@@ -1221,14 +1240,33 @@
 
         if (checkbox) checkbox.checked = false;
         if (overlay) overlay.style.display = 'none';
-        if (toggle && window.location.hash === TARGET_HASH) toggle.style.display = 'inline-flex';
+        if (toggle && window.location.hash === TARGET_HASH && !isHubPresent()) toggle.style.display = 'inline-flex';
     }
 
     function monitorViewAndRoute() {
+        if (!enabled) {
+            cleanup();
+            return;
+        }
+
         if (window.location.hash === TARGET_HASH) {
             ensureElementsExist();
             const toggle = document.getElementById('tm-market-fixed-toggle');
             const overlay = document.getElementById('tm-summary-overlay');
+            const checkbox = document.getElementById('tm-toggle-checkbox');
+
+            // Auto-open from hub navigation
+            if (sessionStorage.getItem('imp_autoOpen') === '1') {
+                sessionStorage.removeItem('imp_autoOpen');
+                if (checkbox) checkbox.checked = true;
+                if (overlay) {
+                    overlay.style.display = 'flex';
+                    processMarketSummary({ forceRefresh: false });
+                }
+                if (toggle) toggle.style.display = 'none';
+                return;
+            }
+
             const isOpen = overlay && overlay.style.display === 'flex';
             if (toggle) toggle.style.display = isOpen ? 'none' : 'inline-flex';
         } else {
@@ -1247,6 +1285,8 @@
      **************************************************************************/
 
     async function processMarketSummary(options = {}) {
+        if (!enabled) return;
+
         const forceRefresh = Boolean(options.forceRefresh);
 
         if (!isValidApiKey(apiKey)) {
@@ -1286,5 +1326,13 @@
 
     window.addEventListener('hashchange', monitorViewAndRoute);
     monitorViewAndRoute();
+
+    // Hub integration
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', registerWithHub);
+    } else {
+        registerWithHub();
+    }
+    document.addEventListener('torn-script-hub:ready', registerWithHub);
 
 })();
