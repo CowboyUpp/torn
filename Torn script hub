@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.0.1
-// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, and help.
+// @version      2.1.0
+// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
@@ -13,7 +13,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '2.0.1';
+    const HUB_VERSION = '2.1.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -194,10 +194,6 @@
         row.title = 'Torn Script Hub';
         row.style.cursor = 'pointer';
 
-        // FIX #2: Removed redundant row-level click listener.
-        // The <a> tag inside the cloned row spans the full clickable area,
-        // so the link's click handler (with stopPropagation) is sufficient.
-        // Keeping only keyboard handler on the row for a11y.
         row.addEventListener('keydown', e => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -262,8 +258,6 @@
         slide.title = 'Torn Script Hub';
         slide.style.cursor = 'pointer';
 
-        // FIX #2: Same here — only keyboard handler on the slide itself.
-        // The <a> tag handles the tap/click.
         slide.addEventListener('keydown', e => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -506,82 +500,45 @@
                 <div class="tsh-dash-empty">
                     <div style="font-size:32px;margin-bottom:8px;">📭</div>
                     <strong>No scripts registered yet.</strong><br>
-                    Install a satellite script that supports the Hub, or add one manually below.
+                    Install a satellite script that supports the Hub.
                 </div>
             `;
-        } else {
-            const grid = document.createElement('div');
-            grid.className = 'tsh-dash-grid';
-            scripts.forEach(script => {
-                const card = document.createElement('div');
-                card.className = 'tsh-dash-card' + (script.active ? '' : ' tsh-dash-card-off');
-                card.title = script.active ? 'Click to run' : 'Turned off — enable below';
-                card.innerHTML = `
-                    <div class="tsh-dash-card-icon">${script.icon || '⚡'}</div>
-                    <div class="tsh-dash-card-name">${escapeHtml(script.name)}</div>
-                    ${script.version ? `<div class="tsh-dash-card-ver">v${escapeHtml(script.version)}</div>` : ''}
-                `;
-                if (script.active) {
-                    card.addEventListener('click', () => {
-                        try { script.open(); } catch (e) { console.error(e); }
-                    });
-                }
-
-                const toggle = document.createElement('button');
-                toggle.type = 'button';
-                toggle.className = 'tsh-dash-toggle' + (script.active ? ' active' : '');
-                toggle.textContent = script.active ? 'ON' : 'OFF';
-                toggle.title = script.active ? 'Click to disable' : 'Click to enable';
-                toggle.addEventListener('click', e => {
-                    e.stopPropagation();
-                    script.active = !script.active;
-                    renderDashboard();
-                    renderMenu();
-                });
-                card.appendChild(toggle);
-
-                grid.appendChild(card);
-            });
-            container.appendChild(grid);
+            return;
         }
 
-        const manual = document.createElement('div');
-        manual.className = 'tsh-manual-box';
-        manual.innerHTML = '<h3 class="tsh-dash-subtitle">➕ Add a Script Manually</h3>';
-        const form = document.createElement('div');
-        form.className = 'tsh-manual-form';
-        form.innerHTML = `
-            <input type="text" class="tsh-pref-input" placeholder="Script name" id="tsh-manual-name">
-            <input type="text" class="tsh-pref-input" placeholder="Icon (emoji)" id="tsh-manual-icon" value="⚡" maxlength="4">
-            <input type="text" class="tsh-pref-input" placeholder="CSS selector to click (optional)" id="tsh-manual-sel" title="If the script left a button on the page, paste its selector here. The Hub will click it for you.">
-            <button class="tsh-discover-btn" id="tsh-manual-add">Add to Hub</button>
-        `;
-        manual.appendChild(form);
-        container.appendChild(manual);
-
-        form.querySelector('#tsh-manual-add').addEventListener('click', () => {
-            const name = form.querySelector('#tsh-manual-name').value.trim();
-            const icon = form.querySelector('#tsh-manual-icon').value.trim() || '⚡';
-            const sel  = form.querySelector('#tsh-manual-sel').value.trim();
-            if (!name) {
-                shakeElement(form.querySelector('#tsh-manual-name'));
-                return;
+        const grid = document.createElement('div');
+        grid.className = 'tsh-dash-grid';
+        scripts.forEach(script => {
+            const card = document.createElement('div');
+            card.className = 'tsh-dash-card' + (script.active ? '' : ' tsh-dash-card-off');
+            card.title = script.active ? 'Click to run' : 'Turned off';
+            card.innerHTML = `
+                <div class="tsh-dash-card-icon">${script.icon || '⚡'}</div>
+                <div class="tsh-dash-card-name">${escapeHtml(script.name)}</div>
+                ${script.version ? `<div class="tsh-dash-card-ver">v${escapeHtml(script.version)}</div>` : ''}
+            `;
+            if (script.active) {
+                card.addEventListener('click', () => {
+                    try { script.open(); } catch (e) { console.error(e); }
+                });
             }
-            const id = 'tsh-manual-' + Math.random().toString(36).slice(2, 7);
-            registerScript({
-                id, name, icon, order: 3000, active: true,
-                open: () => {
-                    if (sel) {
-                        const el = document.querySelector(sel);
-                        if (el) el.click();
-                        else console.warn('[TSH] Manual selector not found:', sel);
-                    }
-                }
+
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'tsh-dash-toggle' + (script.active ? ' active' : '');
+            toggle.textContent = script.active ? 'ON' : 'OFF';
+            toggle.title = script.active ? 'Disable' : 'Enable';
+            toggle.addEventListener('click', e => {
+                e.stopPropagation();
+                script.active = !script.active;
+                renderDashboard();
+                renderMenu();
             });
-            form.querySelector('#tsh-manual-name').value = '';
-            form.querySelector('#tsh-manual-sel').value = '';
-            renderDashboard();
+            card.appendChild(toggle);
+
+            grid.appendChild(card);
         });
+        container.appendChild(grid);
     }
 
     // ----- Preferences -----
@@ -596,7 +553,7 @@
                 <div class="tsh-dash-empty">
                     <div style="font-size:32px;margin-bottom:8px;">⚙️</div>
                     <strong>No settings available.</strong><br>
-                    Scripts that support inline preferences will appear here automatically.
+                    Active scripts with preferences will appear here.
                 </div>
             `;
             return;
@@ -676,21 +633,20 @@
         container.innerHTML = `
             <div class="tsh-help-wrap">
                 <details class="tsh-help-section" open>
-                    <summary>🎮 For Players — What is this?</summary>
+                    <summary>🎮 What is this?</summary>
                     <div class="tsh-help-body">
-                        <p><strong>Script Hub</strong> is a control center for Torn userscripts. Instead of every script adding its own random button to the page, they can register here for one clean launchpad.</p>
+                        <p><strong>Script Hub</strong> is a control center for Torn userscripts that support it.</p>
                         <ul>
-                            <li><strong>Launchpad:</strong> See all your scripts as cards. Click to run. Toggle ON/OFF to hide without uninstalling.</li>
-                            <li><strong>Preferences:</strong> If a script supports it, change its settings right here instead of hunting for a gear icon.</li>
-                            <li><strong>Adding scripts:</strong> Most "satellite" scripts auto-appear when installed. If one doesn't, use the <em>Add a Script Manually</em> form in the Launchpad tab.</li>
+                            <li><strong>Launchpad:</strong> Run scripts and toggle them on/off.</li>
+                            <li><strong>Preferences:</strong> Change script settings in one place.</li>
                         </ul>
                     </div>
                 </details>
 
                 <details class="tsh-help-section">
-                    <summary>🛠️ For Script Authors — How do I register?</summary>
+                    <summary>🛠️ For Script Authors</summary>
                     <div class="tsh-help-body">
-                        <p>Fire a single event from your script. The Hub handles the rest.</p>
+                        <p>Register your script with one event:</p>
                         <pre class="tsh-help-code">document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
   detail: {
     id: 'my-script',
@@ -698,31 +654,15 @@
     version: '1.0',
     icon: '🚀',
     order: 100,
-    open: () => { /* your main UI function */ },
+    open: () => { /* launch UI */ },
     prefs: {
       fields: [
-        { key: 'apiKey', type: 'text', label: 'API Key' },
-        { key: 'fastMode', type: 'toggle', label: 'Fast Mode', default: false }
+        { key: 'enabled', type: 'toggle', label: 'Enabled', default: true }
       ],
-      onSave: (values) => {
-        localStorage.setItem('my-prefs', JSON.stringify(values));
-      }
+      onSave: (values) => { /* persist */ }
     }
   }
 }));</pre>
-                        <p>To remove: <code>torn-script-hub:unregister</code> with the same <code>id</code>.</p>
-                    </div>
-                </details>
-
-                <details class="tsh-help-section">
-                    <summary>🩹 Troubleshooting</summary>
-                    <div class="tsh-help-body">
-                        <ul>
-                            <li><strong>"My script isn't showing up"</strong> — Check the browser console for errors. Make sure your script runs <em>after</em> the Hub (use <code>@run-at document-end</code> or a small delay).</li>
-                            <li><strong>"The mobile button looks weird"</strong> — The Hub tries to match Torn's native nav. If Torn updates their layout, the Hub may need an update too.</li>
-                            <li><strong>"I turned a script OFF and it still shows its own UI"</strong> — The Hub can only hide what it controls. Scripts that don't register with the Hub manage their own visibility.</li>
-                            <li><strong>"I added a manual script but clicking does nothing"</strong> — The CSS selector might be wrong. Open DevTools (F12), use the element picker, and copy the selector.</li>
-                        </ul>
                     </div>
                 </details>
             </div>
@@ -743,11 +683,11 @@
             <div class="tsh-onboard-card">
                 <div class="tsh-onboard-icon">🎯</div>
                 <h3>Welcome to Script Hub</h3>
-                <p>This is your new control center for Torn userscripts.</p>
+                <p>Your control center for Torn userscripts.</p>
                 <ul>
                     <li>📦 Scripts register here automatically</li>
                     <li>🎛️ One dashboard to launch everything</li>
-                    <li>⚙️ Inline preferences when scripts support them</li>
+                    <li>⚙️ Inline preferences when supported</li>
                 </ul>
                 <p class="tsh-onboard-hint">Look for <strong>Script Hub</strong> in your sidebar (desktop) or bottom nav (mobile).</p>
                 <button class="tsh-onboard-btn" id="tsh-onboard-dismiss">Got it!</button>
@@ -774,15 +714,6 @@
         const div = document.createElement('div');
         div.textContent = str;
         return div.innerHTML;
-    }
-
-    function shakeElement(el) {
-        if (!el) return;
-        el.style.transition = 'transform .1s';
-        el.style.transform = 'translateX(-4px)';
-        setTimeout(() => el.style.transform = 'translateX(4px)', 100);
-        setTimeout(() => el.style.transform = 'translateX(-4px)', 200);
-        setTimeout(() => el.style.transform = 'translateX(0)', 300);
     }
 
     // =========================================================================
@@ -824,7 +755,6 @@
             .tsh-empty { padding:10px 12px; opacity:.55; font-size:12px; }
             .tsh-divider { height:1px; background:var(--tsh-border,#bbb); margin:4px 0; opacity:.6; }
 
-            /* Dashboard */
             .tsh-dashboard { position:fixed; inset:0; z-index:2147483646; display:none; align-items:center; justify-content:center; font-family:Arial,Helvetica,sans-serif; }
             .tsh-dashboard.tsh-dash-open { display:flex; }
             .tsh-dash-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.55); }
@@ -844,8 +774,7 @@
             .tsh-dash-empty { text-align:center; padding:40px 20px; opacity:.6; font-size:14px; line-height:1.6; }
             .tsh-dash-subtitle { margin:0 0 12px; font-size:14px; opacity:.8; }
 
-            /* Launchpad Grid */
-            .tsh-dash-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:12px; margin-bottom:16px; }
+            .tsh-dash-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:12px; }
             .tsh-dash-card { position:relative; display:flex; flex-direction:column; align-items:center; padding:14px 10px; border-radius:10px; background:rgba(0,0,0,.04); border:1px solid var(--tsh-border,#bbb); cursor:pointer; transition:transform .08s,box-shadow .08s,opacity .15s; }
             .tsh-dash-card:hover { transform:translateY(-2px); box-shadow:0 4px 12px rgba(0,0,0,.12); }
             .tsh-dash-card-off { opacity:.5; cursor:default; }
@@ -855,7 +784,6 @@
             .tsh-dash-toggle { position:absolute; top:6px; right:6px; padding:2px 6px; border:0; border-radius:4px; background:#e74c3c; color:#fff; font-size:9px; font-weight:700; cursor:pointer; }
             .tsh-dash-toggle.active { background:#27ae60; }
 
-            /* Preferences */
             .tsh-pref-section { margin-bottom:16px; border:1px solid var(--tsh-border,#bbb); border-radius:8px; overflow:hidden; }
             .tsh-pref-header { padding:10px 14px; background:rgba(0,0,0,.04); font-weight:700; font-size:13px; }
             .tsh-pref-body { padding:12px 14px; }
@@ -867,13 +795,6 @@
             .tsh-pref-toggle { padding:4px 10px; border:0; border-radius:4px; background:#e74c3c; color:#fff; font-size:11px; font-weight:700; cursor:pointer; min-width:50px; }
             .tsh-pref-toggle.active { background:#27ae60; }
 
-            /* Manual Add */
-            .tsh-manual-box { border-top:2px dashed var(--tsh-border,#bbb); padding-top:16px; margin-top:8px; }
-            .tsh-manual-form { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-            .tsh-discover-btn { padding:6px 14px; border:0; border-radius:5px; background:#3498db; color:#fff; font-size:12px; font-weight:700; cursor:pointer; }
-            .tsh-discover-btn:hover { background:#2980b9; }
-
-            /* Help */
             .tsh-help-wrap { display:flex; flex-direction:column; gap:10px; }
             .tsh-help-section { border:1px solid var(--tsh-border,#bbb); border-radius:8px; overflow:hidden; }
             .tsh-help-section summary { padding:12px 14px; font-weight:700; font-size:13px; cursor:pointer; background:rgba(0,0,0,.03); }
@@ -884,7 +805,6 @@
             .tsh-help-body li { margin-bottom:4px; }
             .tsh-help-code { display:block; padding:10px; background:#1e1e1e; color:#d4d4d4; border-radius:6px; font-family:monospace; font-size:11px; white-space:pre-wrap; overflow-x:auto; margin:8px 0; }
 
-            /* Onboarding */
             .tsh-onboarding { position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-family:Arial,Helvetica,sans-serif; }
             .tsh-onboard-card { width:90vw; max-width:420px; padding:28px; background:var(--tsh-bg,#f5f5f5); color:var(--tsh-text,#222); border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.5); text-align:center; }
             .tsh-onboard-icon { font-size:48px; margin-bottom:8px; }
@@ -938,7 +858,7 @@
                 console.warn('[TSH] Swiper update failed:', e);
             }
         } else {
-            console.warn('[TSH] Cannot mount: #nav-calendar not found or not in a recognized menu structure.');
+            console.warn('[TSH] Cannot mount: #nav-calendar not found.');
             return false;
         }
 
