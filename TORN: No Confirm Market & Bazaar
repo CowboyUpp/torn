@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TORN: No Confirm Market & Bazaar
 // @namespace    cowboyup.torn.userscripts
-// @version      1.0.0
-// @description  Enables one-click purchases in the Torn Item Market and individual Bazaars.
+// @version      1.1.0
+// @description  Enables one-click purchases in the Torn Item Market and individual Bazaars. Hub-aware with toggle and timeout prefs.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://*.torn.com/page.php?sid=ItemMarket*
@@ -19,6 +19,12 @@
 (() => {
   'use strict';
 
+  // --- Config (mutable by hub) ---
+  const CONFIG = {
+    enabled: true,
+    confirmTimeout: 5000,
+  };
+
   const CONTROL_SELECTOR = [
     'button',
     'a',
@@ -27,7 +33,6 @@
     '[role="button"]',
   ].join(',');
 
-  const CONFIRM_TIMEOUT = 5000;
   let armed = false;
 
   function normalize(value) {
@@ -99,8 +104,6 @@
     for (const yesControl of controls) {
       if (!isYesControl(yesControl)) continue;
 
-      // Require a nearby No/Cancel control to avoid selecting an
-      // unrelated Yes button elsewhere on the page.
       let container = yesControl.parentElement;
 
       for (let depth = 0; container && depth < 5; depth += 1) {
@@ -151,13 +154,15 @@
       ],
     });
 
-    timeout = setTimeout(finish, CONFIRM_TIMEOUT);
+    timeout = setTimeout(finish, CONFIG.confirmTimeout);
     queueMicrotask(confirmPurchase);
   }
 
+  // --- Core listener (guarded by CONFIG.enabled) ---
   document.addEventListener(
     'click',
     (event) => {
+      if (!CONFIG.enabled) return;
       if (!event.isTrusted || !(event.target instanceof Element)) return;
 
       const control = event.target.closest(CONTROL_SELECTOR);
@@ -170,4 +175,62 @@
   );
 
   console.info('[No Confirm] Ready for Item Market and Bazaars');
+
+  // --- Hub Integration ---
+  function showToast(msg) {
+    const toast = document.createElement('div');
+    toast.textContent = msg;
+    toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);padding:10px 18px;background:rgba(0,0,0,.85);color:#fff;border-radius:8px;font-size:13px;z-index:99999;pointer-events:none;';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2500);
+  }
+
+  function registerWithHub() {
+    document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+      detail: {
+        id: 'no-confirm-market',
+        name: 'No Confirm Market',
+        version: '1.1.0',
+        icon: '⚡',
+        order: 100,
+        open: () => {
+          const status = CONFIG.enabled ? 'active' : 'disabled';
+          showToast(`⚡ No Confirm is ${status} on Market & Bazaar pages`);
+        },
+        prefs: {
+          fields: [
+            {
+              key: 'enabled',
+              type: 'toggle',
+              label: 'Auto-confirm purchases',
+              default: true,
+              hint: 'When ON, purchase confirmations are auto-clicked. When OFF, confirmations behave normally.'
+            },
+            {
+              key: 'confirmTimeout',
+              type: 'number',
+              label: 'Confirmation timeout (ms)',
+              default: 5000,
+              min: 1000,
+              max: 30000,
+              hint: 'How long to watch for a confirmation dialog before giving up.'
+            }
+          ],
+          onSave: (values) => {
+            CONFIG.enabled = values.enabled;
+            CONFIG.confirmTimeout = values.confirmTimeout;
+            console.info('[No Confirm] Settings updated:', CONFIG);
+          }
+        }
+      }
+    }));
+  }
+
+  // Register immediately and also when hub signals readiness
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', registerWithHub);
+  } else {
+    registerWithHub();
+  }
+  document.addEventListener('torn-script-hub:ready', registerWithHub);
 })();
