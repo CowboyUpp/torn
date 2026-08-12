@@ -1,21 +1,19 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.0.0
+// @version      2.0.1
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, and help.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.user.js
-// @updateURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const HUB_VERSION = '2.0.0';
+    const HUB_VERSION = '2.0.1';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -25,8 +23,7 @@
         ROW:       'tsh-sidebar-row',
         MENU:      'tsh-menu',
         STYLE:     'tsh-style',
-        DASHBOARD: 'tsh-dashboard',
-        BADGE:     'tsh-badge'
+        DASHBOARD: 'tsh-dashboard'
     });
     const STORAGE_KEY = 'tsh-onboarded';
 
@@ -113,7 +110,6 @@
         if (!script) return;
         registry.set(script.id, script);
         renderMenu();
-        updateBadge();
         if (dashboardOpen) renderDashboard();
     }
 
@@ -123,7 +119,6 @@
         if (!id) return;
         registry.delete(id);
         renderMenu();
-        updateBadge();
         if (dashboardOpen) renderDashboard();
     }
 
@@ -199,11 +194,10 @@
         row.title = 'Torn Script Hub';
         row.style.cursor = 'pointer';
 
-        row.addEventListener('click', e => {
-            e.preventDefault();
-            e.stopPropagation();
-            toggleMenu();
-        });
+        // FIX #2: Removed redundant row-level click listener.
+        // The <a> tag inside the cloned row spans the full clickable area,
+        // so the link's click handler (with stopPropagation) is sufficient.
+        // Keeping only keyboard handler on the row for a11y.
         row.addEventListener('keydown', e => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -268,11 +262,8 @@
         slide.title = 'Torn Script Hub';
         slide.style.cursor = 'pointer';
 
-        slide.addEventListener('click', e => {
-            e.preventDefault();
-            e.stopPropagation();
-            toggleMenu();
-        });
+        // FIX #2: Same here — only keyboard handler on the slide itself.
+        // The <a> tag handles the tap/click.
         slide.addEventListener('keydown', e => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -285,27 +276,6 @@
         });
 
         return slide;
-    }
-
-    // =========================================================================
-    // BADGE
-    // =========================================================================
-    function updateBadge() {
-        const row = document.getElementById(IDS.ROW);
-        if (!row) return;
-        let badge = document.getElementById(IDS.BADGE);
-        const count = getSortedScripts().length;
-        if (count === 0) {
-            if (badge) badge.remove();
-            return;
-        }
-        if (!badge) {
-            badge = document.createElement('span');
-            badge.id = IDS.BADGE;
-            badge.className = 'tsh-badge';
-            row.appendChild(badge);
-        }
-        badge.textContent = count > 9 ? '9+' : String(count);
     }
 
     // =========================================================================
@@ -567,7 +537,6 @@
                     script.active = !script.active;
                     renderDashboard();
                     renderMenu();
-                    updateBadge();
                 });
                 card.appendChild(toggle);
 
@@ -576,7 +545,6 @@
             container.appendChild(grid);
         }
 
-        // Manual add section
         const manual = document.createElement('div');
         manual.className = 'tsh-manual-box';
         manual.innerHTML = '<h3 class="tsh-dash-subtitle">➕ Add a Script Manually</h3>';
@@ -829,15 +797,6 @@
             #tsh-sidebar-row .tsh-svg { width:18px !important; height:18px !important; display:block !important; }
             #tsh-sidebar-row { cursor:pointer; position:relative; }
 
-            .tsh-badge {
-                position:absolute; top:2px; right:2px;
-                min-width:14px; height:14px; padding:0 3px;
-                display:flex; align-items:center; justify-content:center;
-                background:#e74c3c; color:#fff;
-                border-radius:7px; font-size:9px; font-weight:700;
-                pointer-events:none; z-index:1;
-            }
-
             .tsh-menu {
                 position:fixed; z-index:2147483647;
                 min-width:260px; max-width:340px; padding:6px;
@@ -986,7 +945,6 @@
         const menu = createMenu();
         document.body.appendChild(menu);
         renderMenu();
-        updateBadge();
 
         if (!readyFired) {
             readyFired = true;
@@ -1026,7 +984,6 @@
                 if (missing || mountMode !== mode) {
                     if (mount()) {
                         mountSuccess = true;
-                        // Show onboarding on first successful mount
                         setTimeout(showOnboarding, 600);
                     }
                 }
