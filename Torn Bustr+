@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.0.7
-// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping.
+// @version      1.1.0
+// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with Script Hub integration.
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -13,22 +13,22 @@
 // @grant        GM_openInTab
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
-// @downloadURL https://update.greasyfork.org/scripts/586532/Bustr%2B.user.js
-// @updateURL https://update.greasyfork.org/scripts/586532/Bustr%2B.meta.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.0.7';
+  const VERSION = '1.1.0';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
   const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlusLogs&user=log';
   const BUST_LOG_ID = 5360;
+  const HUB_ID = 'bustr-plus';
 
   const DEFAULT_SETTINGS = {
+    enabled: true,
     refreshSeconds: 60,
     freshBustScore: 128,
     decayDivisorHours: 10,
@@ -131,6 +131,95 @@
     store.del('apiKey');
   }
 
+  // =========================================================================
+  // HUB INTEGRATION
+  // =========================================================================
+  function isHubPresent() {
+    return !!document.getElementById('tsh-sidebar-row');
+  }
+
+  function registerWithHub() {
+    document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+      detail: {
+        id: HUB_ID,
+        name: 'BUSTR+',
+        version: VERSION,
+        icon: '🔓',
+        order: 200,
+        open: () => {
+          if (isJailPage()) {
+            renderPanel(true);
+          } else {
+            window.location.href = '/jailview.php#bustrPlus=openSettings';
+          }
+        },
+        prefs: {
+          fields: [
+            { key: 'enabled', type: 'toggle', label: 'Active', default: true },
+            { key: 'skipBustConfirm', type: 'toggle', label: 'Skip bust confirm', default: true },
+            { key: 'hideHardTargets', type: 'toggle', label: 'Hide hard targets', default: true },
+            { key: 'sortByHardness', type: 'toggle', label: 'Sort by hardness', default: true },
+            { key: 'hardnessLimit', type: 'number', label: 'Hardness ceiling', default: 460, min: 0 },
+            { key: 'refreshSeconds', type: 'number', label: 'Refresh seconds', default: 60, min: 15 }
+          ],
+          values: {
+            enabled: state.settings.enabled,
+            skipBustConfirm: state.settings.skipBustConfirm,
+            hideHardTargets: state.settings.hideHardTargets,
+            sortByHardness: state.settings.sortByHardness,
+            hardnessLimit: state.settings.hardnessLimit,
+            refreshSeconds: state.settings.refreshSeconds
+          },
+          onSave: (values) => {
+            const wasEnabled = state.settings.enabled;
+
+            state.settings.enabled = values.enabled;
+            state.settings.skipBustConfirm = values.skipBustConfirm;
+            state.settings.hideHardTargets = values.hideHardTargets;
+            state.settings.sortByHardness = values.sortByHardness;
+            state.settings.hardnessLimit = values.hardnessLimit;
+            state.settings.refreshSeconds = values.refreshSeconds;
+            saveSettings();
+
+            if (!wasEnabled && state.settings.enabled) {
+              loadBustData(false).then(() => {
+                renderAll();
+                startRefreshTimer();
+                scanExistingBustSuccesses();
+              });
+            } else if (wasEnabled && !state.settings.enabled) {
+              if (state.refreshTimerId) {
+                clearInterval(state.refreshTimerId);
+                state.refreshTimerId = null;
+              }
+              removeToggleButton();
+              removeSettingsPanel();
+              cleanupModifications();
+            } else if (state.settings.enabled) {
+              renderAll();
+              startRefreshTimer();
+            }
+          }
+        }
+      }
+    }));
+  }
+
+  function cleanupModifications() {
+    document.querySelectorAll('.bustr-plus-nav, .bustr-plus-pill').forEach(el => el.remove());
+    document.body.classList.remove('bustr-plus-green', 'bustr-plus-orange', 'bustr-plus-red');
+    document.querySelectorAll('.bustr-plus-hardness-col').forEach(el => el.remove());
+    document.querySelectorAll('.bustr-plus-hardness-wrap').forEach(el => el.remove());
+    document.querySelectorAll('.bustr-plus-hard-row, .bustr-plus-hidden-hard').forEach(row => {
+      row.classList.remove('bustr-plus-hard-row', 'bustr-plus-hidden-hard');
+      row.style.order = '';
+    });
+    document.querySelectorAll("a[href*='breakout']").forEach(link => unmarkQuickBustLink(link));
+  }
+
+  // =========================================================================
+  // STYLES
+  // =========================================================================
   function injectStyles() {
     if (document.getElementById('bustr-plus-style')) return;
     const style = document.createElement('style');
@@ -463,12 +552,16 @@
   }
 
   function updateToggleVisibility() {
-    if (isJailPage()) {
-      ensureToggleButton();
-    } else {
+    if (!isJailPage()) {
       removeToggleButton();
       removeSettingsPanel();
+      return;
     }
+    if (isHubPresent()) {
+      removeToggleButton();
+      return;
+    }
+    ensureToggleButton();
   }
 
   function startPathWatcher() {
@@ -834,11 +927,6 @@
     }
   }
 
-  // Tries GM_xmlhttpRequest first (desktop Tampermonkey/Greasemonkey), then
-  // Torn PDA's injected PDA_httpGet bridge, then a plain fetch as a last resort.
-  // Each tier has its own timeout guard: on PDA, GM_xmlhttpRequest can exist as a
-  // function without ever actually firing onload/onerror, so a "typeof === function"
-  // check alone is not enough to trust it.
   async function universalGet(url, timeoutMs = 8000) {
     const tiers = [];
     if (typeof GM_xmlhttpRequest === 'function') tiers.push(() => gmGet(url, timeoutMs));
@@ -851,7 +939,6 @@
         return await tier();
       } catch (err) {
         lastErr = err;
-        debugLog('network tier failed, trying next', err.message);
       }
     }
     throw lastErr || new Error('All Torn API request methods failed');
@@ -863,7 +950,7 @@
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        reject(new Error('GM_xmlhttpRequest timed out (possible inactive PDA stub)'));
+        reject(new Error('GM_xmlhttpRequest timed out'));
       }, timeoutMs);
       try {
         GM_xmlhttpRequest({
@@ -1220,7 +1307,6 @@
       sessionStorage.setItem('bustrReturnToJailArmedAt', String(Date.now()));
       sessionStorage.setItem('bustrLastQuickBustHref', bustHref);
       armReturnToJailWatcher();
-      debugLog('allowing Torn quick bust navigation', bustHref);
     }, true);
   }
 
@@ -1239,10 +1325,6 @@
       if (armedAt && Date.now() - armedAt > 2500) clearReturnToJailWatcher();
       return false;
     }
-    debugLog('returning to jail after Torn quick bust redirect', {
-      current: window.location.href,
-      bust: sessionStorage.getItem('bustrLastQuickBustHref'),
-    });
     clearReturnToJailWatcher();
     window.location.replace('/jailview.php');
     return true;
@@ -1340,6 +1422,10 @@
     injectStyles();
     updateToggleVisibility();
     renderApiKeyGenerator();
+    if (!state.settings.enabled) {
+      cleanupModifications();
+      return;
+    }
     await loadBustData(false);
     renderAll();
     scanExistingBustSuccesses();
@@ -1361,4 +1447,12 @@
     : new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
 
   ready.then(init).catch((err) => console.error(`${SCRIPT}:`, err));
+
+  // Register with hub
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', registerWithHub);
+  } else {
+    registerWithHub();
+  }
+  document.addEventListener('torn-script-hub:ready', registerWithHub);
 })();
