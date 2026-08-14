@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.2.2
-// @description  Add quality and bonus percentages to the item market, auction house, and bazaars.
+// @version      1.2.2-hub
+// @description  Add quality and bonus percentages to the item market, auction house, and bazaars. Now with Script Hub integration.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
@@ -92,6 +92,73 @@
         enableBazaar: true,
         debug: false // FIX: set true to log ambiguous matches, implausible quality values, and unrecognized stat types
     };
+
+    // =========================================================================
+    // SCRIPT HUB INTEGRATION
+    // =========================================================================
+    const HUB_ID = 'torn-openmarket';
+    const HUB_NAME = 'OpenMarket';
+    const HUB_VERSION = '1.2.2';
+    const HUB_ICON = '📊';
+
+    function registerWithHub() {
+        const detail = {
+            id: HUB_ID,
+            name: HUB_NAME,
+            version: HUB_VERSION,
+            icon: HUB_ICON,
+            order: 200,
+            // Passive overlay script: nothing to "open". A no-op keeps the row
+            // clickable without surprising the user.
+            open: () => {
+                /* eslint-disable-next-line no-console */
+                console.log('[OpenMarket] Running in the background on market pages.');
+            },
+            prefs: {
+                fields: [
+                    { key: 'enableItemMarket', type: 'toggle', label: 'Item Market', default: true },
+                    { key: 'enableAuctionHouse', type: 'toggle', label: 'Auction House', default: true },
+                    { key: 'enableBazaar', type: 'toggle', label: 'Bazaar', default: true },
+                    { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
+                ],
+                values: {
+                    enableItemMarket: CONFIG.enableItemMarket,
+                    enableAuctionHouse: CONFIG.enableAuctionHouse,
+                    enableBazaar: CONFIG.enableBazaar,
+                    debug: CONFIG.debug
+                },
+                onSave: (values) => {
+                    CONFIG.enableItemMarket = !!values.enableItemMarket;
+                    CONFIG.enableAuctionHouse = !!values.enableAuctionHouse;
+                    CONFIG.enableBazaar = !!values.enableBazaar;
+                    CONFIG.debug = !!values.debug;
+                    // Re-evaluate the current page so toggles take effect immediately.
+                    activateHandlerForCurrentUrl();
+                }
+            }
+        };
+
+        // Try event first (hub already loaded)...
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail }));
+
+        // ...then queue (hub not loaded yet, will drain on init).
+        if (typeof window !== 'undefined') {
+            const q = window.__tornScriptHubQueue || (window.__tornScriptHubQueue = []);
+            q.push(detail);
+        }
+    }
+
+    // If the Hub hasn't loaded yet, also listen for its READY event.
+    document.addEventListener('torn-script-hub:ready', registerWithHub, { once: true });
+
+    // Register immediately in case Hub is already ready (the event path above
+    // will be ignored if it already fired, but the queue path still works).
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', registerWithHub, { once: true });
+    } else {
+        registerWithHub();
+    }
+    // =========================================================================
 
     // FIX: caps memory growth and reduces the chance of price+stat collisions in matchToCache
     // by preventing the cache from accumulating indefinitely across a long scrolling session.
@@ -288,7 +355,6 @@
         if (percent <= 75) return colours[2];
         return colours[3];
     }
-
 
     // Helper function for selecting a specific element from the DOM.
     function qs(selector, parent = document) {
