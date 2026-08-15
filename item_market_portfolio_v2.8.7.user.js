@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      3.0.0
-// @description  Aggregates your active Item Market listings into an easy-to-read summary. Hub-integrated with ON/OFF control.
+// @version      3.0.2
+// @description  Aggregates your active Item Market listings into an easy-to-read summary. Hub-integrated with ON/OFF control and lifecycle-aware native fallback.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @grant        GM_setValue
@@ -21,14 +21,68 @@
     const HUB_ID = 'item-market-portfolio';
     const ENABLED_KEY = 'imp_hub_enabled';
     let enabled = localStorage.getItem(ENABLED_KEY) !== 'false';
+    let hubIsActive = false;  // true when hub is present AND controlling
 
     function isHubPresent() {
         return !!document.getElementById('tsh-sidebar-row');
     }
 
+    function detectHubState() {
+        const hubRow = document.getElementById('tsh-sidebar-row');
+        const wasActive = hubIsActive;
+        hubIsActive = !!(hubRow && !hubRow.classList.contains('tsh-disabled'));
+        if (wasActive !== hubIsActive) {
+            if (hubIsActive) hideNativeToggle();
+            else showNativeToggle();
+        }
+    }
+
+    function watchHubState() {
+        const hubRow = document.getElementById('tsh-sidebar-row');
+        if (!hubRow) {
+            // Hub not mounted yet — watch for it
+            const obs = new MutationObserver(() => {
+                if (document.getElementById('tsh-sidebar-row')) {
+                    obs.disconnect();
+                    detectHubState();
+                    watchHubState(); // start class watcher
+                }
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+            return;
+        }
+        // Watch for class changes on the hub row
+        const obs = new MutationObserver(detectHubState);
+        obs.observe(hubRow, { attributes: true, attributeFilter: ['class'] });
+    }
+
     function cleanup() {
         document.getElementById('tm-market-fixed-toggle')?.remove();
         document.getElementById('tm-summary-overlay')?.remove();
+    }
+
+    function showNativeToggle() {
+        // Ensure toggle exists before showing
+        if (!document.getElementById('tm-market-fixed-toggle')) {
+            createNativeToggle();
+        }
+        const toggle = document.getElementById('tm-market-fixed-toggle');
+        if (!toggle) return;
+        toggle.style.display = 'inline-flex';
+        const headerEl = findItemMarketHeader();
+        if (headerEl) {
+            toggle.classList.add('tm-inline-toggle');
+            if (toggle.parentElement !== headerEl.parentElement) {
+                headerEl.insertAdjacentElement('afterend', toggle);
+            }
+        } else {
+            toggle.classList.remove('tm-inline-toggle');
+        }
+    }
+
+    function hideNativeToggle() {
+        const toggle = document.getElementById('tm-market-fixed-toggle');
+        if (toggle) toggle.style.display = 'none';
     }
 
     function registerWithHub() {
@@ -56,6 +110,12 @@
                         window.location.href = '/page.php?sid=ItemMarket#/viewListing';
                     }
                 },
+                close: () => {
+                    // Hub disabled this script individually — restore native
+                    showNativeToggle();
+                    const overlay = document.getElementById('tm-summary-overlay');
+                    if (overlay) overlay.style.display = 'none';
+                },
                 prefs: {
                     fields: [
                         { key: 'enabled', type: 'toggle', label: 'Active', default: true }
@@ -79,7 +139,7 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '3.0.0';
+    const SCRIPT_VERSION = '3.0.2';
     const TARGET_HASH = '#/viewListing';
 
     const TORN_API_HOST = 'api.torn.com';
@@ -1168,8 +1228,50 @@
         setTimeout(() => observer.disconnect(), 15000);
     }
 
+    function createNativeToggle() {
+        if (document.getElementById('tm-market-fixed-toggle')) return;
+
+        const toggleWrap = document.createElement('div');
+        toggleWrap.id = 'tm-market-fixed-toggle';
+        toggleWrap.innerHTML = `
+            <label class="tm-switch">
+                <input type="checkbox" id="tm-toggle-checkbox">
+                <span class="tm-slider"></span>
+            </label>
+            <span>My Listings Summary</span>
+            <span class="tm-version">v${SCRIPT_VERSION}</span>
+        `;
+
+        const headerEl = findItemMarketHeader();
+        if (headerEl) {
+            toggleWrap.classList.add('tm-inline-toggle');
+            headerEl.insertAdjacentElement('afterend', toggleWrap);
+        } else {
+            document.body.appendChild(toggleWrap);
+            watchForHeaderAndRelocate(toggleWrap);
+        }
+
+        const checkbox = document.getElementById('tm-toggle-checkbox');
+        checkbox.addEventListener('change', function () {
+            const displayOverlay = document.getElementById('tm-summary-overlay');
+            const toggle = document.getElementById('tm-market-fixed-toggle');
+
+            if (this.checked) {
+                displayOverlay.style.display = 'flex';
+                toggle.style.display = 'none';
+                processMarketSummary({ forceRefresh: false });
+            } else {
+                displayOverlay.style.display = 'none';
+                toggle.style.display = 'inline-flex';
+            }
+        });
+    }
+
     function ensureElementsExist() {
         if (!enabled) return;
+
+        // Sync hub state from DOM (catches cases where we missed the event)
+        detectHubState();
 
         // Create overlay if not exists
         let overlay = document.getElementById('tm-summary-overlay');
@@ -1194,43 +1296,12 @@
             document.getElementById('tm-settings-btn').addEventListener('click', renderSettingsView);
         }
 
-        // Create toggle only if hub is NOT present
-        if (!isHubPresent() && !document.getElementById('tm-market-fixed-toggle')) {
-            const toggleWrap = document.createElement('div');
-            toggleWrap.id = 'tm-market-fixed-toggle';
-            toggleWrap.innerHTML = `
-                <label class="tm-switch">
-                    <input type="checkbox" id="tm-toggle-checkbox">
-                    <span class="tm-slider"></span>
-                </label>
-                <span>My Listings Summary</span>
-                <span class="tm-version">v${SCRIPT_VERSION}</span>
-            `;
+        // ALWAYS create native toggle (lifecycle will show/hide it)
+        createNativeToggle();
 
-            const headerEl = findItemMarketHeader();
-            if (headerEl) {
-                toggleWrap.classList.add('tm-inline-toggle');
-                headerEl.insertAdjacentElement('afterend', toggleWrap);
-            } else {
-                document.body.appendChild(toggleWrap);
-                watchForHeaderAndRelocate(toggleWrap);
-            }
-
-            const checkbox = document.getElementById('tm-toggle-checkbox');
-            checkbox.addEventListener('change', function () {
-                const displayOverlay = document.getElementById('tm-summary-overlay');
-                const toggle = document.getElementById('tm-market-fixed-toggle');
-
-                if (this.checked) {
-                    displayOverlay.style.display = 'flex';
-                    toggle.style.display = 'none';
-                    processMarketSummary({ forceRefresh: false });
-                } else {
-                    displayOverlay.style.display = 'none';
-                    toggle.style.display = 'inline-flex';
-                }
-            });
-        }
+        // Apply current visibility based on hub state
+        if (hubIsActive) hideNativeToggle();
+        else showNativeToggle();
     }
 
     function closeOverlay() {
@@ -1240,7 +1311,7 @@
 
         if (checkbox) checkbox.checked = false;
         if (overlay) overlay.style.display = 'none';
-        if (toggle && window.location.hash === TARGET_HASH && !isHubPresent()) toggle.style.display = 'inline-flex';
+        if (toggle && window.location.hash === TARGET_HASH && !hubIsActive) toggle.style.display = 'inline-flex';
     }
 
     function monitorViewAndRoute() {
@@ -1268,7 +1339,7 @@
             }
 
             const isOpen = overlay && overlay.style.display === 'flex';
-            if (toggle) toggle.style.display = isOpen ? 'none' : 'inline-flex';
+            if (toggle) toggle.style.display = (isOpen || hubIsActive) ? 'none' : 'inline-flex';
         } else {
             const toggle = document.getElementById('tm-market-fixed-toggle');
             const overlay = document.getElementById('tm-summary-overlay');
@@ -1325,14 +1396,34 @@
     }
 
     window.addEventListener('hashchange', monitorViewAndRoute);
-    monitorViewAndRoute();
 
-    // Hub integration
+    // Hub integration with lifecycle awareness
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', registerWithHub);
+        document.addEventListener('DOMContentLoaded', () => {
+            detectHubState();
+            watchHubState();
+            registerWithHub();
+            monitorViewAndRoute();
+        });
     } else {
+        detectHubState();
+        watchHubState();
         registerWithHub();
+        monitorViewAndRoute();
     }
-    document.addEventListener('torn-script-hub:ready', registerWithHub);
+    document.addEventListener('torn-script-hub:ready', () => {
+        hubIsActive = true;
+        hideNativeToggle();
+        registerWithHub();
+    });
+    document.addEventListener('torn-script-hub:active', () => {
+        hubIsActive = true;
+        hideNativeToggle();
+    });
+    document.addEventListener('torn-script-hub:dormant', () => {
+        hubIsActive = false;
+        showNativeToggle();
+        monitorViewAndRoute();
+    });
 
 })();
