@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.2.3-hub
+// @version      1.3.1-hub
 // @description  Add quality and bonus percentages to the item market, auction house, and bazaars. Now with Script Hub integration.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -16,83 +16,17 @@
 // @updateURL https://update.greasyfork.org/scripts/589775/Torn%20OpenMarket.meta.js
 // ==/UserScript==
 
-// CHANGELOG 1.2.2:
-// - waitForRoot()'s pending setTimeout is now tracked per-handler (pendingTimeoutId) and
-//   cancelled in teardownCurrentHandler(). Previously, rapid SPA navigation between market
-//   pages could leave an old handler's root-polling loop running in the background even
-//   after its observers were disconnected, since only observers were being cleaned up.
-// - getUnitFromDescription() now escapes regex metacharacters in the bonus value before
-//   building its pattern. A decimal value like "1.5" previously went into the regex
-//   unescaped, so the "." matched any character instead of a literal dot, risking a false
-//   "%" match against unrelated description text.
-//
-// CHANGELOG 1.2.1:
-// - Fixed Item Market quality badges silently disappearing (no console error, no crash).
-//   Torn renamed the item tile's image-wrapper class from "imageWrapper___xxxx" to
-//   "tileImage___xxxx". insertQualityBox() no-ops silently when its container is null,
-//   so the badge just stopped appearing with zero indication why. Title/price/stats
-//   selectors were all still valid, this was the only broken piece. Confirmed via live
-//   DOM inspection: the element wrapping just the <img> (siblings with the actions/buy
-//   button wrapper) now carries the "tileImage___" prefix instead.
-//
-// CHANGELOG 1.2.0:
-// - Reverted the bonus text from an absolutely-positioned image overlay back to normal
-//   block-flow placement under the item title (closer to the original design). Three
-//   overlay placements in a row (under title / bottom of image / top of image) each
-//   collided with something else on the tile. This script is already the
-//   post-filtering-removal, display-only build, so passively showing these numbers was
-//   most likely never the actual cause of the originally reported infinite-scroll bug --
-//   that was more plausibly tied to the quality *filtering* logic that's since been
-//   removed. If infinite-scroll misbehavior does reoccur, that's the next thing to
-//   isolate, rather than continuing to fight overlay placement.
-//
-// CHANGELOG 1.1.2:
-// - Bonus box moved from the bottom of the image to just below the quality badge at the
-//   top. It was overlapping Torn's own damage/accuracy stat overlay, which is itself
-//   positioned over the bottom of the image.
-//
-// CHANGELOG 1.1.1:
-// - Bonus overlay repositioned to anchor on the image wrapper (bottom, same positioning
-//   context as the quality badge) instead of the title element, and given a background
-//   pill matching the quality badge's themed background. Fixes bonus text overlapping
-//   into the tile below it and being unreadable against item images.
-//
-// CHANGELOG 1.1.0 (audit fixes):
-// - Bonus overlay is now absolutely positioned instead of being inserted into normal
-//   block flow. A previous version reportedly caused Item Market's infinite scroll to
-//   keep auto-loading pages, because injecting normal-flow content into every tile grew
-//   total list height right after each batch loaded, tricking the page's own
-//   "near bottom" scroll check into firing again. Quality badge was already an overlay
-//   and was never the cause.
-// - matchToCache() no longer blindly takes the first price+stat match. If more than one
-//   cached item shares the same price/stats, the tile is skipped instead of risking a
-//   wrong match (previously a silent mismatch was possible).
-// - itemMarket cache is now capped (MAX_CACHE_ITEMS) and is cleared on same-page
-//   navigation (e.g. changing category/search within Item Market), reducing both memory
-//   growth and match-collision risk over a long session.
-// - Processed-element tracking now uses a content-derived key (WeakMap) instead of a
-//   plain WeakSet, so if the host page recycles a tile's DOM node for a different item
-//   (virtualized lists), the stale badge/bonus overlay is detected and replaced instead
-//   of silently left in place.
-// - Added SPA navigation handling (pushState/replaceState/hashchange/popstate) so the
-//   correct handler stays active, and reinitializes safely if the market pages are
-//   client-side routed rather than fully reloaded.
-// - Quality values far outside the plausible range are no longer displayed (they're a
-//   strong signal of a bad cache match rather than a real reading).
-// - Fetch parsing failures and unrecognized stat types now surface via console instead
-//   of failing completely silently (stat-type warnings gated behind CONFIG.debug).
-
 (function () {
     'use strict';
 
-    // Choose which pages the script is active on.
-    // Change "true" to "false" to disable a page.
+    // Page toggles. Set to false to disable a page.
     const CONFIG = {
         enableItemMarket: true,
         enableAuctionHouse: true,
         enableBazaar: true,
         enableDisplayCase: true,
-        debug: false // FIX: set true to log ambiguous matches, implausible quality values, and unrecognized stat types
+        showDisplayCaseBonuses: true,
+        debug: false
     };
 
     // =========================================================================
@@ -100,7 +34,7 @@
     // =========================================================================
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.2.3';
+    const HUB_VERSION = '1.3.1';
     const HUB_ICON = '📊';
 
     function registerWithHub() {
@@ -110,10 +44,7 @@
             version: HUB_VERSION,
             icon: HUB_ICON,
             order: 200,
-            // Passive overlay script: nothing to "open". A no-op keeps the row
-            // clickable without surprising the user.
             open: () => {
-                /* eslint-disable-next-line no-console */
                 console.log('[OpenMarket] Running in the background on market pages.');
             },
             prefs: {
@@ -122,6 +53,7 @@
                     { key: 'enableAuctionHouse', type: 'toggle', label: 'Auction House', default: true },
                     { key: 'enableBazaar', type: 'toggle', label: 'Bazaar', default: true },
                     { key: 'enableDisplayCase', type: 'toggle', label: 'Display Case', default: true },
+                    { key: 'showDisplayCaseBonuses', type: 'toggle', label: 'Display Case bonuses', default: true },
                     { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
                 ],
                 values: {
@@ -129,34 +61,31 @@
                     enableAuctionHouse: CONFIG.enableAuctionHouse,
                     enableBazaar: CONFIG.enableBazaar,
                     enableDisplayCase: CONFIG.enableDisplayCase,
+                    showDisplayCaseBonuses: CONFIG.showDisplayCaseBonuses,
                     debug: CONFIG.debug
                 },
                 onSave: (values) => {
                     CONFIG.enableItemMarket = !!values.enableItemMarket;
                     CONFIG.enableAuctionHouse = !!values.enableAuctionHouse;
                     CONFIG.enableBazaar = !!values.enableBazaar;
+                    CONFIG.enableDisplayCase = !!values.enableDisplayCase;
+                    CONFIG.showDisplayCaseBonuses = !!values.showDisplayCaseBonuses;
                     CONFIG.debug = !!values.debug;
-                    // Re-evaluate the current page so toggles take effect immediately.
                     activateHandlerForCurrentUrl();
                 }
             }
         };
 
-        // Try event first (hub already loaded)...
         document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail }));
 
-        // ...then queue (hub not loaded yet, will drain on init).
         if (typeof window !== 'undefined') {
             const q = window.__tornScriptHubQueue || (window.__tornScriptHubQueue = []);
             q.push(detail);
         }
     }
 
-    // If the Hub hasn't loaded yet, also listen for its READY event.
     document.addEventListener('torn-script-hub:ready', registerWithHub, { once: true });
 
-    // Register immediately in case Hub is already ready (the event path above
-    // will be ignored if it already fired, but the queue path still works).
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', registerWithHub, { once: true });
     } else {
@@ -164,11 +93,8 @@
     }
     // =========================================================================
 
-    // FIX: caps memory growth and reduces the chance of price+stat collisions in matchToCache
-    // by preventing the cache from accumulating indefinitely across a long scrolling session.
     const MAX_CACHE_ITEMS = 1500;
 
-    // You can customise the colours however you want. Tiers for quality are lowest to highest.
     const COLOURS = {
         tiers: {
             dark: ['#e4e4e4', '#57efea', '#c286ff', '#ffd700'],
@@ -184,18 +110,13 @@
         }
     };
 
-    // These are the various elements that need to be found/selected within the page source.
-    // Changes to the game may break these, so finding the new values may be a necessary part
-    // of debugging the script. If an element is broken, you can right click on it and "inspect"
-    // to get to the HTML/CSS. This may lead you to the right place, or you might need to dig around.
+    // =========================================================================
+    // SELECTORS
+    // =========================================================================
     const SELECTORS = {
         itemMarket: {
             root: '#item-market-root',
             tile: '[class*="itemTile___"]',
-            // FIX (1.2.1): Torn renamed this tile's image-wrapper class from
-            // "imageWrapper___xxxx" to "tileImage___xxxx". This is the direct wrapper
-            // around just the <img> (not the outer "baseItemTileWrapper___" which also
-            // contains the buy button / actions row) -- same role as before, new name.
             imageWrapper: '[class*="tileImage___"]',
             title: 'div > [class*="title___"]',
             price: '[class*="priceAndTotal___"] span',
@@ -204,8 +125,7 @@
             statIcon: '[class*="icon___"]',
             statValue: '[class*="value___"]',
             statTypeElement: 'value',
-            statTypeAttribute: 'aria-label',
-            bonusIcons: '[class*="bonuses___"] i'
+            statTypeAttribute: 'aria-label'
         },
         auctionHouse: {
             root: '#auction-house-tabs',
@@ -245,16 +165,11 @@
         }
     };
 
-    // When new items are added, or if values are updated, these three sections will need to be adjusted.
-    // The first number is the item ID. You can find that by searching the item name in the wiki.
-    // https://wiki.torn.com/
-    // For example, the item with ID 1 is the hammer, and the wiki shows that its base damage is 17
-    // and its base accuracy is 55.
-    // You can check for new items at tornstats by going to items and selecting the last page.
-    // https://tornstats.com/items
-    // You can cross reference them with the wiki. Please note, the wiki values are regularly wrong.
-    // You may have to figure out the actual base values by looking for items on the market, and/or
-    // doing some maths.
+    // =========================================================================
+    // BASE STATS
+    // Item ID -> base damage/accuracy/armour. Cross-reference wiki.torn.com and
+    // tornstats.com/items when adding new items; wiki values are often wrong.
+    // =========================================================================
     const BASE_DAMAGE_VALUES = {
         1: 17, 2: 16, 3: 20, 4: 11, 5: 21, 6: 25, 7: 28, 8: 34, 9: 40, 10: 61,
         11: 58, 12: 28, 13: 29, 14: 32, 15: 36, 16: 44, 17: 48, 18: 52, 19: 55, 20: 59,
@@ -304,10 +219,6 @@
         1355: 48, 1356: 48, 1357: 48, 1358: 48, 1359: 48
     };
 
-    // The following const is a map matching all item IDs to the damage, accuracy and armour values.
-    // Weapons have damage and accuracy, armour just has armour. The script accounts for that by giving 0
-    // to the missing values, so it won't have any effect on calculating bonus %. If some kind of wacky item
-    // is added in the future which somehow has defensive and offensive stats, it could break this.
     const BASE_STATS_MAP = Object.keys({
         ...BASE_DAMAGE_VALUES,
         ...BASE_ACCURACY_VALUES,
@@ -321,37 +232,29 @@
         return map;
     }, {});
 
-    // Some bonuses have a fixed effect without any varying number. These tend to be weapons
-    // which were released before ranked war weapons were introduced.
-    // They are currently sledgehammer, tranquilizer gun, and handbag.
-    // Some may be missing, and some new things may need to be added here in future.
+    // Bonuses with a fixed effect and no varying number (e.g. sledgehammer, tranquilizer
+    // gun, handbag). Add new ones here as needed.
     const FIXED_BONUSES = ['Smash', 'Sleep', 'Storage'];
 
     const NUMBER_REGEX = /(\d+(?:\.\d+)?)/;
 
-    // FIX: WeakSet replaced with WeakMap so we can store a content-derived key per element,
-    // not just a boolean "seen it" flag. This lets us detect when a host page has recycled
-    // a DOM node for a different item (common in virtualized/infinite-scroll lists).
     const processedElements = new WeakMap();
+    const processedBonusOverlays = new WeakMap();
     let darkMode = false;
     let currentHandler = null;
-    let fetchParseWarned = false; // FIX: prevents log spam while still surfacing the first failure
+    let fetchParseWarned = false;
 
-    // FUNCTIONS WHICH MAY NEED DEBUGGING ACCORDING TO GAME UDPDATES BELOW,
-    // OR FUNCTIONS WHICH CAN BE ADJUSTED TO PREFERENCE
-
-    // FIX: small helper so diagnostic logging is opt-in via CONFIG.debug and doesn't spam
-    // normal users' consoles, but is available for troubleshooting reports.
+    // =========================================================================
+    // HELPERS
+    // =========================================================================
     function debugWarn(...args) {
         if (CONFIG.debug) console.warn('[OpenMarket]', ...args);
     }
 
-    // This checks the page source to see if it's in dark mode or not. This could changed/renamed.
     function checkDarkMode() {
         darkMode = document.body.classList.contains('dark-mode');
     }
 
-    // These percentages can be adjusted to change when quality is considered a higher "tier".
     function getTierColour(percent) {
         const colours = darkMode ? COLOURS.tiers.dark : COLOURS.tiers.light;
         if (percent <= 25) return colours[0];
@@ -360,7 +263,6 @@
         return colours[3];
     }
 
-    // Helper function for selecting a specific element from the DOM.
     function qs(selector, parent = document) {
         try {
             return parent.querySelector(selector);
@@ -369,7 +271,6 @@
         }
     }
 
-    // Helper function for selecting all instances of a specific element from the DOM.
     function qsa(selector, parent = document) {
         try {
             return Array.from(parent.querySelectorAll(selector));
@@ -378,8 +279,6 @@
         }
     }
 
-    // This is a generic helper function for creating DOM elements with children.
-    // Search "create(" for examples of its usage.
     function create(tag, attrs = {}, children = []) {
         const el = document.createElement(tag);
         Object.entries(attrs).forEach(([key, value]) => {
@@ -401,15 +300,11 @@
         return el;
     }
 
-    // FIX: content-derived key so a recycled DOM node (same element reference, different
-    // underlying item) is correctly treated as "not yet processed for this item".
     function computeItemKey(itemID, stats, bonuses) {
         const bonusPart = (bonuses || []).map(b => `${b.title}:${b.value}`).join(',');
         return `${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${bonusPart}`;
     }
 
-    // processedElements now maps element -> last-processed content key, instead of a
-    // simple boolean, so stale overlays on recycled nodes get detected and refreshed.
     function isProcessed(el, key) {
         return processedElements.get(el) === key;
     }
@@ -418,9 +313,6 @@
         processedElements.set(el, key);
     }
 
-    // This returns the "tier" for the item's quality, which will vary for weapons vs armour.
-    // The maxRange is 100% for armour and 300% for weapons, unless they are adjusted.
-    // The tier colour can also be adjusted, as well as which percent it falls under.
     function getQualityColour(value, maxRange) {
         const percent = (value / maxRange) * 100;
         return getTierColour(percent);
@@ -430,18 +322,12 @@
         return darkMode ? COLOURS.bonus.dark : COLOURS.bonus.light;
     }
 
-    // This is a global stat extraction function which works for the item market, bazaar
-    // and auction house. This should be fairly future proof if the names of the HTML
-    // elements change. You can just fix the SELECTORS at the top of the script.
     function extractStats(el, selectors) {
         let damage = 0, accuracy = 0, armour = 0;
 
-        // Check if the container exists. If you're getting negative values
-        // for quality, the general structure of the item tile elements may have changed.
         const container = qs(selectors.statsContainer, el);
         if (!container) return { damage, accuracy, armour };
 
-        // This whole thing has to be a bit messy because there's no consistency across pages.
         qsa(selectors.statEntry, container).forEach(entry => {
             const valueEl = qs(selectors.statValue, entry);
             const iconEl = qs(selectors.statIcon, entry);
@@ -457,26 +343,17 @@
 
             if (typeText.includes('damage')) damage = val;
             else if (typeText.includes('accuracy')) accuracy = val;
-            // Sometimes the game calls it "armor" and sometimes it calls it "defence".
-            // They are not sure if they're American or British.
             else if (typeText.includes('armor') || typeText.includes('defence')) armour = val;
-            // FIX: previously a stat that matched none of the above was silently dropped.
-            // Surface it (behind CONFIG.debug) so a selector/label change is easy to spot.
             else debugWarn('Unrecognized stat type on entry:', typeText || '(empty)');
         });
 
         return { damage, accuracy, armour };
     }
 
-    // The auction house and bazaar store bonus information in the DOM, so we can
-    // extract it with a shared function.
     function extractBonusesFromDOM(el, selectors) {
         const bonuses = [];
 
         qsa(selectors.bonusIcons, el).forEach(icon => {
-            // Auction house gets bonus name + percent from "title", bazaar gets it from
-            // title AND description. If one of these pages breaks but not the other,
-            // the elements might need to be changed in SELECTORS, or this function adjusted.
             const titleAttr = icon.getAttribute(selectors.bonusTitleAttr) || '';
             const descAttr = icon.getAttribute(selectors.bonusDescAttr) || '';
             if (!titleAttr && !descAttr) return;
@@ -497,25 +374,15 @@
         return bonuses;
     }
 
-    // Each page tends to have wildly differing ways of storing the info,
-    // but there are a few consistent aspects which can be grouped in this
-    // function.
     function processItem(el, data) {
         const { itemID, stats, bonuses, selectors } = data;
 
-        // FIX: key-based check instead of a plain "have we seen this element" flag, so
-        // recycled nodes carrying a different item's data get reprocessed instead of
-        // silently keeping the previous item's badge/bonuses.
         const key = computeItemKey(itemID, stats, bonuses);
         if (isProcessed(el, key)) return;
 
-        // Calculate quality.
         const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
         if (quality === null) return;
 
-        // FIX: a quality far outside the plausible 0–maxRange band is a strong signal that
-        // this tile was matched to the wrong cached item (see matchToCache) rather than a
-        // genuine reading, so skip displaying it instead of showing something misleading.
         const maxRange = stats.armour > 0 ? 100 : 300;
         const numericQuality = parseFloat(quality);
         if (numericQuality < -10 || numericQuality > maxRange + 10) {
@@ -523,59 +390,41 @@
             return;
         }
 
-        // Get title element for bonus insertion.
-        const titleEl = qs(selectors.title, el);
-        if (!titleEl) return;
+        const imageWrapper = qs(selectors.imageWrapper, el);
+        if (imageWrapper) {
+            const existingQualityBox = qs('.openmarket-quality-box', imageWrapper);
+            if (existingQualityBox) existingQualityBox.remove();
 
-        // Remove existing bonus container if present.
-        const existing = qs('.openmarket-bonuses', el);
-        if (existing) existing.remove();
-
-        // FIX (1.2.0): reverted to normal block-flow placement under the title, matching
-        // the original design, instead of an absolutely-positioned overlay. Three overlay
-        // attempts in a row each collided with something else on the tile in turn — the
-        // row below, Torn's own damage/accuracy stat icons, and the item image itself.
-        // This script is already the post-filtering-removal, display-only version (per
-        // snickelfritz's own account), so the passive act of showing these numbers was
-        // most likely never what caused the originally reported infinite-scroll issue —
-        // that was more plausibly tied to the quality *filtering* logic that's since been
-        // removed. Normal flow is the one placement that can't visually collide with
-        // anything else on the tile, at the cost of adding a small, fixed amount of height
-        // per tile (same as the original script did).
-        const bonusContainer = create('div', {
-            className: 'openmarket-bonuses',
-            style: { lineHeight: '1.3' }
-        });
-
-        // Add bonus elements to container.
-        bonuses.forEach(bonus => {
-            bonusContainer.appendChild(createBonusEl(bonus));
-        });
-
-        // Insert bonus container.
-        if (bonusContainer.children.length > 0) {
-            if (data.insertBefore) {
-                titleEl.insertBefore(bonusContainer, data.insertBefore);
-            } else {
-                titleEl.appendChild(bonusContainer);
-            }
+            insertQualityBox(imageWrapper, quality, maxRange);
         }
 
-        // Hide elements if specified.
-        (data.hideElements || []).forEach(hideEl => {
-            if (hideEl) hideEl.style.display = 'none';
-        });
+        // Display Case has no title element to anchor to — see insertBonusOverlay().
+        const titleEl = selectors.title ? qs(selectors.title, el) : null;
+        if (titleEl) {
+            const existing = qs('.openmarket-bonuses', el);
+            if (existing) existing.remove();
 
-        // Insert quality box on image wrapper. This overlay is unaffected by the above —
-        // it's confirmed working well and stays as-is.
-        const imageWrapper = qs(selectors.imageWrapper, el);
+            const bonusContainer = create('div', {
+                className: 'openmarket-bonuses',
+                style: { lineHeight: '1.3' }
+            });
 
-        // FIX: clear any stale quality box before reinserting — needed now that recycled
-        // nodes can reach this point with a leftover badge from a previous item.
-        const existingQualityBox = qs('.openmarket-quality-box', imageWrapper);
-        if (existingQualityBox) existingQualityBox.remove();
+            bonuses.forEach(bonus => {
+                bonusContainer.appendChild(createBonusEl(bonus));
+            });
 
-        insertQualityBox(imageWrapper, quality, maxRange);
+            if (bonusContainer.children.length > 0) {
+                if (data.insertBefore) {
+                    titleEl.insertBefore(bonusContainer, data.insertBefore);
+                } else {
+                    titleEl.appendChild(bonusContainer);
+                }
+            }
+
+            (data.hideElements || []).forEach(hideEl => {
+                if (hideEl) hideEl.style.display = 'none';
+            });
+        }
 
         markProcessed(el, key);
     }
@@ -584,10 +433,6 @@
         return darkMode ? COLOURS.qualityBoxBg.dark : COLOURS.qualityBoxBg.light;
     }
 
-    // Quality is not a value provided by the game.
-    // So this needs to be calculated by using the damage/accuracy/armour values.
-    // It's not perfectly accurate.
-    // Perhaps in the future, proper quality values will be given, and this can be removed.
     function calcQuality(itemID, damage, accuracy, armour) {
         const base = BASE_STATS_MAP[itemID];
         if (!base) return null;
@@ -598,30 +443,19 @@
         return (((damage - base.baseDamage) + (accuracy - base.baseAccuracy)) * 10).toFixed(1);
     }
 
-    // A simple check to see if the value of the bonus has a percent after it
-    // in the description. So it doesn't return something like "Disarm: 5%".
-    // This could be expanded to include more info, like ' turns'.
     function getUnitFromDescription(description, value) {
         if (!description || value === undefined || value === null) return '';
-        // FIX (1.2.2): escape regex metacharacters in the value before building the
-        // pattern. A decimal bonus value like "1.5" previously went into the regex
-        // unescaped, so the "." matched any character instead of a literal dot,
-        // risking a false "%" match against unrelated description text.
         const escapedValue = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const pattern = new RegExp(escapedValue + '\\s*%');
         if (pattern.test(description)) return '%';
         return '';
     }
 
-    // This is a helper function which creates the small element holding the bonus info.
-    // If the way item info is received changes, this could break. Also new unusual
-    // items may potentially not be able to have their info extracted properly.
     function createBonusEl(bonus) {
         const name = bonus.title || '';
         const value = bonus.value;
         const description = bonus.description || '';
 
-        // If this is a "fixed" bonus, just put the name there.
         if (FIXED_BONUSES.includes(name)) {
             return create('div', {
                 textContent: name,
@@ -631,9 +465,6 @@
 
         let text = name;
 
-        // Use the getUnitFromDescription function to see if the description
-        // simply has a "%" after the number. That function was destined for
-        // bigger things...
         if (value !== undefined && value !== null) {
             const unit = getUnitFromDescription(description, value);
             text = `${name}: ${value}${unit}`;
@@ -645,24 +476,17 @@
         });
     }
 
-    // Helper function for putting the quality element on the image.
     function insertQualityBox(container, value, maxRange) {
         if (!container) return;
 
-        // FIX: clamp only the displayed number — implausible values are already filtered
-        // out in processItem, this just guards against small overshoot near the boundary.
         const clamped = Math.min(Math.max(parseFloat(value), 0), maxRange);
         const colour = getQualityColour(clamped, maxRange);
 
-        // Child element containing the text.
         const span = create('span', {
             className: 'label-value t-overflow',
             textContent: `Q ${clamped.toFixed(1)}%`
         });
 
-        // This is the box/background. These numbers can be adjusted
-        // to change the styling. This could be removed entirely but
-        // it ensures the text is easy to read.
         const box = create('div', {
             className: 'openmarket-quality-box',
             style: {
@@ -679,7 +503,6 @@
             }
         }, [span]);
 
-        // I don't remember what problem this solved, perhaps a mobile/PDA thing.
         const style = window.getComputedStyle(container);
         if (style.position === 'static') {
             container.style.position = 'relative';
@@ -688,17 +511,63 @@
         container.appendChild(box);
     }
 
-    // This is a simple check if the tab/window is in focus.
-    // According to the rules, only a single tab can have its info used by a script.
-    // !document.hidden checks if the current TAB is visible.
-    // document.hasFocus() checks if the current WINDOW has focus.
-    // From what I can tell, these both need to be included to abide by the rules.
+    // Display Case tiles have no title/text element to anchor bonus text to, so
+    // bonuses render as a second overlay pill (bottom-anchored) instead of the
+    // normal block-flow list used elsewhere.
+    function insertBonusOverlay(container, bonuses) {
+        if (!container || !bonuses || bonuses.length === 0) return;
+
+        const existing = qs('.openmarket-bonus-box', container);
+        if (existing) existing.remove();
+
+        const text = bonuses
+            .map(b => {
+                if (FIXED_BONUSES.includes(b.title)) return b.title;
+                const unit = getUnitFromDescription(b.description, b.value);
+                return b.value != null ? `${b.title}: ${b.value}${unit}` : b.title;
+            })
+            .join(' · ');
+
+        if (!text) return;
+
+        const span = create('span', {
+            className: 'label-value t-overflow',
+            textContent: text,
+            title: text
+        });
+
+        const box = create('div', {
+            className: 'openmarket-bonus-box',
+            style: {
+                position: 'absolute',
+                bottom: '2px',
+                left: '2px',
+                right: '2px',
+                padding: '1px 3px',
+                borderRadius: '3px',
+                fontSize: '10px',
+                fontWeight: 'bold',
+                zIndex: '2',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                background: getQualityBoxBg(),
+                color: getBonusColour()
+            }
+        }, [span]);
+
+        const style = window.getComputedStyle(container);
+        if (style.position === 'static') {
+            container.style.position = 'relative';
+        }
+
+        container.appendChild(box);
+    }
+
     function isPageActive() {
         return !document.hidden && document.hasFocus();
     }
 
-    // This sets up listeners for tab visibility and window focus events,
-    // runs processing when appropriate.
     function setupActiveListeners() {
         const onActivate = () => {
             if (currentHandler) {
@@ -710,14 +579,6 @@
         window.addEventListener('focus', onActivate);
     }
 
-    // FIX: bounded wait for a page's root element to mount. Needed because after an SPA
-    // navigation (see setupRouteWatcher below) the new page's React root may not exist
-    // yet at the moment we try to initialise its handler.
-    // FIX (1.2.2): accepts an optional onTimeoutId callback so the caller can capture and
-    // later cancel the pending setTimeout. Without this, rapid SPA navigation could leave
-    // an old handler's root-polling loop running in the background even after
-    // teardownCurrentHandler() disconnected its observers, since timeouts were previously
-    // untracked and never cleared.
     function waitForRoot(selector, callback, attemptsLeft = 10, onTimeoutId = null) {
         const root = qs(selector);
         if (root) {
@@ -732,27 +593,20 @@
         if (onTimeoutId) onTimeoutId(timeoutId);
     }
 
+    // =========================================================================
     // ITEM MARKET
-
+    // =========================================================================
     const itemMarket = {
-        // When items are loaded on the item market, the script intercepts a fetch request
-        // which contains the info for the page to display them. It only contains info
-        // for newly added items, and since the market redraws everything, old item info
-        // needs to be kept in a cache. This was a recent change to Torn,
-        // and it could change again.
-        // NOTE: The legality of intercepting fetch requests for unviewed tabs was questioned.
-        // The Torn admin team deemed storing info in a cache is okay if it is not used in any
-        // way until the appropriate tab is viewed.
-        // Direct quote: "We agreed that it's fine to go ahead with your plan to keep it in cache,
-        // just as long as it's not persisted anywhere/repurposed for anything else"
-        // If you modify this script it is your responsibility to ensure this behaviour remains
-        // compliant, or there is a potential risk of account deletion.
+        // New item data arrives via an intercepted fetch response (see
+        // interceptFetch()) and is cached here since the market redraws on scroll.
+        // Per Torn admin: caching is fine as long as it isn't persisted or reused
+        // for anything else — see interceptFetch(). Any changes here should keep
+        // that compliant.
         cache: [],
         selectors: SELECTORS.itemMarket,
-        observer: null, // FIX: tracked so it can be disconnected on SPA re-navigation
-        pendingTimeoutId: null, // FIX (1.2.2): tracked so a stale root-polling loop can be cancelled on teardown
+        observer: null,
+        pendingTimeoutId: null,
 
-        // FIX: bounds cache growth and is called instead of pushing directly to `cache`.
         pushCache(newItems) {
             this.cache.push(...newItems);
             if (this.cache.length > MAX_CACHE_ITEMS) {
@@ -760,19 +614,11 @@
             }
         },
 
-        // FIX: called on same-page navigation (e.g. changing category/search within Item
-        // Market) since previously cached listings are unlikely to still be relevant and
-        // only increase match-collision risk against the new listings.
         resetCache() {
             this.cache = [];
         },
 
-        // Check to see if the stats and price of an item matches what's listed in the cache.
-        // It's not impossible that items with identical stats and price with different bonuses
-        // could be mixed up. That seems like a very rare occurence, though.
         matchToCache(el) {
-            // Convert the price into a plain integer. If processing isn't working on the item market
-            // only, the selectors could have changed.
             const price = parseInt(qs(this.selectors.price, el)?.textContent.replace(/[^\d]/g, ''), 10) || 0;
             const stats = extractStats(el, this.selectors);
 
@@ -785,9 +631,6 @@
 
             if (candidates.length === 0) return null;
 
-            // FIX: previously this used .find() and silently took the first match. If more
-            // than one cached item shares the same price/stats, we can no longer tell which
-            // one this tile actually is — skip it rather than risk showing wrong bonuses.
             if (candidates.length > 1) {
                 debugWarn('Ambiguous cache match (', candidates.length, 'candidates) at price', price, '- skipping tile to avoid a wrong match.');
                 return null;
@@ -797,11 +640,9 @@
         },
 
         processAll() {
-            // Per the rules, only process items if the page is currently visible AND in focus.
             if (!isPageActive()) return;
             if (this.cache.length === 0) return;
 
-            // Tile elements could have been changed by an update if item market isn't working.
             qsa(this.selectors.tile).forEach(el => {
                 const cached = this.matchToCache(el);
                 if (!cached) return;
@@ -821,18 +662,12 @@
 
         init() {
             const self = this;
-            // FIX: waitForRoot instead of a single qs()+return, so init() can succeed even
-            // if this handler is (re)activated before the SPA has finished mounting the page.
             waitForRoot(this.selectors.root, (root) => {
                 self.pendingTimeoutId = null;
-                // Scrolling the page loads in new items, so check for DOM changes and re-process.
                 const observer = new MutationObserver(() => {
                     self.processAll();
                 });
 
-                // Observe just the root element of the item market, to avoid excess reprocessing.
-                // This could probably be made more specific, as to not
-                // run when unnecessary (eg only reprocessing when the cache is updated).
                 observer.observe(root, { childList: true, subtree: true });
                 self.observer = observer;
                 self.processAll();
@@ -840,12 +675,13 @@
         }
     };
 
+    // =========================================================================
     // AUCTION HOUSE
-
+    // =========================================================================
     const auctionHouse = {
         selectors: SELECTORS.auctionHouse,
-        observer: null, // FIX: tracked so it can be disconnected on SPA re-navigation
-        pendingTimeoutId: null, // FIX (1.2.2): tracked so a stale root-polling loop can be cancelled on teardown
+        observer: null,
+        pendingTimeoutId: null,
 
         processAll() {
             if (!isPageActive()) return;
@@ -854,15 +690,11 @@
             if (!visibleTab) return;
 
             qsa(this.selectors.tile, visibleTab).forEach(el => {
-
-                // If the auction house isn't working, it could be a selector in this section.
                 const hoverEl = qs(this.selectors.itemHover, el);
 
-                // If a specific item doesn't show up, it could be that the ID isn't in the map yet.
                 const itemID = hoverEl?.getAttribute('item');
                 if (!itemID || !BASE_STATS_MAP[itemID]) return;
 
-                // Or something went wrong with finding stats, and it returns 0 for all.
                 const stats = extractStats(el, this.selectors);
                 if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) return;
 
@@ -874,17 +706,13 @@
                     stats,
                     bonuses: extractBonusesFromDOM(el, this.selectors),
                     selectors: this.selectors,
-                    hideElements: [rarityLine] // Hide the rarity for tidiness.
+                    hideElements: [rarityLine]
                 });
             });
         },
 
         init() {
             const self = this;
-            // This function is the same as the item market, but instead of watching for vertical scrolls,
-            // this checks for going to a new page or switching to a different category.
-            // The observer is set off each time the counter ticks down,
-            // but it's only once a second, so whatever.
             waitForRoot(this.selectors.root, (root) => {
                 self.pendingTimeoutId = null;
                 const observer = new MutationObserver(() => {
@@ -899,19 +727,19 @@
         }
     };
 
+    // =========================================================================
     // BAZAAR
-
+    // =========================================================================
     const bazaar = {
         selectors: SELECTORS.bazaar,
-        outerObserver: null, // FIX: tracked so it can be disconnected on SPA re-navigation
-        innerObserver: null, // FIX: tracked so it can be disconnected on SPA re-navigation
-        pendingTimeoutId: null, // FIX (1.2.2): tracked so a stale root-polling loop can be cancelled on teardown
+        outerObserver: null,
+        innerObserver: null,
+        pendingTimeoutId: null,
 
         processAll() {
             if (!isPageActive()) return;
 
             qsa(this.selectors.tile).forEach(el => {
-                // Item ID is extracted from each item's image URL and filtered with regex.
                 const img = qs(this.selectors.image, el);
                 if (!img) return;
 
@@ -927,8 +755,6 @@
                 const titleEl = qs(this.selectors.title, el);
                 const stockEl = qs(this.selectors.stockElement, titleEl);
 
-                // For the bazaar, insert above the stock element, then hide stock for tidiness.
-                // There's no reason for Torn to tell us there's 1 in stock for these items anyway.
                 processItem(el, {
                     itemID,
                     stats,
@@ -942,11 +768,6 @@
 
         init() {
             const self = this;
-            // The outer observer waits for the bazaar in general to load, the inner observer
-            // then checks for changes due to scrolling, similar to the item market.
-            // One observer would probably work fine, but I think there was a reason for this
-            // at some point. Maybe the extra logic was related to a now fixed bazaar bug with
-            // large images.
             waitForRoot(this.selectors.root, (root) => {
                 self.pendingTimeoutId = null;
                 const outerObserver = new MutationObserver((_, obs) => {
@@ -970,63 +791,256 @@
         }
     };
 
+    // =========================================================================
     // DISPLAY CASE
-
+    // Stats/bonuses live in the aria-label of .view-info.wai-btn inside each
+    // .item-hover, lazy-loaded by Torn (loaded="0" -> "1"), so attribute changes
+    // are watched alongside childList.
+    // =========================================================================
     const displayCase = {
-        selectors: SELECTORS.displayCase,
+        selectors: {
+            tile: '.b-item-wrap',
+            imageWrapper: '.item-plate'
+            // No 'title' — Display Case has no text anchor for bonuses; see
+            // insertBonusOverlay().
+        },
+
+        // Damage/accuracy/armour are visible on the tile surface before the
+        // lazy-loaded aria-label populates, so this extracts from the DOM directly
+        // to get the quality badge showing immediately.
+        extractVisibleStats(el, itemID) {
+            const base = BASE_STATS_MAP[itemID];
+            if (!base) return { damage: 0, accuracy: 0, armour: 0 };
+
+            let damage = 0, accuracy = 0, armour = 0;
+
+            const icons = el.querySelectorAll('i, svg, [class*="icon"], [class*="stat"]');
+            icons.forEach(icon => {
+                const indicators = [
+                    icon.className,
+                    icon.getAttribute('aria-label'),
+                    icon.getAttribute('title'),
+                    icon.getAttribute('data-title')
+                ].filter(Boolean).join(' ').toLowerCase();
+
+                if (!indicators.includes('damage') && !indicators.includes('accuracy') &&
+                    !indicators.includes('armor') && !indicators.includes('armour')) {
+                    return;
+                }
+
+                let valueEl = icon.nextElementSibling;
+                if (!valueEl || isNaN(parseFloat(valueEl.textContent))) {
+                    valueEl = icon.parentElement?.querySelector('span, div, b, strong, [class*="value"]');
+                }
+                if (!valueEl || isNaN(parseFloat(valueEl.textContent))) {
+                    valueEl = icon.parentElement?.nextElementSibling;
+                }
+
+                const val = parseFloat(valueEl?.textContent) || 0;
+                if (val <= 0) return;
+
+                if (indicators.includes('damage')) damage = val;
+                else if (indicators.includes('accuracy')) accuracy = val;
+                else if (indicators.includes('armor') || indicators.includes('armour')) armour = val;
+            });
+
+            if (damage === 0 && accuracy === 0 && armour === 0) {
+                const fallback = extractStats(el, {
+                    statsContainer: '[class*="infoBonuses"], [class*="properties"], .item-hover',
+                    statEntry: '[class*="container"], [class*="property"], [class*="entry"], span, div',
+                    statValue: 'span, div, [class*="value"]',
+                    statIcon: 'i, svg, [class*="icon"]',
+                    statTypeElement: 'icon',
+                    statTypeAttribute: 'className'
+                });
+                damage = fallback.damage;
+                accuracy = fallback.accuracy;
+                armour = fallback.armour;
+            }
+
+            if (damage === 0 && accuracy === 0 && armour === 0) {
+                const numbers = [];
+                const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+                let node;
+                while (node = walker.nextNode()) {
+                    const text = node.textContent.trim();
+                    if (/^\d+(?:\.\d+)?$/.test(text)) {
+                        const val = parseFloat(text);
+                        if (val > 0 && val < 500) numbers.push(val);
+                    }
+                }
+                const unique = [...new Set(numbers)];
+
+                if (base.baseArmour > 0 && unique.length >= 1) {
+                    const closest = unique.reduce((best, n) =>
+                        Math.abs(n - base.baseArmour) < Math.abs(best - base.baseArmour) ? n : best
+                    );
+                    if (Math.abs(closest - base.baseArmour) < 50) armour = closest;
+                } else if (unique.length >= 2) {
+                    const scored = unique.map(n => ({
+                        value: n,
+                        dDiff: base.baseDamage > 0 ? Math.abs(n - base.baseDamage) : Infinity,
+                        aDiff: base.baseAccuracy > 0 ? Math.abs(n - base.baseAccuracy) : Infinity
+                    }));
+                    const dBest = scored.filter(s => s.dDiff < 100).sort((a, b) => a.dDiff - b.dDiff)[0];
+                    if (dBest) {
+                        damage = dBest.value;
+                        const remaining = scored.filter(s => s.value !== dBest.value);
+                        const aBest = remaining.filter(s => s.aDiff < 100).sort((a, b) => a.aDiff - b.aDiff)[0];
+                        if (aBest) accuracy = aBest.value;
+                    }
+                }
+            }
+
+            return { damage, accuracy, armour };
+        },
         observer: null,
-        pendingTimeoutId: null,
+        pollTimer: null,
+
+        parseAriaLabel(label) {
+            const text = String(label || '').replace(/\n/g, ' ').trim();
+            const result = { damage: 0, accuracy: 0, armour: 0, bonuses: [] };
+
+            const damageMatch = text.match(/Damage:\s*(\d+(?:\.\d+)?)/i);
+            if (damageMatch) result.damage = parseFloat(damageMatch[1]);
+
+            const accuracyMatch = text.match(/Accuracy:\s*(\d+(?:\.\d+)?)/i);
+            if (accuracyMatch) result.accuracy = parseFloat(accuracyMatch[1]);
+
+            const armourMatch = text.match(/Armou?r:\s*(\d+(?:\.\d+)?)/i);
+            if (armourMatch) result.armour = parseFloat(armourMatch[1]);
+
+            const parts = text.split(/\.(?=\s|$)/);
+            for (const part of parts) {
+                const trimmed = part.trim();
+                if (!trimmed) continue;
+                if (/^Details:/i.test(trimmed)) continue;
+                if (/^Amount:/i.test(trimmed)) continue;
+                if (/^Rarity progress:/i.test(trimmed)) continue;
+                if (/^Damage:/i.test(trimmed)) continue;
+                if (/^Accuracy:/i.test(trimmed)) continue;
+                if (/^Armou?r:/i.test(trimmed)) continue;
+
+                const bonusMatch = trimmed.match(/^([^:]+):\s*(.+)$/);
+                if (bonusMatch) {
+                    const title = bonusMatch[1].trim();
+                    const description = bonusMatch[2].trim();
+                    const valueMatch = description.match(/(\d+(?:\.\d+)?)/);
+                    const value = valueMatch ? parseFloat(valueMatch[1]) : null;
+                    result.bonuses.push({ title, value, description });
+                }
+            }
+
+            return result;
+        },
 
         processAll() {
             if (!isPageActive()) return;
 
-            qsa(this.selectors.tile).forEach(el => {
-                const img = qs(this.selectors.image, el);
-                if (!img) return;
+            const root = qs('#displayCaseRoot') || document.body;
+            qsa(this.selectors.tile, root).forEach(el => {
+                const hoverEl = qs('.item-hover', el);
+                if (!hoverEl) return;
 
-                const match = img.src.match(/\/images\/items\/(\d+)\//);
-                if (!match) return;
+                const itemID = hoverEl.getAttribute('itemid');
+                if (!itemID || !BASE_STATS_MAP[itemID]) return;
 
-                const itemID = match[1];
-                if (!BASE_STATS_MAP[itemID]) return;
+                const viewBtn = qs('.view-info.wai-btn', hoverEl);
+                const ariaLabel = viewBtn?.getAttribute('aria-label');
 
-                const stats = extractStats(el, this.selectors);
-                // Display Case grid view may not expose stats inline.
-                // Only calculate quality when at least one stat was actually found.
+                let stats, bonuses;
+
+                if (ariaLabel) {
+                    const parsed = this.parseAriaLabel(ariaLabel);
+                    stats = { damage: parsed.damage, accuracy: parsed.accuracy, armour: parsed.armour };
+                    bonuses = parsed.bonuses;
+                } else {
+                    stats = this.extractVisibleStats(el, itemID);
+                    bonuses = [];
+                }
+
                 const hasStats = stats.damage > 0 || stats.accuracy > 0 || stats.armour > 0;
                 if (!hasStats) return;
-
-                const bonuses = extractBonusesFromDOM(el, this.selectors);
 
                 processItem(el, {
                     itemID,
                     stats,
-                    bonuses,
+                    bonuses: bonuses || [],
                     selectors: this.selectors
                 });
+
+                // Tracked separately from processItem()'s own isProcessed() gate —
+                // must only touch the DOM when bonus content actually changes, or
+                // the childList mutation retriggers this handler's own observer.
+                if (CONFIG.showDisplayCaseBonuses && bonuses && bonuses.length > 0) {
+                    const bonusKey = computeItemKey(itemID, stats, bonuses);
+                    if (processedBonusOverlays.get(el) !== bonusKey) {
+                        const imageWrapper = qs(this.selectors.imageWrapper, el);
+                        insertBonusOverlay(imageWrapper, bonuses);
+                        processedBonusOverlays.set(el, bonusKey);
+                    }
+                }
             });
         },
 
         init() {
             const self = this;
-            waitForRoot(this.selectors.root, (root) => {
-                self.pendingTimeoutId = null;
-                const observer = new MutationObserver(() => {
-                    self.processAll();
+            const root = qs('#displayCaseRoot') || document.body;
+
+            const observer = new MutationObserver((mutations) => {
+                const relevant = mutations.some(m =>
+                    m.type === 'childList' ||
+                    (m.type === 'attributes' && (m.attributeName === 'aria-label' || m.attributeName === 'loaded'))
+                );
+                if (relevant) self.processAll();
+            });
+
+            observer.observe(root, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['aria-label', 'loaded', 'class']
+            });
+            self.observer = observer;
+
+            // Triggers Torn's lazy data load (staggered, to avoid flooding the server).
+            setTimeout(() => {
+                qsa(self.selectors.tile, root).forEach((el, i) => {
+                    const hoverEl = qs('.item-hover', el);
+                    if (!hoverEl) return;
+                    const viewBtn = qs('.view-info.wai-btn', hoverEl);
+                    if (viewBtn && !viewBtn.getAttribute('aria-label')) {
+                        setTimeout(() => {
+                            el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                        }, i * 80);
+                    }
                 });
-                observer.observe(root, { childList: true, subtree: true });
-                self.observer = observer;
+            }, 500);
+
+            // Fallback poll for lazy-loaded data.
+            let polls = 0;
+            const maxPolls = 30;
+            self.pollTimer = setInterval(() => {
                 self.processAll();
-            }, 10, (timeoutId) => { self.pendingTimeoutId = timeoutId; });
+                polls++;
+                if (polls >= maxPolls) {
+                    clearInterval(self.pollTimer);
+                    self.pollTimer = null;
+                }
+            }, 1000);
+
+            self.processAll();
+        },
+
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
+            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
         }
     };
 
-    // FIX: SPA NAVIGATION HANDLING
-    // Torn's market pages are client-side routed. Without this, switching category/search
-    // within a page, or navigating between market types without a full reload, would leave
-    // the wrong handler active (or none at all) since the original script only picked a
-    // handler once on DOMContentLoaded.
-
+    // =========================================================================
+    // SPA NAVIGATION HANDLING
+    // =========================================================================
     function detectPageType(href) {
         if (href.includes('sid=ItemMarket')) return 'itemMarket';
         if (href.includes('amarket.php')) return 'auctionHouse';
@@ -1037,17 +1051,16 @@
 
     function teardownCurrentHandler() {
         if (!currentHandler) return;
-        ['observer', 'outerObserver', 'innerObserver'].forEach(key => {
-            if (currentHandler[key]) {
-                currentHandler[key].disconnect();
-                currentHandler[key] = null;
-            }
-        });
-        // FIX (1.2.2): cancel any still-pending waitForRoot() poll. Without this, rapid
-        // SPA navigation (e.g. quickly switching between Item Market, Auction House, and
-        // Bazaar) could leave an old handler's root-detection loop running in the
-        // background indefinitely, since observers were the only thing being cleaned up
-        // here before.
+        if (typeof currentHandler.teardown === 'function') {
+            currentHandler.teardown();
+        } else {
+            ['observer', 'outerObserver', 'innerObserver'].forEach(key => {
+                if (currentHandler[key]) {
+                    currentHandler[key].disconnect();
+                    currentHandler[key] = null;
+                }
+            });
+        }
         if (currentHandler.pendingTimeoutId) {
             clearTimeout(currentHandler.pendingTimeoutId);
             currentHandler.pendingTimeoutId = null;
@@ -1073,10 +1086,6 @@
         const nextHandler = handlers[type];
 
         if (currentHandler === nextHandler) {
-            // Same page type as before — likely a filter/search/category change within
-            // the same market page rather than a full navigation. Item Market's cache is
-            // reset since previously cached listings may no longer correspond to what's
-            // on screen, and stale entries only add collision risk.
             if (type === 'itemMarket') itemMarket.resetCache();
             nextHandler.processAll();
             return;
@@ -1107,20 +1116,15 @@
         });
     }
 
+    // =========================================================================
     // FETCH REQUEST INTERCEPTION
-
+    // =========================================================================
     function interceptFetch() {
         const originalFetch = window.fetch;
 
-        // Override the original fetch function to intercept requests.
         window.fetch = async (...args) => {
             const response = await originalFetch(...args);
 
-            // If the URL in the request shows it's related to the item market,
-            // add items to the cache, checking itemID for dupes.
-            // If the item market URL changes to no longer contain 'sid=iMarket',
-            // this could break. This could be adjusted to something more generic
-            // like 'market' to future-proof it, also could be added to SELECTORS.
             const url = args[0] instanceof Request ? args[0].url : String(args[0]);
 
             if (url.includes('sid=iMarket')) {
@@ -1131,12 +1135,10 @@
                     const newItems = data.items.filter(item => !existingIds.has(item.listingID));
 
                     if (newItems.length > 0) {
-                        itemMarket.pushCache(newItems); // FIX: bounded push instead of raw .push
+                        itemMarket.pushCache(newItems);
                         if (isPageActive()) itemMarket.processAll();
                     }
                 }).catch(err => {
-                    // FIX: previously failed completely silently. This surfaces the first
-                    // failure so a broken API response shape doesn't look like "nothing happens".
                     if (!fetchParseWarned) {
                         console.warn('[OpenMarket] Failed to parse Item Market response — quality/bonus overlays may stop updating.', err);
                         fetchParseWarned = true;
@@ -1148,8 +1150,9 @@
         };
     }
 
+    // =========================================================================
     // STYLES
-
+    // =========================================================================
     function insertStyles() {
         const css = `
         [class*="itemTile___"] {
@@ -1167,19 +1170,18 @@
         (document.head || document.documentElement).appendChild(style);
     }
 
+    // =========================================================================
     // INITIALISATION
-
+    // =========================================================================
     function init() {
-        // Insert the style changes and override the fetch function before the page loads.
         insertStyles();
         interceptFetch();
 
-        // Once the DOM is fully loaded, run the script.
         document.addEventListener('DOMContentLoaded', () => {
             checkDarkMode();
             setupActiveListeners();
-            setupRouteWatcher(); // FIX: keeps the correct handler active across SPA navigation
-            activateHandlerForCurrentUrl(); // FIX: replaces the old one-shot href if/else chain
+            setupRouteWatcher();
+            activateHandlerForCurrentUrl();
         });
     }
 
