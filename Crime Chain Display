@@ -1210,15 +1210,45 @@
     }
 
     function syncFromNativeBadge() {
-        const badge = findNativeChainBadge();
-        if (!badge) return false;
-        pendingCriticalConfirm = null;
-        pendingResultCountReseed = null;
-        const oldChain = chain;
-        chain = clampChain(badge.value);
-        commitChainIfChanged('native', oldChain, null, `Torn's own chain badge read ${badge.value}`);
-        return true;
+    const badge = findNativeChainBadge();
+    if (!badge) return false;
+
+    // ── Hardening against false positives ──────────────────────────────
+    // Torn (or another script) currently exposes an element that the
+    // finder mis-identifies as the live chain and reads as 100
+    // (coincidentally the same value as CHAIN_CAP_DISPLAY).
+    // Reject readings that look like the visual display cap when they
+    // would overwrite a different, previously-known chain value.
+    if (badge.value === CHAIN_CAP_DISPLAY && chain > 0 && chain !== CHAIN_CAP_DISPLAY) {
+        logDiagnostic('native-badge-rejected', {
+            reason: 'value equals display cap while current chain differs',
+            badgeValue: badge.value,
+            currentChain: chain,
+        });
+        return false;               // do not trust this reading
     }
+
+    // Optional extra safety: ignore large unexplained jumps that are not
+    // a reset to zero.  Real chain changes come from the counters or logs.
+    const delta = Math.abs(badge.value - chain);
+    if (delta > MAX_REASONABLE_COUNTER_DELTA && badge.value !== 0) {
+        logDiagnostic('native-badge-rejected', {
+            reason: 'implausible jump from current chain',
+            badgeValue: badge.value,
+            currentChain: chain,
+            delta,
+        });
+        return false;
+    }
+    // ─────────────────────────────────────────────────────────────────
+
+    pendingCriticalConfirm = null;
+    pendingResultCountReseed = null;
+    const oldChain = chain;
+    chain = clampChain(badge.value);
+    commitChainIfChanged('native', oldChain, null, `Torn's own chain badge read ${badge.value}`);
+    return true;
+}
 
     function parseResultCount(value) {
         const n = parseInt(String(value || '').replace(/,/g, ''), 10);
