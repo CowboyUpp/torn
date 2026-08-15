@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.2.2-hub
+// @version      1.2.3-hub
 // @description  Add quality and bonus percentages to the item market, auction house, and bazaars. Now with Script Hub integration.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
 // @match        https://www.torn.com/bazaar.php*
+// @match        https://www.torn.com/displaycase.php*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @run-at       document-start
@@ -90,6 +91,7 @@
         enableItemMarket: true,
         enableAuctionHouse: true,
         enableBazaar: true,
+        enableDisplayCase: true,
         debug: false // FIX: set true to log ambiguous matches, implausible quality values, and unrecognized stat types
     };
 
@@ -98,7 +100,7 @@
     // =========================================================================
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.2.2';
+    const HUB_VERSION = '1.2.3';
     const HUB_ICON = '📊';
 
     function registerWithHub() {
@@ -119,12 +121,14 @@
                     { key: 'enableItemMarket', type: 'toggle', label: 'Item Market', default: true },
                     { key: 'enableAuctionHouse', type: 'toggle', label: 'Auction House', default: true },
                     { key: 'enableBazaar', type: 'toggle', label: 'Bazaar', default: true },
+                    { key: 'enableDisplayCase', type: 'toggle', label: 'Display Case', default: true },
                     { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
                 ],
                 values: {
                     enableItemMarket: CONFIG.enableItemMarket,
                     enableAuctionHouse: CONFIG.enableAuctionHouse,
                     enableBazaar: CONFIG.enableBazaar,
+                    enableDisplayCase: CONFIG.enableDisplayCase,
                     debug: CONFIG.debug
                 },
                 onSave: (values) => {
@@ -966,6 +970,57 @@
         }
     };
 
+    // DISPLAY CASE
+
+    const displayCase = {
+        selectors: SELECTORS.displayCase,
+        observer: null,
+        pendingTimeoutId: null,
+
+        processAll() {
+            if (!isPageActive()) return;
+
+            qsa(this.selectors.tile).forEach(el => {
+                const img = qs(this.selectors.image, el);
+                if (!img) return;
+
+                const match = img.src.match(/\/images\/items\/(\d+)\//);
+                if (!match) return;
+
+                const itemID = match[1];
+                if (!BASE_STATS_MAP[itemID]) return;
+
+                const stats = extractStats(el, this.selectors);
+                // Display Case grid view may not expose stats inline.
+                // Only calculate quality when at least one stat was actually found.
+                const hasStats = stats.damage > 0 || stats.accuracy > 0 || stats.armour > 0;
+                if (!hasStats) return;
+
+                const bonuses = extractBonusesFromDOM(el, this.selectors);
+
+                processItem(el, {
+                    itemID,
+                    stats,
+                    bonuses,
+                    selectors: this.selectors
+                });
+            });
+        },
+
+        init() {
+            const self = this;
+            waitForRoot(this.selectors.root, (root) => {
+                self.pendingTimeoutId = null;
+                const observer = new MutationObserver(() => {
+                    self.processAll();
+                });
+                observer.observe(root, { childList: true, subtree: true });
+                self.observer = observer;
+                self.processAll();
+            }, 10, (timeoutId) => { self.pendingTimeoutId = timeoutId; });
+        }
+    };
+
     // FIX: SPA NAVIGATION HANDLING
     // Torn's market pages are client-side routed. Without this, switching category/search
     // within a page, or navigating between market types without a full reload, would leave
@@ -976,6 +1031,7 @@
         if (href.includes('sid=ItemMarket')) return 'itemMarket';
         if (href.includes('amarket.php')) return 'auctionHouse';
         if (href.includes('bazaar.php')) return 'bazaar';
+        if (href.includes('displaycase.php')) return 'displayCase';
         return null;
     }
 
@@ -1000,11 +1056,12 @@
 
     function activateHandlerForCurrentUrl() {
         const type = detectPageType(window.location.href);
-        const handlers = { itemMarket, auctionHouse, bazaar };
+        const handlers = { itemMarket, auctionHouse, bazaar, displayCase };
         const enabledMap = {
             itemMarket: CONFIG.enableItemMarket,
             auctionHouse: CONFIG.enableAuctionHouse,
-            bazaar: CONFIG.enableBazaar
+            bazaar: CONFIG.enableBazaar,
+            displayCase: CONFIG.enableDisplayCase
         };
 
         if (!type || !enabledMap[type]) {
