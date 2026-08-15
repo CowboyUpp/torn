@@ -103,7 +103,6 @@
     let crossSyncPullTimer = null;
     let crossSyncInFlight = false;
     let crossSyncLastStatus = '';
-    let hubIsActive = false;
 
     // Nerve capture: there is no confirmed, documented "Nerve outgoing" log
     // type in Torn's API (torn/logtypes has no such entry, and nerve cost is
@@ -258,38 +257,6 @@
 
     function currentCrimesRoute() {
         return `${location.pathname}${location.search}${location.hash}`;
-    }
-
-    function applyHubVisibility() {
-        const root = document.getElementById('cct-root');
-        if (!root) return;
-        root.style.display = hubIsActive ? 'none' : '';
-    }
-
-    function detectHubState() {
-        const hubRow = document.getElementById('tsh-sidebar-row');
-        const wasActive = hubIsActive;
-        hubIsActive = !!(hubRow && !hubRow.classList.contains('tsh-disabled'));
-        if (wasActive !== hubIsActive) {
-            applyHubVisibility();
-        }
-    }
-
-    function watchHubState() {
-        const hubRow = document.getElementById('tsh-sidebar-row');
-        if (!hubRow) {
-            const obs = new MutationObserver(() => {
-                if (document.getElementById('tsh-sidebar-row')) {
-                    obs.disconnect();
-                    detectHubState();
-                    watchHubState();
-                }
-            });
-            obs.observe(document.documentElement, { childList: true, subtree: true });
-            return;
-        }
-        const obs = new MutationObserver(detectHubState);
-        obs.observe(hubRow, { attributes: true, attributeFilter: ['class'] });
     }
 
     function resetResultCounterTracking() {
@@ -2143,7 +2110,6 @@
         `;
 
         anchor.appendChild(el);
-        applyHubVisibility();
 
         el.querySelector('#cct-theme-toggle').addEventListener('click', (e) => {
             e.stopPropagation();
@@ -2588,7 +2554,6 @@
                 resetResultCounterTracking();
             }
             renderWidget();
-            applyHubVisibility();
             startDOMObserver();
             pollNerve();
             if (!syncFromNativeBadge()) applyResultCountDeltaFallback({ source: 'sync-loop' });
@@ -2632,7 +2597,6 @@
     function openCCT() {
         const root = document.getElementById('cct-root');
         if (root) {
-            root.style.display = '';
             root.scrollIntoView({ behavior: 'smooth', block: 'center' });
             const widget = root.querySelector('#cct-widget');
             if (widget) {
@@ -2642,7 +2606,6 @@
             }
         } else {
             renderWidget();
-            applyHubVisibility();
             const newRoot = document.getElementById('cct-root');
             if (newRoot) {
                 newRoot.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -2665,10 +2628,6 @@
                 icon: '🔗',
                 order: 100,
                 open: openCCT,
-                close: () => {
-                    const root = document.getElementById('cct-root');
-                    if (root) root.style.display = '';
-                },
                 prefs: {
                     fields: [
                         { key: 'apiKey', type: 'password', label: 'API Key', hint: 'Torn API key with log and items selections' },
@@ -2704,29 +2663,11 @@
     }
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-            detectHubState();
-            watchHubState();
-            registerWithHub();
-        });
+        document.addEventListener('DOMContentLoaded', registerWithHub);
     } else {
-        detectHubState();
-        watchHubState();
         registerWithHub();
     }
-    document.addEventListener('torn-script-hub:ready', () => {
-        hubIsActive = true;
-        applyHubVisibility();
-        registerWithHub();
-    });
-    document.addEventListener('torn-script-hub:active', () => {
-        hubIsActive = true;
-        applyHubVisibility();
-    });
-    document.addEventListener('torn-script-hub:dormant', () => {
-        hubIsActive = false;
-        applyHubVisibility();
-    });
+    document.addEventListener('torn-script-hub:ready', registerWithHub);
 
     async function init() {
         injectCSS();
