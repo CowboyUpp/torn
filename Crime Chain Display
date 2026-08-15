@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.5
+// @version      4.9.6
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.5';
+    const VERSION = '4.9.6';
     // TODO after deploying cct-sync-worker.js: replace both this URL and the
     // @connect host above with your real *.workers.dev address (or custom
     // domain). Cross-device sync stays fully inert — no requests fired, no
@@ -103,6 +103,7 @@
     let crossSyncPullTimer = null;
     let crossSyncInFlight = false;
     let crossSyncLastStatus = '';
+    let hubIsActive = false;
 
     // Nerve capture: there is no confirmed, documented "Nerve outgoing" log
     // type in Torn's API (torn/logtypes has no such entry, and nerve cost is
@@ -257,6 +258,38 @@
 
     function currentCrimesRoute() {
         return `${location.pathname}${location.search}${location.hash}`;
+    }
+
+    function applyHubVisibility() {
+        const root = document.getElementById('cct-root');
+        if (!root) return;
+        root.style.display = hubIsActive ? 'none' : '';
+    }
+
+    function detectHubState() {
+        const hubRow = document.getElementById('tsh-sidebar-row');
+        const wasActive = hubIsActive;
+        hubIsActive = !!(hubRow && !hubRow.classList.contains('tsh-disabled'));
+        if (wasActive !== hubIsActive) {
+            applyHubVisibility();
+        }
+    }
+
+    function watchHubState() {
+        const hubRow = document.getElementById('tsh-sidebar-row');
+        if (!hubRow) {
+            const obs = new MutationObserver(() => {
+                if (document.getElementById('tsh-sidebar-row')) {
+                    obs.disconnect();
+                    detectHubState();
+                    watchHubState();
+                }
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+            return;
+        }
+        const obs = new MutationObserver(detectHubState);
+        obs.observe(hubRow, { attributes: true, attributeFilter: ['class'] });
     }
 
     function resetResultCounterTracking() {
@@ -2110,6 +2143,7 @@
         `;
 
         anchor.appendChild(el);
+        applyHubVisibility();
 
         el.querySelector('#cct-theme-toggle').addEventListener('click', (e) => {
             e.stopPropagation();
@@ -2554,6 +2588,7 @@
                 resetResultCounterTracking();
             }
             renderWidget();
+            applyHubVisibility();
             startDOMObserver();
             pollNerve();
             if (!syncFromNativeBadge()) applyResultCountDeltaFallback({ source: 'sync-loop' });
@@ -2590,6 +2625,108 @@
         window.addEventListener('popstate', runSyncLoop);
         window.addEventListener('hashchange', runSyncLoop);
     }
+
+    // =========================================================================
+    // HUB INTEGRATION
+    // =========================================================================
+    function openCCT() {
+        const root = document.getElementById('cct-root');
+        if (root) {
+            root.style.display = '';
+            root.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const widget = root.querySelector('#cct-widget');
+            if (widget) {
+                widget.style.transition = 'box-shadow 0.3s';
+                widget.style.boxShadow = '0 0 0 3px rgba(78,138,199,0.5)';
+                setTimeout(() => { widget.style.boxShadow = ''; }, 1000);
+            }
+        } else {
+            renderWidget();
+            applyHubVisibility();
+            const newRoot = document.getElementById('cct-root');
+            if (newRoot) {
+                newRoot.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const widget = newRoot.querySelector('#cct-widget');
+                if (widget) {
+                    widget.style.transition = 'box-shadow 0.3s';
+                    widget.style.boxShadow = '0 0 0 3px rgba(78,138,199,0.5)';
+                    setTimeout(() => { widget.style.boxShadow = ''; }, 1000);
+                }
+            }
+        }
+    }
+
+    function registerWithHub() {
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+            detail: {
+                id: 'crime-chain-tracker',
+                name: 'Crime Chain Tracker',
+                version: VERSION,
+                icon: '🔗',
+                order: 100,
+                open: openCCT,
+                close: () => {
+                    const root = document.getElementById('cct-root');
+                    if (root) root.style.display = '';
+                },
+                prefs: {
+                    fields: [
+                        { key: 'apiKey', type: 'password', label: 'API Key', hint: 'Torn API key with log and items selections' },
+                        { key: 'theme', type: 'select', label: 'Theme', options: [
+                            { value: 'dark', label: 'Dark' },
+                            { value: 'light', label: 'Light' }
+                        ], default: 'dark' },
+                        { key: 'syncEnabled', type: 'toggle', label: 'Cross-device sync', default: false }
+                    ],
+                    values: {
+                        apiKey: getLogApiKey(),
+                        theme: isDark ? 'dark' : 'light',
+                        syncEnabled: syncEnabled
+                    },
+                    onSave: (values) => {
+                        if (values.apiKey !== undefined) {
+                            saveLogApiKey(values.apiKey);
+                        }
+                        if (values.theme !== undefined) {
+                            isDark = values.theme === 'dark';
+                            saveTheme();
+                            applyTheme();
+                        }
+                        if (values.syncEnabled !== undefined) {
+                            saveSyncEnabled(values.syncEnabled);
+                            if (syncEnabled) startCrossDeviceSync();
+                            else stopCrossDeviceSync();
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            detectHubState();
+            watchHubState();
+            registerWithHub();
+        });
+    } else {
+        detectHubState();
+        watchHubState();
+        registerWithHub();
+    }
+    document.addEventListener('torn-script-hub:ready', () => {
+        hubIsActive = true;
+        applyHubVisibility();
+        registerWithHub();
+    });
+    document.addEventListener('torn-script-hub:active', () => {
+        hubIsActive = true;
+        applyHubVisibility();
+    });
+    document.addEventListener('torn-script-hub:dormant', () => {
+        hubIsActive = false;
+        applyHubVisibility();
+    });
 
     async function init() {
         injectCSS();
