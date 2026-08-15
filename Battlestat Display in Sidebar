@@ -1,57 +1,63 @@
 // ==UserScript==
-// @name         HOF Battle Stat Rank
-// @namespace    torn.com
-// @version      2.2
-// @description  Shows your battle stat rank inside the HOF nav button, styled like the Jail counter
+// @name         HoF Battle Stat Rank
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      2.3.0
+// @description  Shows your battle stat rank inside the HOF nav button, styled like native Torn counters. Script Hub integration.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @run-at       document-idle
-// CHANGELOG
-// v1.0 - Initial release. Fetched battle stat rank via Torn API v1 (personalstats).
-// v1.1 - Switched to full DOM tree walk to find HOF nav element.
-// v1.2 - Corrected nav label target from "Hall of Fame" to "HOF".
-// v1.3 - Switched to Torn API v2 (/v2/user/hof) for rank data.
-// v1.4 - Added full rankingstats key logging to debug missing battle_stats field.
-// v1.5 - Discovered battle_stats absent from API v2 response entirely.
-// v1.6 - Dropped API approach; switched to scraping live HOF page DOM via GM_xmlhttpRequest.
-// v1.7 - Switched to scraping React-rendered DOM directly on HOF page visit + caching.
-// v1.8 - Fixed class selector from [class^="infoBox"] to [class*="infoBox"].
-// v1.9 - Fixed nav ID from #nav-hof to #nav-hall_of_fame (confirmed via console).
-// v2.0 - Added hidden iframe auto-scrape on cache expiry. No longer requires
-//        manually visiting the HOF page. Fully automatic rank refresh every hour.
-// v2.1 - Fixed unsafe JSON.parse on cache.
-// v2.2 - Fixed GM_setValue(null) not clearing cache; now uses GM_deleteValue.
-//        Added @grant GM_deleteValue to metadata.
-//        Removed duplicate scrapeCurrentPage() call on HOF SPA navigation.
-//        Badge removal on nav change now clears all instances via querySelectorAll.
-//        injectBadge now cancels any previous in-flight interval before starting a new one.
-//        Dropped hashed Torn class (amount___p8QZX) from badge className — will break on redeploy.
-//        Added isScraping guard to prevent iframe spam on repeated cache misses.
-//        Extracted shared extractRankFromDOM() helper used by both iframe and page scrapers.
-//        Failed scrape now writes a 55-minute cooldown timestamp to avoid re-triggering every click.
-//        Reduced iframe max attempts from 80 to 45 (~15s timeout).
+// @license      MIT
+// @downloadURL  https://update.greasyfork.org/scripts/581347/HOF%20Battle%20Stat%20Rank.user.js
+// @updateURL    https://update.greasyfork.org/scripts/581347/HOF%20Battle%20Stat%20Rank.meta.js
 // ==/UserScript==
- 
+
 (function () {
     'use strict';
- 
+
+    const SCRIPT = 'HoF Battle Stat Rank';
+    const VERSION = '2.3.0';
+    const HUB_ID = 'hof-battle-stat-rank';
     const CACHE_KEY = 'hof_battlescore_rank';
+    const SETTINGS_KEY = 'hof_battlescore_settings';
     const CACHE_TTL = 60 * 60 * 1000;       // 1 hour
-    const SCRAPE_COOLDOWN = 55 * 60 * 1000; // 55 min cooldown after failed scrape
- 
+    const SCRAPE_COOLDOWN = 55 * 60 * 1000;  // 55 min after failed scrape
+
+    const DEFAULT_SETTINGS = {
+        enabled: true,
+        badgeColor: 'native', // native | orange | green | blue
+    };
+
+    let settings = { ...DEFAULT_SETTINGS };
     let isScraping = false;
     let injectBadgeIntervalId = null;
- 
-    // ── Safe cache getter ─────────────────────────────────────────────────────
+    let currentRank = null;
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+    function loadSettings() {
+        try {
+            const raw = GM_getValue(SETTINGS_KEY);
+            if (raw) {
+                const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                settings = { ...DEFAULT_SETTINGS, ...parsed };
+            }
+        } catch (e) {
+            settings = { ...DEFAULT_SETTINGS };
+        }
+    }
+
+    function saveSettings() {
+        GM_setValue(SETTINGS_KEY, JSON.stringify(settings));
+    }
+
+    // ── Safe cache ────────────────────────────────────────────────────────────
     function getCachedRank() {
         const raw = GM_getValue(CACHE_KEY);
         if (!raw) return null;
- 
         try {
-            const cached = JSON.parse(raw);
+            const cached = typeof raw === 'string' ? JSON.parse(raw) : raw;
             if (cached && typeof cached.rank === 'number' &&
                 Date.now() - cached.ts < CACHE_TTL) {
                 return cached.rank;
@@ -62,12 +68,13 @@
         }
         return null;
     }
- 
+
     function saveRank(rank) {
         GM_setValue(CACHE_KEY, JSON.stringify({ rank, ts: Date.now() }));
         isScraping = false;
+        currentRank = rank;
     }
- 
+
     // ── Shared DOM rank extractor ─────────────────────────────────────────────
     function extractRankFromDOM(root) {
         const boxes = root.querySelectorAll('[class*="infoBox"]');
@@ -80,31 +87,27 @@
         }
         return null;
     }
- 
+
     // ── Scrape rank from a hidden iframe ──────────────────────────────────────
     function scrapeViaIframe() {
-        if (isScraping) return;
+        if (isScraping || !settings.enabled) return;
         isScraping = true;
- 
         console.log('[HOF Rank] Loading HOF page in hidden iframe...');
- 
+
         document.querySelector('#hof-rank-iframe')?.remove();
- 
         const iframe = document.createElement('iframe');
         iframe.id = 'hof-rank-iframe';
         iframe.src = 'https://www.torn.com/page.php?sid=hof';
         iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
         document.body.appendChild(iframe);
- 
+
         let attempts = 0;
-        const maxAttempts = 45; // ~15 seconds at 350ms
- 
+        const maxAttempts = 45;
         const iv = setInterval(() => {
             attempts++;
             try {
                 const doc = iframe.contentDocument || iframe.contentWindow?.document;
                 if (!doc || doc.readyState !== 'complete') return;
- 
                 const rank = extractRankFromDOM(doc);
                 if (rank !== null) {
                     saveRank(rank);
@@ -115,24 +118,24 @@
                     return;
                 }
             } catch (e) {
-                // Ignore cross-origin or rendering issues during load
+                // cross-origin / still loading
             }
- 
             if (attempts > maxAttempts) {
                 clearInterval(iv);
                 iframe.remove();
                 isScraping = false;
-                // Write a 55-min cooldown so a failed scrape doesn't re-trigger on every click
-                GM_setValue(CACHE_KEY, JSON.stringify({ rank: null, ts: Date.now() - (CACHE_TTL - SCRAPE_COOLDOWN) }));
-                console.warn('[HOF Rank] iframe scrape timed out — cooldown active for ~5 min');
+                GM_setValue(CACHE_KEY, JSON.stringify({
+                    rank: null,
+                    ts: Date.now() - (CACHE_TTL - SCRAPE_COOLDOWN)
+                }));
+                console.warn('[HOF Rank] iframe scrape timed out — cooldown active');
             }
         }, 350);
     }
- 
+
     // ── Scrape from current page if already on HOF ────────────────────────────
     function scrapeCurrentPage() {
-        if (!location.href.includes('sid=hof')) return;
- 
+        if (!location.href.includes('sid=hof') || !settings.enabled) return;
         let attempts = 0;
         const iv = setInterval(() => {
             attempts++;
@@ -147,15 +150,69 @@
             if (attempts > 50) clearInterval(iv);
         }, 350);
     }
- 
+
+    // ── Styles (native-looking, centered) ─────────────────────────────────────
+    function injectStyles() {
+        if (document.getElementById('hof-rank-style')) return;
+        const style = document.createElement('style');
+        style.id = 'hof-rank-style';
+        style.textContent = `
+            #nav-hall_of_fame a,
+            #nav-hof a {
+                display: inline-flex !important;
+                align-items: center !important;
+                flex-wrap: nowrap;
+            }
+            .hof-rank-badge {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                margin-left: 6px;
+                padding: 0 2px;
+                font-weight: 700;
+                font-size: inherit;
+                line-height: 1;
+                vertical-align: middle;
+                white-space: nowrap;
+                color: var(--hof-rank-color, #85b200);
+            }
+            /* Color variants */
+            .hof-rank-badge.hof-color-native { color: inherit; opacity: 0.9; }
+            .hof-rank-badge.hof-color-orange { color: #d08000; }
+            .hof-rank-badge.hof-color-green  { color: #85b200; }
+            .hof-rank-badge.hof-color-blue   { color: #4e8ac7; }
+
+            body.dark-mode .hof-rank-badge.hof-color-native { opacity: 0.95; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function badgeColorClass() {
+        const map = {
+            native: 'hof-color-native',
+            orange: 'hof-color-orange',
+            green: 'hof-color-green',
+            blue: 'hof-color-blue',
+        };
+        return map[settings.badgeColor] || 'hof-color-green';
+    }
+
     // ── Inject badge into nav ─────────────────────────────────────────────────
+    function removeBadges() {
+        document.querySelectorAll('.hof-rank-badge').forEach(el => el.remove());
+    }
+
     function injectBadge(rank) {
-        // Cancel any previous in-flight injection attempt
+        if (!settings.enabled || rank == null) {
+            removeBadges();
+            return;
+        }
+
         if (injectBadgeIntervalId !== null) {
             clearInterval(injectBadgeIntervalId);
             injectBadgeIntervalId = null;
         }
- 
+
         let attempts = 0;
         injectBadgeIntervalId = setInterval(() => {
             attempts++;
@@ -163,15 +220,16 @@
             if (link) {
                 clearInterval(injectBadgeIntervalId);
                 injectBadgeIntervalId = null;
- 
-                // Prevent duplicate badges
-                if (link.querySelector('.hof-rank-badge')) return;
- 
-                const badge = document.createElement('span');
-                badge.className = 'hof-rank-badge';
-                badge.style.cssText = 'color: #ff9a00; margin-left: 5px; font-weight: bold;';
-                badge.textContent = `#${rank.toLocaleString()}`;
-                link.appendChild(badge);
+
+                // Update existing badge or create
+                let badge = link.querySelector('.hof-rank-badge');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'hof-rank-badge';
+                    link.appendChild(badge);
+                }
+                badge.className = 'hof-rank-badge ' + badgeColorClass();
+                badge.textContent = `#${Number(rank).toLocaleString()}`;
                 console.log('[HOF Rank] Badge injected:', badge.textContent);
             }
             if (attempts > 40) {
@@ -180,11 +238,16 @@
             }
         }, 300);
     }
- 
-    // ── Load cache or trigger auto-scrape ─────────────────────────────────────
-    function init() {
+
+    // ── Init rank load ────────────────────────────────────────────────────────
+    function initRank() {
+        if (!settings.enabled) {
+            removeBadges();
+            return;
+        }
         const cachedRank = getCachedRank();
         if (cachedRank !== null) {
+            currentRank = cachedRank;
             console.log('[HOF Rank] Using cached rank:', cachedRank);
             injectBadge(cachedRank);
         } else {
@@ -196,25 +259,138 @@
             }
         }
     }
- 
-    // ── Debounced SPA navigation handler ──────────────────────────────────────
+
+    function forceRefresh() {
+        GM_deleteValue(CACHE_KEY);
+        currentRank = null;
+        removeBadges();
+        isScraping = false;
+        if (location.href.includes('sid=hof')) {
+            scrapeCurrentPage();
+        } else {
+            scrapeViaIframe();
+        }
+    }
+
+    // ── Hub integration ───────────────────────────────────────────────────────
+    function getStatusText() {
+        if (!settings.enabled) return 'Disabled';
+        if (currentRank != null) return `Battle stats rank: #${currentRank.toLocaleString()}`;
+        const cached = getCachedRank();
+        if (cached != null) return `Battle stats rank: #${cached.toLocaleString()}`;
+        return 'Rank not loaded yet';
+    }
+
+    function registerWithHub() {
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+            detail: {
+                id: HUB_ID,
+                name: 'HoF Battle Stat Rank',
+                version: VERSION,
+                order: 250,
+                open: () => {
+                    // Go to HOF page (and refresh rank while there)
+                    if (!location.href.includes('sid=hof')) {
+                        window.location.href = 'https://www.torn.com/page.php?sid=hof';
+                    } else {
+                        forceRefresh();
+                    }
+                },
+                close: () => {
+                    settings.enabled = false;
+                    saveSettings();
+                    removeBadges();
+                },
+                status: getStatusText,
+                prefs: {
+                    fields: [
+                        {
+                            key: 'enabled',
+                            type: 'toggle',
+                            label: 'Show rank on HOF button',
+                            default: true,
+                            hint: 'Display your battle stats rank next to Hall of Fame in the sidebar'
+                        },
+                        {
+                            key: 'badgeColor',
+                            type: 'select',
+                            label: 'Badge color',
+                            default: 'native',
+                            options: [
+                                { value: 'native', label: 'Native (match menu)' },
+                                { value: 'green', label: 'Green' },
+                                { value: 'blue', label: 'Blue' },
+                                { value: 'orange', label: 'Orange' },
+                            ],
+                            hint: 'Color of the rank number in the sidebar'
+                        },
+                        {
+                            key: 'refresh',
+                            type: 'button',
+                            label: 'Refresh rank now',
+                            hint: 'Clear cache and scrape the HOF page again',
+                            onClick: () => forceRefresh()
+                        },
+                    ],
+                    values: {
+                        enabled: settings.enabled,
+                        badgeColor: settings.badgeColor,
+                    },
+                    onSave: (values) => {
+                        const wasEnabled = settings.enabled;
+                        settings.enabled = !!values.enabled;
+                        settings.badgeColor = values.badgeColor || 'native';
+                        saveSettings();
+
+                        if (!settings.enabled) {
+                            removeBadges();
+                        } else {
+                            if (currentRank != null) {
+                                injectBadge(currentRank);
+                            } else {
+                                initRank();
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
+    function tryRegister() {
+        loadSettings();
+        registerWithHub();
+    }
+
+    // ── SPA navigation ────────────────────────────────────────────────────────
     let lastUrl = location.href;
     const observer = new MutationObserver(() => {
         if (location.href !== lastUrl) {
             lastUrl = location.href;
- 
-            // Remove all badge instances (not just first)
-            document.querySelectorAll('.hof-rank-badge').forEach(el => el.remove());
- 
-            // init() handles scrapeCurrentPage() internally when on HOF —
-            // no need for a second setTimeout call here
-            init();
+            removeBadges();
+            initRank();
         }
     });
- 
-    observer.observe(document.body, { childList: true, subtree: true });
- 
+
     // ── Boot ──────────────────────────────────────────────────────────────────
-    console.log('[HOF Rank] Script started v2.2');
-    init();
+    loadSettings();
+    injectStyles();
+
+    if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+        document.addEventListener('DOMContentLoaded', () => {
+            observer.observe(document.body, { childList: true, subtree: true });
+        }, { once: true });
+    }
+
+    console.log('[HOF Rank] Script started', VERSION);
+    initRank();
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', tryRegister);
+    } else {
+        tryRegister();
+    }
+    document.addEventListener('torn-script-hub:ready', tryRegister);
 })();
