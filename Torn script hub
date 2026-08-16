@@ -1,21 +1,19 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.0.2
-// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Clean professional dashboard for launch, prefs, and help.
+// @version      4.1.0
+// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Clean professional dashboard for launch, prefs, and a library of compatible scripts.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.user.js
-// @updateURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.0.2';
+    const HUB_VERSION = '4.1.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -33,6 +31,26 @@
     const STORAGE_KEY = 'tsh-onboarded';
     const KNOWN_SCRIPTS_KEY = 'tsh-known-scripts';
     const UI_ENABLED_KEY = 'tsh-ui-enabled';
+
+    // =========================================================================
+    // LIBRARY — Hub-compatible scripts, shown in the Library tab. Version and
+    // active/installed status are looked up live from known-scripts data
+    // (matched by name) rather than hardcoded, so this stays accurate as
+    // scripts update.
+    // =========================================================================
+    const CONTACT_URL = 'https://www.torn.com/messages.php#/p=compose&XID=1496324';
+    const LIBRARY_SCRIPTS = [
+        { id: 586532, name: 'Bustr+', description: 'Busting reminder with a jail-page UI and PDA support.' },
+        { id: 587751, name: 'No Confirm Market & Bazaar', description: 'Skips the confirmation step when buying on the Item Market or Bazaar.' },
+        { id: 581347, name: 'HoF Battle Stat Rank', description: 'Shows your battle stat rank in the Hall of Fame.' },
+        { id: 581948, name: 'Crime Chain Tracker', description: 'Tracks your Crimes 2.0 chain, critical fails, and resets.' },
+        { id: 591579, name: 'Mobster & Cyclist Alert', description: 'Beeps when a Mobster or Cyclist crime becomes available.' },
+        { id: 589775, name: 'OpenMarket', description: 'Overlays item quality % and bonus info on the Item Market, Auction House, and Bazaar.' },
+        { id: 587089, name: 'Cracking Heat Badge', description: 'Shows a live heat badge while cracking.' },
+        { id: 585434, name: 'Item Market Portfolio', description: 'Tracks the value of your Item Market listings over time.' },
+        { id: 582128, name: 'Activity Log Filter & CSV', description: 'Filters your activity log and exports it to CSV.' },
+        { id: 588262, name: 'Torn: Travel Inventory', description: 'Shows your travel inventory and item info while abroad.' }
+    ];
 
     const registry = new Map();
     let readyFired = false;
@@ -479,12 +497,12 @@
                 <div class="tsh-dash-tabs">
                     <button data-tab="launch" class="tsh-dash-tab active">Scripts</button>
                     <button data-tab="prefs" class="tsh-dash-tab">Settings</button>
-                    <button data-tab="help" class="tsh-dash-tab">Help</button>
+                    <button data-tab="library" class="tsh-dash-tab">Library</button>
                 </div>
                 <div class="tsh-dash-body">
                     <div data-panel="launch" class="tsh-dash-panel-content active"></div>
                     <div data-panel="prefs" class="tsh-dash-panel-content"></div>
-                    <div data-panel="help" class="tsh-dash-panel-content"></div>
+                    <div data-panel="library" class="tsh-dash-panel-content"></div>
                 </div>
             </div>
         `;
@@ -504,6 +522,7 @@
                 panel.classList.add('active');
                 if (tab.dataset.tab === 'prefs') renderPrefsPanel(panel);
                 if (tab.dataset.tab === 'launch') renderLaunchPanel(panel);
+                if (tab.dataset.tab === 'library') renderLibraryPanel(panel);
             });
         });
 
@@ -522,7 +541,7 @@
         if (!dash) return;
         renderLaunchPanel(dash.querySelector('[data-panel="launch"]'));
         renderPrefsPanel(dash.querySelector('[data-panel="prefs"]'));
-        renderHelpPanel(dash.querySelector('[data-panel="help"]'));
+        renderLibraryPanel(dash.querySelector('[data-panel="library"]'));
     }
 
     // ----- Scripts tab -----
@@ -898,34 +917,83 @@
         return wrap;
     }
 
-    // ----- Help -----
-    function renderHelpPanel(container) {
+    // ----- Library -----
+    function renderLibraryPanel(container) {
         if (!container) return;
-        container.innerHTML = `
-            <div class="tsh-help-wrap">
-                <details class="tsh-help-section" open>
-                    <summary>Using Script Hub</summary>
-                    <div class="tsh-help-body">
-                        <p><strong>Script Hub</strong> is a control center for Torn userscripts. Compatible scripts register here so you have one clean place to launch them and change settings.</p>
-                        <ul>
-                            <li><strong>Scripts:</strong> Launch a script or enable/disable it without uninstalling.</li>
-                            <li><strong>Settings:</strong> Open a script’s preferences. Changes save automatically.</li>
-                            <li><strong>Adding scripts:</strong> Compatible scripts appear automatically.</li>
-                        </ul>
-                    </div>
-                </details>
-                <details class="tsh-help-section">
-                    <summary>Troubleshooting</summary>
-                    <div class="tsh-help-body">
-                        <ul>
-                            <li><strong>No dashboard</strong> — Make sure only one Script Hub is enabled in Violentmonkey. Hard-refresh the page (Ctrl+Shift+R).</li>
-                            <li><strong>Script not showing</strong> — Check the browser console. The script must run after the Hub.</li>
-                            <li><strong>Hub disabled</strong> — Press <kbd>Shift+H</kbd> or right-click the Hub button.</li>
-                        </ul>
-                    </div>
-                </details>
-            </div>
-        `;
+        container.innerHTML = '';
+
+        const known = getKnownScripts();
+        const activeNames = new Set(Array.from(registry.values()).filter(s => s.active).map(s => s.name));
+
+        const wrap = document.createElement('div');
+        wrap.className = 'tsh-lib-wrap';
+
+        const intro = document.createElement('p');
+        intro.className = 'tsh-lib-intro';
+        intro.textContent = 'Scripts built to work with Script Hub. Install any of these and they\u2019ll register here automatically.';
+        wrap.appendChild(intro);
+
+        const list = document.createElement('div');
+        list.className = 'tsh-lib-list';
+
+        LIBRARY_SCRIPTS.forEach(entry => {
+            const knownMatch = known.find(k => k.name === entry.name);
+            const isActive = activeNames.has(entry.name);
+
+            const row = document.createElement('div');
+            row.className = 'tsh-lib-row';
+
+            const info = document.createElement('div');
+            info.className = 'tsh-lib-info';
+
+            const nameRow = document.createElement('div');
+            nameRow.className = 'tsh-lib-name-row';
+
+            const name = document.createElement('span');
+            name.className = 'tsh-lib-name';
+            name.textContent = entry.name;
+            nameRow.appendChild(name);
+
+            if (knownMatch && knownMatch.version) {
+                const ver = document.createElement('span');
+                ver.className = 'tsh-lib-version';
+                ver.textContent = 'v' + knownMatch.version;
+                nameRow.appendChild(ver);
+            }
+
+            const badge = document.createElement('span');
+            badge.className = 'tsh-lib-badge' + (isActive ? ' tsh-lib-badge-active' : (knownMatch ? ' tsh-lib-badge-known' : ''));
+            badge.textContent = isActive ? 'Active' : (knownMatch ? 'Installed' : 'Available');
+            nameRow.appendChild(badge);
+
+            info.appendChild(nameRow);
+
+            const desc = document.createElement('div');
+            desc.className = 'tsh-lib-desc';
+            desc.textContent = entry.description;
+            info.appendChild(desc);
+
+            row.appendChild(info);
+
+            const install = document.createElement('a');
+            install.className = 'tsh-lib-install';
+            install.href = `https://greasyfork.org/en/scripts/${entry.id}`;
+            install.target = '_blank';
+            install.rel = 'noopener';
+            install.textContent = knownMatch ? 'View' : 'Install';
+            row.appendChild(install);
+
+            list.appendChild(row);
+        });
+
+        wrap.appendChild(list);
+
+        const contact = document.createElement('div');
+        contact.className = 'tsh-lib-contact';
+        contact.innerHTML = `Questions or bug reports? <a href="${CONTACT_URL}" target="_blank" rel="noopener">Message cowboyup on Torn</a>.`;
+        wrap.appendChild(contact);
+
+        container.appendChild(wrap);
     }
 
     // =========================================================================
@@ -1143,16 +1211,39 @@
                 font-size:10px; opacity:.5; text-align:center;
             }
 
-            .tsh-help-wrap { display:flex; flex-direction:column; gap:10px; }
-            .tsh-help-section { border:1px solid var(--tsh-border,#bbb); border-radius:5px; overflow:hidden; }
-            .tsh-help-section summary {
-                padding:12px 14px; font-weight:700; font-size:13px; cursor:pointer;
-                background:var(--tsh-row-bg,rgba(0,0,0,.03));
+            .tsh-lib-wrap { display:flex; flex-direction:column; gap:10px; }
+            .tsh-lib-intro { margin:0; font-size:12px; opacity:.7; line-height:1.5; }
+            .tsh-lib-list { display:flex; flex-direction:column; gap:6px; }
+            .tsh-lib-row {
+                display:flex; align-items:center; justify-content:space-between; gap:10px;
+                padding:8px 10px; border:1px solid var(--tsh-border,#bbb); border-radius:4px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02));
             }
-            .tsh-help-body { padding:12px 14px; font-size:13px; line-height:1.55; }
-            .tsh-help-body p { margin:0 0 10px; }
-            .tsh-help-body ul { margin:6px 0; padding-left:18px; }
-            .tsh-help-body li { margin-bottom:5px; }
+            .tsh-lib-row:hover { border-color:rgba(78,138,199,.55); background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-lib-info { min-width:0; flex:1; }
+            .tsh-lib-name-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+            .tsh-lib-name { font-size:12px; font-weight:700; }
+            .tsh-lib-version { font-size:10px; opacity:.5; }
+            .tsh-lib-badge {
+                font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+                padding:2px 6px; border-radius:9px;
+                background:var(--tsh-toggle-off,#ddd); color:inherit; opacity:.75;
+            }
+            .tsh-lib-badge-known { background:rgba(78,138,199,.18); color:#2a5a8a; opacity:1; }
+            .tsh-lib-badge-active { background:#4e8ac7; color:#fff; opacity:1; }
+            .tsh-lib-desc { margin-top:3px; font-size:11px; opacity:.65; line-height:1.4; }
+            .tsh-lib-install {
+                flex-shrink:0; padding:5px 12px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:11px; font-weight:600;
+                text-decoration:none; white-space:nowrap;
+            }
+            .tsh-lib-install:hover { background:#355e94; }
+            .tsh-lib-contact {
+                margin-top:4px; padding-top:8px; border-top:1px solid var(--tsh-border,#bbb);
+                font-size:11px; opacity:.75; text-align:center;
+            }
+            .tsh-lib-contact a { color:#4e8ac7; text-decoration:none; font-weight:600; }
+            .tsh-lib-contact a:hover { text-decoration:underline; }
 
             .tsh-onboarding {
                 position:fixed; inset:0; z-index:2147483647;
@@ -1192,6 +1283,8 @@
             @media (max-width: 480px) {
                 .tsh-dash-panel { width:100%; }
                 .tsh-pref-grid, .tsh-pref-toggles { grid-template-columns:1fr 1fr; }
+                .tsh-lib-row { flex-direction:column; align-items:flex-start; }
+                .tsh-lib-install { align-self:flex-end; }
             }
             @media (max-width: 360px) {
                 .tsh-pref-grid, .tsh-pref-toggles { grid-template-columns:1fr; }
