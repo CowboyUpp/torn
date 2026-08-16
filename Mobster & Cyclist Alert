@@ -1,23 +1,27 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
-// @namespace    microbes.torn.ring
-// @version      0.4.0
-// @description  Mobster & Cyclist Acoustical Alert
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      0.5.0
+// @description  Mobster & Cyclist Acoustical Alert — now a Torn Script Hub satellite
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/
-// @updateURL https://update.greasyfork.org/
+// @downloadURL  https://update.greasyfork.org/scripts/591576/Mobster%20%26%20Cyclist%20Alert.user.js
+// @updateURL    https://update.greasyfork.org/scripts/591576/Mobster%20%26%20Cyclist%20Alert.meta.js
 // ==/UserScript==
 
 (function() {
     'use strict';
 
+    const HUB_ID = 'mobster-cyclist-alert';
+    const SCRIPT_NAME = 'Mobster & Cyclist Alert';
+    const SCRIPT_VERSION = '0.5.0';
+
     const STORAGE_KEYS = {
-        mobster: 'mobsterAlertEnabled',
-        cyclist: 'cyclistAlertEnabled'
+        mobster: 'mca-mobster-enabled',
+        cyclist: 'mca-cyclist-enabled'
     };
 
     const state = {
@@ -25,76 +29,60 @@
         cyclist: localStorage.getItem(STORAGE_KEYS.cyclist) === 'true'
     };
 
-    const SOUND_URL = 'https://audio.jukehost.co.uk/gxd2HB9RibSHhr13OiW6ROCaaRbD8103';
-    const BEEP_GAP_MS = 400; // gap between repeated beeps (e.g. Mobster's triple-beep)
+    // Edge-triggered: only alert once per availability window, not on every poll
+    const lastAvailable = {
+        mobster: false,
+        cyclist: false
+    };
 
-    waitForElementToExist('.pickpocketing-root').then(() => {
-        $('.pickpocketing-root').append(`
-            <div id="crime-alert-div">
-                <a id="mobster-toggle-btn" class="torn-btn btn-big"></a>
-                &nbsp;
-                <a id="cyclist-toggle-btn" class="torn-btn btn-big"></a>
-                <br/><br/>
-            </div>
-        `);
+    // =========================================================================
+    // SYSTEM BEEP (Web Audio API — no external audio file)
+    // =========================================================================
+    let audioCtx = null;
+    const BEEP_DURATION = 0.15; // seconds
+    const BEEP_GAP = 0.12;      // seconds between repeated beeps
 
-        updateButtonLabel('mobster');
-        updateButtonLabel('cyclist');
-
-        $('#mobster-toggle-btn').click(() => toggleAlert('mobster'));
-        $('#cyclist-toggle-btn').click(() => toggleAlert('cyclist'));
-
-        // Always listen; whether we actually alert depends on each toggle's state
-        interceptFetch("torn.com", "/page.php?sid=crimesData", (response) => {
-            const crimes = response.DB.crimesByType;
-
-            if (state.cyclist && isCrimeAvailable(crimes, "Cyclist")) {
-                playBeeps(1);
-                highlightAvailable();
-            }
-
-            if (state.mobster && isCrimeAvailable(crimes, "Mobster")) {
-                playBeeps(3);
-                highlightAvailable();
-            }
-        });
-    });
-
-    function toggleAlert(type) {
-        state[type] = !state[type];
-        localStorage.setItem(STORAGE_KEYS[type], state[type]);
-        updateButtonLabel(type);
-
-        if (state[type]) {
-            // Test sound when enabled, using this type's beep pattern
-            playBeeps(type === 'mobster' ? 3 : 1);
+    function getAudioCtx() {
+        if (!audioCtx) {
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!Ctx) return null;
+            audioCtx = new Ctx();
         }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+        return audioCtx;
     }
 
-    function updateButtonLabel(type) {
-        const label = type === 'mobster' ? 'Mobster' : 'Cyclist';
-        const $btn = $(`#${type}-toggle-btn`);
-        $btn.text(`${state[type] ? 'Disable' : 'Enable'} ${label} Alert`);
-        $btn.css('background-color', state[type] ? '#2e7d32' : '');
-    }
-
-    function playBeeps(count) {
+    function beep(count) {
+        const ctx = getAudioCtx();
+        if (!ctx) return;
         for (let i = 0; i < count; i++) {
-            setTimeout(() => {
-                new Audio(SOUND_URL).play();
-            }, i * BEEP_GAP_MS);
+            const startTime = ctx.currentTime + i * (BEEP_DURATION + BEEP_GAP);
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = 880;
+            gain.gain.setValueAtTime(0.0001, startTime);
+            gain.gain.exponentialRampToValueAtTime(0.3, startTime + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, startTime + BEEP_DURATION);
+            osc.connect(gain).connect(ctx.destination);
+            osc.start(startTime);
+            osc.stop(startTime + BEEP_DURATION + 0.02);
         }
     }
 
-    function highlightAvailable() {
-        /* Highlight all available crime icons (generic, matches original behavior) */
-        $('.CircularProgressbar').nextAll().each(function() {
-            if ($(this).css('background-position-y') == '0px') {
-                $(this).parent().parent().parent().parent().css("background-color", "#00ff00");
-            }
-        });
+    // =========================================================================
+    // PERSISTENCE
+    // =========================================================================
+    function persist() {
+        localStorage.setItem(STORAGE_KEYS.mobster, state.mobster);
+        localStorage.setItem(STORAGE_KEYS.cyclist, state.cyclist);
     }
 
+    // =========================================================================
+    // CRIME DETECTION
+    // =========================================================================
     function isCrimeAvailable(crimes, title) {
         for (let i = 0; i < crimes.length; i++) {
             if (crimes[i].title === title && crimes[i].available === true) {
@@ -103,6 +91,85 @@
         }
         return false;
     }
+
+    function highlightAvailable() {
+        /* Highlight all available crime icons (generic, unchanged from prior versions) */
+        $('.CircularProgressbar').nextAll().each(function() {
+            if ($(this).css('background-position-y') == '0px') {
+                $(this).parent().parent().parent().parent().css("background-color", "#00ff00");
+            }
+        });
+    }
+
+    function checkType(type, title, crimes, beepCount) {
+        const available = isCrimeAvailable(crimes, title);
+        if (available && !lastAvailable[type] && state[type]) {
+            beep(beepCount);
+            highlightAvailable();
+        }
+        lastAvailable[type] = available;
+    }
+
+    function startWatching() {
+        interceptFetch("torn.com", "/page.php?sid=crimesData", (response) => {
+            const crimes = response.DB.crimesByType;
+            checkType('cyclist', 'Cyclist', crimes, 1);
+            checkType('mobster', 'Mobster', crimes, 3);
+        });
+    }
+
+    // =========================================================================
+    // TORN SCRIPT HUB INTEGRATION
+    // =========================================================================
+    function registerWithHub() {
+        const registration = {
+            id: HUB_ID,
+            name: SCRIPT_NAME,
+            version: SCRIPT_VERSION,
+            order: 200,
+            open: () => {
+                // No standalone UI of its own — jump straight to this script's
+                // Settings panel in the Hub dashboard.
+                document.dispatchEvent(new CustomEvent('torn-script-hub:open', {
+                    detail: { scriptId: HUB_ID }
+                }));
+            },
+            status: () => `Mobster: ${state.mobster ? 'On' : 'Off'} · Cyclist: ${state.cyclist ? 'On' : 'Off'}`,
+            prefs: {
+                fields: [
+                    { key: 'mobster', label: 'Mobster Alert (3 beeps)', type: 'toggle', default: state.mobster },
+                    { key: 'cyclist', label: 'Cyclist Alert (1 beep)', type: 'toggle', default: state.cyclist }
+                ],
+                values: {
+                    mobster: state.mobster,
+                    cyclist: state.cyclist
+                },
+                onSave: (values) => {
+                    const turningOnMobster = !!values.mobster && !state.mobster;
+                    const turningOnCyclist = !!values.cyclist && !state.cyclist;
+
+                    state.mobster = !!values.mobster;
+                    state.cyclist = !!values.cyclist;
+                    persist();
+
+                    // Test beep on enable, same pattern as the live alert
+                    if (turningOnMobster) beep(3);
+                    if (turningOnCyclist) beep(1);
+                }
+            }
+        };
+
+        (window.__tornScriptHubQueue = window.__tornScriptHubQueue || []).push(registration);
+    }
+
+    // =========================================================================
+    // START — runs independently of the Hub; registration is additive
+    // =========================================================================
+    registerWithHub();
+
+    waitForElementToExist('.pickpocketing-root').then(() => {
+        startWatching();
+    });
 })();
 
 function interceptFetch(url, q, callback) {
@@ -117,7 +184,7 @@ function interceptFetch(url, q, callback) {
 						if (clone) {
 							clone.json().then((response) => callback(response, data.url))
 								.catch((error) => {
-									console.log("[LoadoutShare][InterceptFetch] Error with clone.json(). Most likely not JSON data.", error)
+									console.log("[MobsterCyclistAlert][InterceptFetch] Error with clone.json(). Most likely not JSON data.", error)
 								})
 						}
 					}
@@ -125,7 +192,7 @@ function interceptFetch(url, q, callback) {
 					resolve(data);
 				})
 				.catch((error) => {
-					console.log("[LoadoutShare][InterceptFetch] Error with fetch.", error)
+					console.log("[MobsterCyclistAlert][InterceptFetch] Error with fetch.", error)
 				})
 		});
 	};
