@@ -49,6 +49,7 @@
     }
 
     const hubPresent = isHubPresent();
+    console.log('[TCMF debug] hubPresent =', hubPresent, '| queue:', window[QUEUE_PROPERTY], '| readyState:', document.readyState);
 
     const DEFAULT_SETTINGS = {
         fabX: null,
@@ -1480,6 +1481,24 @@
             }
             #tcfs-fab.tcfs-new-find-pulse {
                 animation: tcfs-new-find-pulse 1.25s ease-out 2;
+            }
+
+            /* v1.3.0 — the compact icon-only button (v1.2.1+) no longer expands
+               on hover, but an old translateX(-86px) rule for .tcfs-expand-left
+               (left over from the earlier wide-label design) was never removed.
+               It only ever fires once placeFab() actually runs, which is now
+               true since dragging is wired up — neutralize it so the button
+               no longer jumps sideways on hover/drag. */
+            #tcfs-fab.tcfs-expand-left:hover,
+            #tcfs-fab.tcfs-expand-left:focus-visible,
+            #tcfs-fab.tcfs-expand-left.tcfs-open {
+                transform: none;
+            }
+            #tcfs-fab.tcfs-expand-left:active {
+                transform: translateY(1px);
+            }
+            #tcfs-fab.tcfs-expand-left.tcfs-dragging {
+                transform: translateY(1px);
             }
 
             @media (hover: none) {
