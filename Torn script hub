@@ -1,19 +1,21 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.1.0
+// @version      4.1.1
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Clean professional dashboard for launch, prefs, and a library of compatible scripts.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.user.js
+// @updateURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.1.0';
+    const HUB_VERSION = '4.1.1';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -918,12 +920,24 @@
     }
 
     // ----- Library -----
+    function normalizeScriptName(name) {
+        return String(name || '')
+            .toLowerCase()
+            .replace(/^torn:\s*/i, '')
+            .replace(/[^a-z0-9]+/g, ' ')
+            .trim();
+    }
+
+    function namesMatch(a, b) {
+        return normalizeScriptName(a) === normalizeScriptName(b);
+    }
+
     function renderLibraryPanel(container) {
         if (!container) return;
         container.innerHTML = '';
 
         const known = getKnownScripts();
-        const activeNames = new Set(Array.from(registry.values()).filter(s => s.active).map(s => s.name));
+        const activeScripts = Array.from(registry.values()).filter(s => s.active);
 
         const wrap = document.createElement('div');
         wrap.className = 'tsh-lib-wrap';
@@ -937,8 +951,9 @@
         list.className = 'tsh-lib-list';
 
         LIBRARY_SCRIPTS.forEach(entry => {
-            const knownMatch = known.find(k => k.name === entry.name);
-            const isActive = activeNames.has(entry.name);
+            const knownMatch = known.find(k => namesMatch(k.name, entry.name));
+            const activeMatch = activeScripts.find(s => namesMatch(s.name, entry.name));
+            const isActive = !!activeMatch;
 
             const row = document.createElement('div');
             row.className = 'tsh-lib-row';
@@ -954,10 +969,11 @@
             name.textContent = entry.name;
             nameRow.appendChild(name);
 
-            if (knownMatch && knownMatch.version) {
+            const versionLabel = (activeMatch && activeMatch.version) || (knownMatch && knownMatch.version);
+            if (versionLabel) {
                 const ver = document.createElement('span');
                 ver.className = 'tsh-lib-version';
-                ver.textContent = 'v' + knownMatch.version;
+                ver.textContent = 'v' + versionLabel;
                 nameRow.appendChild(ver);
             }
 
