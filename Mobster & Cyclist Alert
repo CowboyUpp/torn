@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.0
-// @description  Mobster & Cyclist Acoustical Alert — now a Torn Script Hub satellite
+// @version      1.0.0
+// @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @license      MIT
-// @downloadURL  https://update.greasyfork.org/scripts/591576/Mobster%20%26%20Cyclist%20Alert.user.js
-// @updateURL    https://update.greasyfork.org/scripts/591576/Mobster%20%26%20Cyclist%20Alert.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/591579/Mobster%20%26%20Cyclist%20Alert.user.js
+// @updateURL    https://update.greasyfork.org/scripts/591579/Mobster%20%26%20Cyclist%20Alert.meta.js
 // ==/UserScript==
 
 (function() {
@@ -17,16 +17,12 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.0';
+    const SCRIPT_VERSION = '1.0.0';
+    const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const STORAGE_KEYS = {
         mobster: 'mca-mobster-enabled',
         cyclist: 'mca-cyclist-enabled'
-    };
-
-    const state = {
-        mobster: localStorage.getItem(STORAGE_KEYS.mobster) === 'true',
-        cyclist: localStorage.getItem(STORAGE_KEYS.cyclist) === 'true'
     };
 
     // Edge-triggered: only alert once per availability window, not on every poll
@@ -34,6 +30,42 @@
         mobster: false,
         cyclist: false
     };
+
+    // =========================================================================
+    // HUB DETECTION
+    // =========================================================================
+    // Torn Script Hub runs at document-start on every torn.com page and, if
+    // present, synchronously patches window.__tornScriptHubQueue (marking it
+    // __tshPatched) before our document-idle script runs. That flag is a
+    // reliable signal the Hub is installed and already initialized.
+    function isHubPresent() {
+        const q = window[QUEUE_PROPERTY];
+        return !!(q && q.__tshPatched);
+    }
+
+    const hubPresent = isHubPresent();
+
+    // =========================================================================
+    // STATE — default depends on mode: on when the Hub manages it,
+    // off (manual activation required) when running standalone.
+    // A previously saved user preference always takes priority.
+    // =========================================================================
+    function loadState() {
+        const modeDefault = hubPresent;
+        const mobsterRaw = localStorage.getItem(STORAGE_KEYS.mobster);
+        const cyclistRaw = localStorage.getItem(STORAGE_KEYS.cyclist);
+        return {
+            mobster: mobsterRaw !== null ? mobsterRaw === 'true' : modeDefault,
+            cyclist: cyclistRaw !== null ? cyclistRaw === 'true' : modeDefault
+        };
+    }
+
+    const state = loadState();
+
+    function persist() {
+        localStorage.setItem(STORAGE_KEYS.mobster, state.mobster);
+        localStorage.setItem(STORAGE_KEYS.cyclist, state.cyclist);
+    }
 
     // =========================================================================
     // SYSTEM BEEP (Web Audio API — no external audio file)
@@ -70,14 +102,6 @@
             osc.start(startTime);
             osc.stop(startTime + BEEP_DURATION + 0.02);
         }
-    }
-
-    // =========================================================================
-    // PERSISTENCE
-    // =========================================================================
-    function persist() {
-        localStorage.setItem(STORAGE_KEYS.mobster, state.mobster);
-        localStorage.setItem(STORAGE_KEYS.cyclist, state.cyclist);
     }
 
     // =========================================================================
@@ -119,7 +143,49 @@
     }
 
     // =========================================================================
-    // TORN SCRIPT HUB INTEGRATION
+    // STANDALONE MODE — on-page toggle buttons (Hub not installed)
+    // =========================================================================
+    function initStandaloneUI() {
+        waitForElementToExist('.pickpocketing-root').then(() => {
+            $('.pickpocketing-root').append(`
+                <div id="crime-alert-div">
+                    <a id="mobster-toggle-btn" class="torn-btn btn-big"></a>
+                    &nbsp;
+                    <a id="cyclist-toggle-btn" class="torn-btn btn-big"></a>
+                    <br/><br/>
+                </div>
+            `);
+
+            updateButtonLabel('mobster');
+            updateButtonLabel('cyclist');
+
+            $('#mobster-toggle-btn').click(() => toggleAlert('mobster'));
+            $('#cyclist-toggle-btn').click(() => toggleAlert('cyclist'));
+
+            startWatching();
+        });
+    }
+
+    function toggleAlert(type) {
+        state[type] = !state[type];
+        persist();
+        updateButtonLabel(type);
+
+        if (state[type]) {
+            // Test beep when enabled, using this type's pattern
+            beep(type === 'mobster' ? 3 : 1);
+        }
+    }
+
+    function updateButtonLabel(type) {
+        const label = type === 'mobster' ? 'Mobster' : 'Cyclist';
+        const $btn = $(`#${type}-toggle-btn`);
+        $btn.text(`${state[type] ? 'Disable' : 'Enable'} ${label} Alert`);
+        $btn.css('background-color', state[type] ? '#2e7d32' : '');
+    }
+
+    // =========================================================================
+    // HUB MODE — no page UI, registers with Torn Script Hub for control
     // =========================================================================
     function registerWithHub() {
         const registration = {
@@ -159,17 +225,24 @@
             }
         };
 
-        (window.__tornScriptHubQueue = window.__tornScriptHubQueue || []).push(registration);
+        (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
+    }
+
+    function initHubMode() {
+        registerWithHub();
+        waitForElementToExist('.pickpocketing-root').then(() => {
+            startWatching();
+        });
     }
 
     // =========================================================================
-    // START — runs independently of the Hub; registration is additive
+    // START
     // =========================================================================
-    registerWithHub();
-
-    waitForElementToExist('.pickpocketing-root').then(() => {
-        startWatching();
-    });
+    if (hubPresent) {
+        initHubMode();
+    } else {
+        initStandaloneUI();
+    }
 })();
 
 function interceptFetch(url, q, callback) {
