@@ -96,7 +96,7 @@
             osc.type = 'sine';
             osc.frequency.value = 880;
             gain.gain.setValueAtTime(0.0001, startTime);
-            gain.gain.exponentialRampToValueAtTime(0.3, startTime + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.75, startTime + 0.01);
             gain.gain.exponentialRampToValueAtTime(0.0001, startTime + BEEP_DURATION);
             osc.connect(gain).connect(ctx.destination);
             osc.start(startTime);
