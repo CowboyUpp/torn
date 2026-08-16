@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.2.7
-// @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, and no automated pickup.
+// @version      1.3.0
+// @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, no automated pickup, and Torn Script Hub support.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
 // @match        https://*.torn.com/city.php*
@@ -13,14 +13,18 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.torn.com
-// @downloadURL https://update.greasyfork.org/scripts/583629/Torn%20City%20Map%20Finder.user.js
-// @updateURL https://update.greasyfork.org/scripts/583629/Torn%20City%20Map%20Finder.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.2.7';
+    const VERSION = '1.3.0';
+    // v1.3.0 — Torn Script Hub support (auto-registers and hides the floating
+    // button when the Hub is installed, launching via the Hub instead). For
+    // standalone use, dragging is now actually wired up and the dragged
+    // position persists across reloads; a MutationObserver keeps the
+    // auto-dock position accurate while Torn's header finishes rendering,
+    // and right-clicking the button resets it back to automatic docking.
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -30,6 +34,21 @@
     const HISTORY_SAVE_INTERVAL_MS = 30 * 1000;
     const EMPTY_SCAN_CONFIRMATIONS = 2;
     const DRAG_THRESHOLD_PX = 7;
+
+    const HUB_ID = 'torn-city-map-finder';
+    const HUB_NAME = 'Torn City Map Finder';
+    const QUEUE_PROPERTY = '__tornScriptHubQueue';
+
+    // Torn Script Hub runs at document-start on every torn.com page and, if
+    // present, synchronously patches window.__tornScriptHubQueue (marking it
+    // __tshPatched) before this document-idle script runs. That flag is a
+    // reliable signal the Hub is installed and already initialized.
+    function isHubPresent() {
+        const q = window[QUEUE_PROPERTY];
+        return !!(q && q.__tshPatched);
+    }
+
+    const hubPresent = isHubPresent();
 
     const DEFAULT_SETTINGS = {
         fabX: null,
@@ -1516,7 +1535,7 @@
         fab.setAttribute('aria-label', 'Open City Finds');
         fab.setAttribute('aria-controls', 'tcfs-panel');
         fab.setAttribute('aria-expanded', 'false');
-        
+  
         fab.innerHTML = `
             <div class="cfc-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
@@ -1578,9 +1597,21 @@
         detailEl = panel.querySelector('.tcfs-detail');
         applyTheme();
 
-        fab.addEventListener('click', () => togglePanel());
-        positionHeaderFab();
-        [250, 1000, 3000].forEach((delay) => setTimeout(positionHeaderFab, delay));
+        if (hubPresent) {
+            fab.style.display = 'none';
+            fab.setAttribute('aria-hidden', 'true');
+            fab.tabIndex = -1;
+        } else {
+            fab.title = 'City Find / Collect — drag to move, right-click to reset position';
+            if (settings.fabX !== null && settings.fabY !== null) {
+                placeFab(settings.fabX, settings.fabY, false);
+            } else {
+                positionHeaderFab();
+                setupHeaderObserver();
+            }
+            makeFabDraggable();
+            fab.addEventListener('contextmenu', onFabContextMenu);
+        }
 
         panel.addEventListener('click', onPanelClick);
         panel.querySelector('[data-role="search"]').addEventListener('input', (event) => {
@@ -1596,7 +1627,13 @@
         document.addEventListener('keydown', onDocumentKeydown);
 
         window.addEventListener('resize', () => {
-            positionHeaderFab();
+            if (!hubPresent) {
+                if (settings.fabX !== null && settings.fabY !== null) {
+                    placeFab(settings.fabX, settings.fabY, false);
+                } else {
+                    positionHeaderFab();
+                }
+            }
             if (panel.classList.contains('tcfs-open')) anchorPanel();
         });
 
@@ -1885,6 +1922,40 @@
         if (panel && panel.classList.contains('tcfs-open')) anchorPanel();
     }
 
+    function setupHeaderObserver() {
+        if (hubPresent) return;
+        if (settings.fabX !== null && settings.fabY !== null) return;
+
+        let scheduled = false;
+        const observer = new MutationObserver(() => {
+            if (scheduled) return;
+            scheduled = true;
+            requestAnimationFrame(() => {
+                scheduled = false;
+                if (settings.fabX === null && settings.fabY === null) positionHeaderFab();
+            });
+        });
+
+        try {
+            observer.observe(document.body, { childList: true, subtree: true });
+        } catch (_) {}
+
+        // Torn's header finishes rendering well within this window; stop
+        // watching afterwards so this isn't running a subtree observer
+        // indefinitely for the lifetime of the page.
+        setTimeout(() => observer.disconnect(), 12000);
+    }
+
+    function onFabContextMenu(event) {
+        if (hubPresent) return;
+        event.preventDefault();
+        settings.fabX = null;
+        settings.fabY = null;
+        saveSettings();
+        positionHeaderFab();
+        showToast('Button position reset to automatic docking.');
+    }
+
     function placeFab(left, top, persist) {
         if (!fab) return;
         const pad = 10;
@@ -1904,12 +1975,22 @@
     }
 
     function anchorPanel() {
-        if (!fab || !panel) return;
-        const fRect = fab.getBoundingClientRect();
+        if (!panel) return;
         const pW = panel.offsetWidth || 380;
         const pH = panel.offsetHeight || 500;
         const pad = 12;
 
+        if (hubPresent || !fab || fab.style.display === 'none') {
+            let centerLeft = (window.innerWidth - pW) / 2;
+            let centerTop = (window.innerHeight - pH) / 2;
+            centerLeft = Math.max(pad, Math.min(window.innerWidth - pW - pad, centerLeft));
+            centerTop = Math.max(pad, Math.min(window.innerHeight - pH - pad, centerTop));
+            panel.style.left = Math.round(centerLeft) + 'px';
+            panel.style.top = Math.round(centerTop) + 'px';
+            return;
+        }
+
+        const fRect = fab.getBoundingClientRect();
         let left = fRect.left + (fRect.width / 2) - (pW / 2);
         if (left + pW > window.innerWidth - pad) left = window.innerWidth - pW - pad;
         if (left < pad) left = pad;
@@ -2217,7 +2298,7 @@
         if (record.status === 'picked') statusLine = `Collected: ${formatTime(record.pickedAt)}`;
         if (record.status === 'gone') statusLine = `Vanished: ${formatTime(record.goneAt)}`;
 
-        const actionBtn = record.status === 'active' 
+        const actionBtn = record.status === 'active'
             ? `<button type="button" data-action="reveal" title="Hide wrapper box temporarily to allow click-through pickup">Reveal Asset</button>
                <button type="button" data-action="picked" title="Log this item as picked manual">Mark Collected</button>`
             : `<button type="button" data-action="restore" title="Restore back into active tracking metrics">Restore Item</button><div></div>`;
@@ -2367,7 +2448,7 @@
                 <div class="tcfs-map-pin" data-key="${escapeAttr(item.key)}">
                     <div class="tcfs-map-label">${labelHtml}</div>
                     <div class="tcfs-map-dot" style="
-                        border-color: ${isSel ? '#85B200' : 'rgba(255,255,255,0.9)'}; 
+                        border-color: ${isSel ? '#85B200' : 'rgba(255,255,255,0.9)'};
                         box-shadow: ${isSel ? '0 0 14px #85B200' : '0 3px 11px rgba(0,0,0,0.46)'};
                     ">
                         ${pinInner}
@@ -2536,8 +2617,26 @@
         });
     }
 
+    function registerWithHub() {
+        const registration = {
+            id: HUB_ID,
+            name: HUB_NAME,
+            version: VERSION,
+            order: 300,
+            open: () => { togglePanel(true); },
+            close: () => { togglePanel(false); },
+            status: () => {
+                const count = visibleActiveItems().length;
+                return `${count} active find${count === 1 ? '' : 's'} tracked`;
+            }
+        };
+
+        (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
+    }
+
     function initLoop() {
         buildUI();
+        if (hubPresent) registerWithHub();
         if (settings.apiEnabled && (!itemMetaFetchedAt || Date.now() - itemMetaFetchedAt > METADATA_CACHE_MAX_AGE_MS)) {
             fetchItemMetadata(false);
         }
