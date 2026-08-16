@@ -2805,7 +2805,7 @@
       new CustomEvent("torn-script-hub:register", {
         detail: {
           id: HUB_ID,
-          name: "Travel Inventory",
+          name: "Torn: Travel Inventory",
           version: SCRIPT_VERSION,
           order: 200,
           open: () => {
