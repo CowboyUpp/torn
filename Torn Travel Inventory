@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn: Travel Inventory
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.6
-// @description  View a compact, read-only personal inventory through Torn API v2 while travelling.
+// @version      1.10.0
+// @description  View a compact, read-only personal inventory through Torn API v2 while travelling. Script Hub integration.
 // @author       cowboyup [1496324]
 // @license      MIT
 // @match        https://www.torn.com/page.php?sid=travel
@@ -22,11 +22,13 @@
   "use strict";
 
   const APP_ID = "tti";
-  const SCRIPT_VERSION = "1.9.6";
+  const SCRIPT_VERSION = "1.10.0";
+  const HUB_ID = "travel-inventory";
   const API_URL = "https://api.torn.com/v2/user/inventory";
   const API_COMMENT = "TornTravelInventory";
   const KEY_STORE = "tti_api_key";
   const THEME_STORE = "tti_theme";
+  const ENABLED_STORE = "tti_enabled";
   const CATEGORY_STATE_STORE = "tti_category_state";
   // Matches Torn's own server-side inventory cache window (1 hour per
   // category). Past this age, an "empty" reading is stale rather than wrong,
@@ -151,7 +153,13 @@
     error: "",
     query: "",
     requestToken: 0,
-    theme: String(gmGet(THEME_STORE, "light")) === "dark" ? "dark" : "light",
+    // "follow" tracks Torn's page theme; light/dark are manual overrides.
+    themeMode: (() => {
+      const saved = String(gmGet(THEME_STORE, "follow"));
+      return saved === "light" || saved === "dark" || saved === "follow" ? saved : "follow";
+    })(),
+    theme: "light",
+    enabled: gmGet(ENABLED_STORE, true) !== false && gmGet(ENABLED_STORE, true) !== "false",
     // Reactive record of which categories came back empty the last time they
     // were actually loaded, keyed by category id: { empty, checkedAt }.
     // Built up as the user browses rather than probed upfront, so it costs
@@ -296,11 +304,37 @@
     return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
   }
 
+  function resolveTheme() {
+    if (state.themeMode === "follow") {
+      return detectDarkTheme() ? "dark" : "light";
+    }
+    return state.themeMode === "dark" ? "dark" : "light";
+  }
+
   function syncTheme() {
+    state.theme = resolveTheme();
     if (!root) return;
     const dark = state.theme === "dark";
     root.classList.toggle(`${APP_ID}-theme-dark`, dark);
     root.classList.toggle(`${APP_ID}-theme-light`, !dark);
+  }
+
+  function setEnabled(enabled) {
+    state.enabled = !!enabled;
+    gmSet(ENABLED_STORE, state.enabled);
+    if (!state.enabled) {
+      closePanel();
+      removeNavigationButtons();
+    } else if (isTravelPage()) {
+      installNavigationButton();
+    }
+  }
+
+  function removeNavigationButtons() {
+    document.querySelectorAll(`.${APP_ID}-native-nav`).forEach((node) => node.remove());
+    document
+      .querySelectorAll(`.${APP_ID}-travel-source`)
+      .forEach((sourceNode) => sourceNode.classList.remove(`${APP_ID}-travel-source`));
   }
 
   function syncNativeControlStyle() {
@@ -802,6 +836,7 @@
   }
 
   function openPanel() {
+    if (!state.enabled) return;
     syncTheme();
     syncNativeControlStyle();
     state.open = true;
@@ -852,8 +887,9 @@
         setTimeout(() => keyInput?.focus(), 0);
         break;
       case "theme":
-        state.theme = state.theme === "dark" ? "light" : "dark";
-        gmSet(THEME_STORE, state.theme);
+        // Manual override: toggle between light and dark (leaves "follow")
+        state.themeMode = resolveTheme() === "dark" ? "light" : "dark";
+        gmSet(THEME_STORE, state.themeMode);
         syncTheme();
         syncNativeControlStyle();
         render();
@@ -2581,6 +2617,10 @@
       deactivateOutsideTravelPage();
       return false;
     }
+    if (!state.enabled) {
+      removeNavigationButtons();
+      return false;
+    }
 
     if (root) {
       root.hidden = false;
@@ -2737,10 +2777,119 @@
     window.addEventListener("hashchange", syncPageScope);
 
     if (typeof GM_registerMenuCommand === "function") {
-      GM_registerMenuCommand("View travel inventory", openPanel);
+      try {
+        GM_registerMenuCommand("View travel inventory", openPanel);
+      } catch (_) {}
     }
 
+    registerWithHub();
+    document.addEventListener("torn-script-hub:ready", registerWithHub);
+
     render();
+  }
+
+  function getStatusText() {
+    if (!state.enabled) return "Disabled";
+    if (!getApiKey()) return "No API key — set User → Inventory key";
+    if (state.error) return state.error;
+    if (state.loading) return `Loading ${categoryLabel(state.category)}…`;
+    if (state.items.length) {
+      return `${categoryLabel(state.category)} · ${state.items.length} shown` +
+        (state.totalKnown ? ` of ${state.total}` : "");
+    }
+    return `Ready · ${categoryLabel(state.category)}`;
+  }
+
+  function registerWithHub() {
+    document.dispatchEvent(
+      new CustomEvent("torn-script-hub:register", {
+        detail: {
+          id: HUB_ID,
+          name: "Travel Inventory",
+          version: SCRIPT_VERSION,
+          order: 200,
+          open: () => {
+            if (!isTravelPage()) {
+              window.location.href = "https://www.torn.com/page.php?sid=travel";
+              return;
+            }
+            openPanel();
+          },
+          close: () => setEnabled(false),
+          status: getStatusText,
+          prefs: {
+            fields: [
+              {
+                key: "enabled",
+                type: "toggle",
+                label: "Enable Travel Inventory",
+                default: true,
+                hint: "Show the Inventory / Items nav entry on the travel page (desktop sidebar and PDA menu)",
+              },
+              {
+                key: "apiKey",
+                type: "password",
+                label: "API key (User → Inventory)",
+                default: "",
+                placeholder: "Torn custom key",
+                hint: "Limited key with User → Inventory only",
+              },
+              {
+                key: "generateKey",
+                type: "button",
+                label: "Generate Inventory key",
+                hint: "Opens Torn’s key creator with Inventory selected",
+                url: API_KEY_URL,
+              },
+              {
+                key: "themeMode",
+                type: "select",
+                label: "Theme",
+                default: "follow",
+                options: [
+                  { value: "follow", label: "Follow Torn" },
+                  { value: "dark", label: "Dark" },
+                  { value: "light", label: "Light" },
+                ],
+                hint: "Follow uses Torn’s current page theme",
+              },
+            ],
+            values: {
+              enabled: state.enabled,
+              apiKey: getApiKey() || "",
+              themeMode: state.themeMode,
+            },
+            onSave: (values) => {
+              if (typeof values.enabled === "boolean") {
+                setEnabled(values.enabled);
+              }
+              if (typeof values.themeMode === "string" &&
+                  ["follow", "light", "dark"].includes(values.themeMode)) {
+                state.themeMode = values.themeMode;
+                gmSet(THEME_STORE, state.themeMode);
+                syncTheme();
+                syncNativeControlStyle();
+                if (state.open) render();
+              }
+              if (typeof values.apiKey === "string") {
+                const key = values.apiKey.trim();
+                if (key && key.length >= 8) {
+                  gmSet(KEY_STORE, key);
+                  state.error = "";
+                  if (state.open) {
+                    state.offset = 0;
+                    state.items = [];
+                    loadInventory({ force: true });
+                  }
+                } else if (!key && getApiKey()) {
+                  // Do not wipe key from empty Hub snapshot; only clear via in-panel Remove
+                }
+              }
+            },
+          },
+        },
+      }),
+    );
   }
 
   if (document.readyState === "loading") {
