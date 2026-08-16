@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         Torn: Activity Log Filter & CSV
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.1.5
-// @description  Desktop search, date filters, reverse view, and CSV export for currently loaded Torn activity logs
+// @version      1.2.0
+// @description  Desktop search, date filters, reverse view, and CSV export for currently loaded Torn activity logs. Script Hub integration.
 // @author       cowboyup [1496324]
 // @license      MIT
 // @match        https://www.torn.com/page.php?sid=log*
 // @run-at       document-start
 // @grant        GM_registerMenuCommand
+// @downloadURL https://update.greasyfork.org/scripts/582128/Torn%3A%20Activity%20Log%20Filter%20%20CSV.user.js
+// @updateURL https://update.greasyfork.org/scripts/582128/Torn%3A%20Activity%20Log%20Filter%20%20CSV.meta.js
 // ==/UserScript==
 
 (() => {
@@ -20,8 +22,10 @@
     const SEARCH_ID = 'cowboyup-log-search';
     const STYLE_ID = 'cowboyup-activity-log-styles';
     const STORAGE_KEY = 'cowboyup.activityLogFilter.lite.v1';
+    const SETTINGS_KEY = 'cowboyup.activityLogFilter.settings.v1';
+    const HUB_ID = 'activity-log-filter-csv';
     const DESKTOP_QUERY = '(min-width: 1100px)';
-    const SCRIPT_VERSION = '1.1.5';
+    const SCRIPT_VERSION = '1.2.0';
 
     const state = {
         query: '',
@@ -29,7 +33,8 @@
         to: '',
         dateLabel: 'All time',
         sort: 'newest',
-        theme: ''
+        theme: '',
+        enabled: true
     };
 
     let renderScheduled = false;
@@ -178,6 +183,10 @@
         } catch (error) {
             console.warn('[Activity Log Filter] Could not restore saved filters.', error);
         }
+        try {
+            const settings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+            if (typeof settings.enabled === 'boolean') state.enabled = settings.enabled;
+        } catch (_) {}
     }
 
     function saveState() {
@@ -193,6 +202,12 @@
         } catch (error) {
             console.warn('[Activity Log Filter] Could not save filters.', error);
         }
+    }
+
+    function saveSettings() {
+        try {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify({ enabled: state.enabled }));
+        } catch (_) {}
     }
 
     function detectedTornTheme(startNode) {
@@ -845,7 +860,7 @@
     }
 
     function ensureUi() {
-        if (!isLogPage() || !desktopMedia.matches) return;
+        if (!isLogPage() || !desktopMedia.matches || !state.enabled) return;
         if (document.getElementById(UI_ID)) {
             uiMounted = true;
             return;
@@ -917,7 +932,7 @@
     }
 
     function updatePageLifecycle() {
-        if (!isLogPage() || !desktopMedia.matches) {
+        if (!isLogPage() || !desktopMedia.matches || !state.enabled) {
             teardownUi();
             unbindInteractions();
             return;
@@ -925,6 +940,62 @@
         bindInteractions();
         ensureUi();
         scheduleRender();
+    }
+
+    function getStatusText() {
+        if (!state.enabled) return 'Disabled';
+        if (!desktopMedia.matches) return 'Desktop only (width ≥ 1100px)';
+        const meta = document.querySelector('#' + UI_ID + ' .alf-meta');
+        if (meta && meta.textContent) return meta.textContent;
+        const parts = [];
+        if (state.query) parts.push('search: ' + state.query);
+        if (state.dateLabel && state.dateLabel !== 'All time') parts.push(state.dateLabel);
+        if (state.sort === 'oldest') parts.push('oldest first');
+        return parts.length ? parts.join(' · ') : 'Ready on Activity Log';
+    }
+
+    function registerWithHub() {
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+            detail: {
+                id: HUB_ID,
+                name: 'Activity Log Filter & CSV',
+                version: SCRIPT_VERSION,
+                order: 320,
+                open: () => {
+                    if (!isLogPage()) {
+                        window.location.href = 'https://www.torn.com/page.php?sid=log';
+                        return;
+                    }
+                    ensureUi();
+                    document.getElementById(SEARCH_ID)?.focus();
+                },
+                close: () => {
+                    state.enabled = false;
+                    saveSettings();
+                    updatePageLifecycle();
+                },
+                status: getStatusText,
+                prefs: {
+                    fields: [
+                        {
+                            key: 'enabled',
+                            type: 'toggle',
+                            label: 'Show filter toolbar',
+                            default: true,
+                            hint: 'Display the search, date, reverse, and CSV controls on the Activity Log page (desktop)'
+                        }
+                    ],
+                    values: {
+                        enabled: state.enabled
+                    },
+                    onSave: (values) => {
+                        state.enabled = !!values.enabled;
+                        saveSettings();
+                        updatePageLifecycle();
+                    }
+                }
+            }
+        }));
     }
 
     function onViewportChange() {
@@ -937,14 +1008,20 @@
 
     function init() {
         loadState();
-        GM_registerMenuCommand('Focus Activity Log Search', () => {
-            ensureUi();
-            document.getElementById(SEARCH_ID)?.focus();
-        });
-        GM_registerMenuCommand('Export Visible Logs as CSV', exportCsv);
-        GM_registerMenuCommand('Clear Activity Log Filters', clearAll);
+        registerWithHub();
+        document.addEventListener('torn-script-hub:ready', registerWithHub);
+
+        try {
+            GM_registerMenuCommand('Focus Activity Log Search', () => {
+                ensureUi();
+                document.getElementById(SEARCH_ID)?.focus();
+            });
+            GM_registerMenuCommand('Export Visible Logs as CSV', exportCsv);
+            GM_registerMenuCommand('Clear Activity Log Filters', clearAll);
+        } catch (_) {}
+
         pageObserver = new MutationObserver((mutations) => {
-            if (!isLogPage() || !desktopMedia.matches) {
+            if (!isLogPage() || !desktopMedia.matches || !state.enabled) {
                 updatePageLifecycle();
                 return;
             }
@@ -959,7 +1036,13 @@
                 if (ui && root) syncTornControlStyle(ui, root, true);
             }
         });
-        pageObserver.observe(document.body, { childList: true, subtree: true });
+        if (document.body) {
+            pageObserver.observe(document.body, { childList: true, subtree: true });
+        } else {
+            document.addEventListener('DOMContentLoaded', () => {
+                pageObserver.observe(document.body, { childList: true, subtree: true });
+            }, { once: true });
+        }
         desktopMedia.addEventListener('change', onViewportChange);
         window.addEventListener('popstate', updatePageLifecycle);
         window.addEventListener('hashchange', updatePageLifecycle);
