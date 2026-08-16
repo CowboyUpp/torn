@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn: Activity Log Filter & CSV
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.0
-// @description  Desktop search, date filters, reverse view, and CSV export for currently loaded Torn activity logs. Script Hub integration.
+// @version      1.3.0
+// @description  Search, date filters, reverse view, and CSV export for currently loaded Torn activity logs. Desktop + PDA. Script Hub integration.
 // @author       cowboyup [1496324]
 // @license      MIT
 // @match        https://www.torn.com/page.php?sid=log*
@@ -25,7 +25,7 @@
     const SETTINGS_KEY = 'cowboyup.activityLogFilter.settings.v1';
     const HUB_ID = 'activity-log-filter-csv';
     const DESKTOP_QUERY = '(min-width: 1100px)';
-    const SCRIPT_VERSION = '1.2.0';
+    const SCRIPT_VERSION = '1.3.0';
 
     const state = {
         query: '',
@@ -397,6 +397,68 @@
             #${UI_ID} code{color:var(--alf-red)}
             .alf-hidden{display:none!important}
             .alf-native-search-hidden{display:none!important}
+
+            /* Tablet / intermediate */
+            @media (max-width: 1099px) {
+                #${UI_ID}{
+                    margin:10px 0 12px;padding:10px;
+                    --alf-native-height:36px;--alf-native-font-size:12px;
+                }
+                #${UI_ID} .alf-toolbar{
+                    grid-template-columns:1fr 1fr;
+                    gap:6px;
+                }
+                #${UI_ID} .alf-search-wrap{grid-column:1 / -1}
+                #${UI_ID} .alf-date-button{grid-column:1 / -1}
+                #${UI_ID} .alf-reverse-button,#${UI_ID} .alf-export-button{min-width:0;width:100%}
+                #${UI_ID} .alf-date-popover{
+                    width:min(100%, calc(100vw - 24px));
+                    left:0;right:0;top:auto;margin-top:6px;
+                    position:relative;
+                    max-height:min(70vh, 520px);
+                    overflow:auto;
+                }
+                #${UI_ID} .alf-date-layout{
+                    grid-template-columns:1fr;
+                    min-height:0;
+                }
+                #${UI_ID} .alf-quick-ranges{
+                    border-right:0;
+                    border-bottom:1px solid var(--alf-soft);
+                    padding:10px 8px;
+                    display:grid;
+                    grid-template-columns:1fr 1fr;
+                    gap:4px;
+                }
+                #${UI_ID} .alf-eyebrow{grid-column:1 / -1;padding:0 4px 4px}
+                #${UI_ID} .alf-time-note{grid-column:1 / -1;margin:6px 4px 0}
+                #${UI_ID} .alf-quick{min-height:36px;padding:8px 6px}
+                #${UI_ID} .alf-tabs{height:40px}
+                #${UI_ID} .alf-tab{min-height:40px;font-size:12px}
+                #${UI_ID} .alf-date-panel{padding:14px}
+                #${UI_ID} .alf-field-row{grid-template-columns:1fr;gap:10px}
+                #${UI_ID} .alf-large-picker{max-width:none;margin:8px 0}
+                #${UI_ID} .alf-panel-help{margin:10px 0 0;font-size:11px}
+                #${UI_ID} .alf-popover-footer{padding:10px;gap:6px}
+                #${UI_ID} .alf-btn{min-height:36px;flex:1}
+                #${UI_ID} .alf-secondary{margin-top:8px;gap:4px}
+                #${UI_ID} .alf-chip{min-height:30px;max-width:100%}
+                #${UI_ID} .alf-meta{margin-left:0;width:100%;font-size:11px}
+                #${UI_ID} .alf-footer{flex-wrap:wrap;gap:4px;font-size:10px}
+                #${UI_ID} .alf-scope{margin-left:0;text-align:left;width:100%}
+                #${UI_ID} .alf-clear-search{width:32px;height:32px}
+                #${UI_ID} .alf-control{min-height:36px}
+            }
+
+            /* Narrow phone / PDA */
+            @media (max-width: 480px) {
+                #${UI_ID}{padding:8px;margin:8px 0}
+                #${UI_ID} .alf-toolbar{grid-template-columns:1fr}
+                #${UI_ID} .alf-quick-ranges{grid-template-columns:1fr 1fr}
+                #${UI_ID} input[type="date"],
+                #${UI_ID} input[type="month"],
+                #${UI_ID} input[type="number"]{height:36px;min-height:36px}
+            }
         `;
         document.head.append(style);
     }
@@ -603,7 +665,7 @@
 
     function applyFilters() {
         renderScheduled = false;
-        if (!desktopMedia.matches) return;
+        if (!state.enabled) return;
         const root = document.querySelector(ROOT_SELECTOR);
         const ui = document.getElementById(UI_ID);
         if (!root || !ui) return;
@@ -860,7 +922,7 @@
     }
 
     function ensureUi() {
-        if (!isLogPage() || !desktopMedia.matches || !state.enabled) return;
+        if (!isLogPage() || !state.enabled) return;
         if (document.getElementById(UI_ID)) {
             uiMounted = true;
             return;
@@ -932,7 +994,7 @@
     }
 
     function updatePageLifecycle() {
-        if (!isLogPage() || !desktopMedia.matches || !state.enabled) {
+        if (!isLogPage() || !state.enabled) {
             teardownUi();
             unbindInteractions();
             return;
@@ -944,7 +1006,6 @@
 
     function getStatusText() {
         if (!state.enabled) return 'Disabled';
-        if (!desktopMedia.matches) return 'Desktop only (width ≥ 1100px)';
         const meta = document.querySelector('#' + UI_ID + ' .alf-meta');
         if (meta && meta.textContent) return meta.textContent;
         const parts = [];
@@ -982,7 +1043,7 @@
                             type: 'toggle',
                             label: 'Show filter toolbar',
                             default: true,
-                            hint: 'Display the search, date, reverse, and CSV controls on the Activity Log page (desktop)'
+                            hint: 'Display the search, date, reverse, and CSV controls on the Activity Log page (desktop and PDA)'
                         }
                     ],
                     values: {
@@ -1000,7 +1061,6 @@
 
     function onViewportChange() {
         updatePageLifecycle();
-        if (!desktopMedia.matches) return;
         const ui = document.getElementById(UI_ID);
         const root = document.querySelector(ROOT_SELECTOR);
         if (ui && root) syncTornControlStyle(ui, root, true);
@@ -1021,7 +1081,7 @@
         } catch (_) {}
 
         pageObserver = new MutationObserver((mutations) => {
-            if (!isLogPage() || !desktopMedia.matches || !state.enabled) {
+            if (!isLogPage() || !state.enabled) {
                 updatePageLifecycle();
                 return;
             }
