@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TORN: No Confirm Market & Bazaar
 // @namespace    cowboyup.torn.userscripts
-// @version      1.1.0
-// @description  Enables one-click purchases in the Torn Item Market and individual Bazaars. Hub-aware with toggle and timeout prefs.
+// @version      1.1.1
+// @description  Enables one-click purchases in the Torn Item Market and individual Bazaars only. Does not run on Auction House, missions, jobs, or other pages. Hub-aware.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://*.torn.com/page.php?sid=ItemMarket*
@@ -14,12 +14,18 @@
 // @license      MIT
 // @homepageURL  https://greasyfork.org/en/scripts/587751-torn-no-confirm-market-bazaar
 // @supportURL   https://greasyfork.org/en/scripts/587751-torn-no-confirm-market-bazaar/feedback
+// @downloadURL  https://update.greasyfork.org/scripts/587751/TORN%3A%20No%20Confirm%20Market%20%20Bazaar.user.js
+// @updateURL    https://update.greasyfork.org/scripts/587751/TORN%3A%20No%20Confirm%20Market%20%20Bazaar.meta.js
 // ==/UserScript==
 
 (() => {
   'use strict';
 
-  // --- Config (mutable by hub) ---
+  const VERSION = '1.1.1';
+  const HUB_ID = 'no-confirm-market';
+  const STORAGE_KEY = 'torn-no-confirm-market-settings-v1';
+
+  // --- Config (mutable by hub / localStorage) ---
   const CONFIG = {
     enabled: true,
     confirmTimeout: 5000,
@@ -34,6 +40,51 @@
   ].join(',');
 
   let armed = false;
+
+  function loadConfig() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (typeof parsed.enabled === 'boolean') CONFIG.enabled = parsed.enabled;
+      if (Number.isFinite(parsed.confirmTimeout)) {
+        CONFIG.confirmTimeout = Math.min(30000, Math.max(1000, parsed.confirmTimeout));
+      }
+    } catch (_) {}
+  }
+
+  function saveConfig() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        enabled: CONFIG.enabled,
+        confirmTimeout: CONFIG.confirmTimeout,
+      }));
+    } catch (_) {}
+  }
+
+  /** Strict page gate — Item Market or Bazaar only. Never Auction / missions / jobs. */
+  function isAllowedPage() {
+    try {
+      const url = new URL(location.href);
+      if (url.hostname !== 'www.torn.com' && !url.hostname.endsWith('.torn.com')) return false;
+      const path = url.pathname.toLowerCase();
+      const sid = (url.searchParams.get('sid') || '').toLowerCase();
+
+      // Explicit exclusions
+      if (sid.includes('auction') || path.includes('auction')) return false;
+      if (sid === 'missions' || path.includes('missions')) return false;
+      if (path.includes('companies.php') || sid.includes('company')) return false;
+
+      // Item Market
+      if (sid === 'itemmarket' || sid.startsWith('itemmarket')) return true;
+      // Personal / view bazaars
+      if (path.includes('bazaar.php')) return true;
+
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
 
   function normalize(value) {
     return String(value || '')
@@ -62,6 +113,9 @@
   }
 
   function isPurchaseTrigger(control) {
+    if (!(control instanceof Element)) return false;
+
+    // Never arm from unrelated actions
     const signal = normalize([
       control.getAttribute('aria-label'),
       control.textContent,
@@ -71,6 +125,12 @@
       control.className,
     ].join(' '));
 
+    // Reject decline / job / mission / accept-style noise
+    if (/\b(decline|reject|cancel|job points?|mission|accept mission|auction)\b/.test(signal)) {
+      return false;
+    }
+
+    // Must look like a buy/purchase control
     return /\b(buy|purchase)\b/.test(signal);
   }
 
@@ -82,6 +142,7 @@
       isVisible(control) &&
       (label === 'yes' ||
         label === 'confirm purchase' ||
+        label === 'confirm' ||
         classes.includes('yes-buy'))
     );
   }
@@ -98,6 +159,13 @@
     );
   }
 
+  function dialogLooksLikePurchase(container) {
+    if (!container) return false;
+    const text = normalize(container.textContent);
+    // Require buy/purchase language near the Yes/No pair so mission/job confirms are ignored
+    return /\b(buy|purchase|bazaar|market|\$|€|£)\b/.test(text);
+  }
+
   function findYesControl() {
     const controls = [...document.querySelectorAll(CONTROL_SELECTOR)];
 
@@ -106,11 +174,13 @@
 
       let container = yesControl.parentElement;
 
-      for (let depth = 0; container && depth < 5; depth += 1) {
+      for (let depth = 0; container && depth < 6; depth += 1) {
         const noControl = [...container.querySelectorAll(CONTROL_SELECTOR)]
           .find(isNoControl);
 
-        if (noControl) return yesControl;
+        if (noControl && dialogLooksLikePurchase(container)) {
+          return yesControl;
+        }
         container = container.parentElement;
       }
     }
@@ -119,7 +189,7 @@
   }
 
   function armConfirmation() {
-    if (armed) return;
+    if (armed || !CONFIG.enabled || !isAllowedPage()) return;
     armed = true;
 
     let observer;
@@ -132,6 +202,10 @@
     }
 
     function confirmPurchase() {
+      if (!isAllowedPage() || !CONFIG.enabled) {
+        finish();
+        return;
+      }
       const yesControl = findYesControl();
       if (!yesControl) return;
 
@@ -158,15 +232,15 @@
     queueMicrotask(confirmPurchase);
   }
 
-  // --- Core listener (guarded by CONFIG.enabled) ---
+  // --- Core listener ---
   document.addEventListener(
     'click',
     (event) => {
       if (!CONFIG.enabled) return;
+      if (!isAllowedPage()) return;
       if (!event.isTrusted || !(event.target instanceof Element)) return;
 
       const control = event.target.closest(CONTROL_SELECTOR);
-
       if (control && isPurchaseTrigger(control)) {
         armConfirmation();
       }
@@ -174,7 +248,8 @@
     true
   );
 
-  console.info('[No Confirm] Ready for Item Market and Bazaars');
+  loadConfig();
+  console.info('[No Confirm]', VERSION, '— Item Market & Bazaars only');
 
   // --- Hub Integration ---
   function showToast(msg) {
@@ -188,14 +263,21 @@
   function registerWithHub() {
     document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
       detail: {
-        id: 'no-confirm-market',
-        name: 'No Confirm Market',
-        version: '1.1.0',
-        icon: '⚡',
+        id: HUB_ID,
+        name: 'No Confirm Market & Bazaar',
+        version: VERSION,
         order: 100,
         open: () => {
-          const status = CONFIG.enabled ? 'active' : 'disabled';
-          showToast(`⚡ No Confirm is ${status} on Market & Bazaar pages`);
+          if (!isAllowedPage()) {
+            showToast('Only active on Item Market & Bazaar pages');
+            return;
+          }
+          const status = CONFIG.enabled ? 'ON' : 'OFF';
+          showToast(`No Confirm is ${status} (Market & Bazaar only)`);
+        },
+        status: () => {
+          if (!isAllowedPage()) return 'Idle — Market & Bazaar only';
+          return CONFIG.enabled ? 'Auto-confirm ON' : 'Auto-confirm OFF';
         },
         prefs: {
           fields: [
@@ -204,7 +286,7 @@
               type: 'toggle',
               label: 'Auto-confirm purchases',
               default: true,
-              hint: 'When ON, purchase confirmations are auto-clicked. When OFF, confirmations behave normally.'
+              hint: 'Item Market and Bazaars only. Never Auction House, missions, or jobs.'
             },
             {
               key: 'confirmTimeout',
@@ -213,12 +295,19 @@
               default: 5000,
               min: 1000,
               max: 30000,
-              hint: 'How long to watch for a confirmation dialog before giving up.'
+              hint: 'How long to watch for a purchase confirmation dialog before giving up.'
             }
           ],
+          values: {
+            enabled: CONFIG.enabled,
+            confirmTimeout: CONFIG.confirmTimeout,
+          },
           onSave: (values) => {
-            CONFIG.enabled = values.enabled;
-            CONFIG.confirmTimeout = values.confirmTimeout;
+            if (typeof values.enabled === 'boolean') CONFIG.enabled = values.enabled;
+            if (Number.isFinite(Number(values.confirmTimeout))) {
+              CONFIG.confirmTimeout = Math.min(30000, Math.max(1000, Number(values.confirmTimeout)));
+            }
+            saveConfig();
             console.info('[No Confirm] Settings updated:', CONFIG);
           }
         }
@@ -226,7 +315,6 @@
     }));
   }
 
-  // Register immediately and also when hub signals readiness
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', registerWithHub);
   } else {
