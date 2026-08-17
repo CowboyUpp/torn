@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.1.1
+// @version      4.1.2
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Clean professional dashboard for launch, prefs, and a library of compatible scripts.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.1.1';
+    const HUB_VERSION = '4.1.2';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -909,6 +909,14 @@
                     if (!Number.isFinite(val)) return;
                     if (field.min !== undefined) val = Math.max(field.min, val);
                     if (field.max !== undefined) val = Math.min(field.max, val);
+                }
+                // Password fields: an empty change must not wipe a previously
+                // known value in the shared prefs.values snapshot. Scripts may
+                // receive the whole snapshot on every save; blanking the key
+                // here would look like "user cleared the secret".
+                if (field.type === 'password' && val === '' && script.prefs.values[field.key]) {
+                    triggerSave();
+                    return;
                 }
                 script.prefs.values[field.key] = val;
                 triggerSave();
