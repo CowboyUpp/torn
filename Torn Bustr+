@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.1
+// @version      1.2.2
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration.
 // @author       cowboyup
 // @license      MIT
@@ -21,7 +21,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.1';
+  const VERSION = '1.2.2';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -229,22 +229,15 @@
             state.settings.greenLimit = Math.max(0, Number(values.greenLimit) || 0);
             state.settings.redLimit = Math.max(0, Number(values.redLimit) || 0);
 
-            // API key handling
+            // API key: only APPLY a new valid key. Never treat a blank Hub snapshot
+            // as "user cleared the key" — password fields often stay empty in
+            // the prefs.values copy (registration race / security blanking),
+            // and every other setting change would otherwise wipe the key.
             if (typeof values.apiKey === 'string') {
               const key = values.apiKey.trim();
-              if (key && key !== state.apiKey) {
-                if (/^[A-Za-z0-9]{16}$/.test(key)) {
-                  setApiKey(key);
-                  keyPromise = loadBustData(true).then(() => renderAll());
-                }
-              } else if (!key && state.apiKey) {
-                deleteApiKey();
-                state.timestamps = [];
-                state.availableBusts = null;
-                state.penaltyScore = 0;
-                state.penaltyThreshold = 0;
-                saveStats();
-                renderAll();
+              if (key && /^[A-Za-z0-9]{16}$/.test(key) && key !== state.apiKey) {
+                setApiKey(key);
+                keyPromise = loadBustData(true).then(() => renderAll());
               }
             }
 
@@ -1497,6 +1490,8 @@
 
   async function init() {
     loadState();
+    // Register after state is loaded so Hub prefs.values include the real API key
+    registerWithHub();
     armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
     injectStyles();
@@ -1508,6 +1503,8 @@
     }
     await loadBustData(false);
     renderAll();
+    // Re-register so Hub status / values reflect loaded bust data
+    registerWithHub();
     scanExistingBustSuccesses();
     if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
       renderPanel(true);
@@ -1532,6 +1529,8 @@
 
   // Register with hub + listen for hub lifecycle
   function tryRegister() {
+    // Ensure storage is applied before the Hub snapshots prefs.values
+    loadState();
     registerWithHub();
     // Re-check after a short delay in case Hub mounts later
     setTimeout(() => {
@@ -1541,6 +1540,9 @@
         updateToggleVisibility();
         if (nowPresent) removeSettingsPanel();
       }
+      // Refresh registration once more with latest state
+      loadState();
+      registerWithHub();
     }, 800);
   }
 
