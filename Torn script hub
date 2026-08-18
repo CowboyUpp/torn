@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.2.0
+// @version      4.2.1
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.2.0';
+    const HUB_VERSION = '4.2.1';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -1037,16 +1037,51 @@
     }
 
     // ----- Debug (lightweight) -----
+    function safeScriptStatus(script) {
+        try {
+            if (typeof script.status === 'function') return String(script.status() || '');
+        } catch (err) {
+            return `(status error: ${err && err.message ? err.message : 'unknown'})`;
+        }
+        return '';
+    }
+
+    function buildScriptDiagnostic(script) {
+        const prefKeys = script.prefs && Array.isArray(script.prefs.fields)
+            ? script.prefs.fields.map(f => f.key)
+            : [];
+        // Never dump secret values — only whether a key looks set
+        const valueFlags = {};
+        if (script.prefs && script.prefs.values && typeof script.prefs.values === 'object') {
+            Object.keys(script.prefs.values).forEach(key => {
+                const val = script.prefs.values[key];
+                if (val == null || val === '') valueFlags[key] = 'empty';
+                else if (typeof val === 'boolean' || typeof val === 'number') valueFlags[key] = val;
+                else if (/key|token|secret|password/i.test(key)) valueFlags[key] = 'set';
+                else valueFlags[key] = 'set';
+            });
+        }
+        return {
+            id: script.id,
+            name: script.name,
+            version: script.version || '',
+            active: !!script.active,
+            order: script.order,
+            hasOpen: typeof script.open === 'function',
+            hasClose: typeof script.close === 'function',
+            hasStatus: typeof script.status === 'function',
+            status: safeScriptStatus(script),
+            prefKeys,
+            valueFlags,
+            page: location.href,
+            hubVersion: HUB_VERSION,
+            checkedAt: new Date().toISOString()
+        };
+    }
+
     function buildDiagnosticsPayload() {
         const known = getKnownScripts();
-        const live = Array.from(registry.values()).map(s => ({
-            id: s.id,
-            name: s.name,
-            version: s.version || '',
-            active: !!s.active,
-            hasPrefs: !!(s.prefs && s.prefs.fields && s.prefs.fields.length),
-            hasStatus: typeof s.status === 'function'
-        }));
+        const live = Array.from(registry.values()).map(s => buildScriptDiagnostic(s));
         return {
             hubVersion: HUB_VERSION,
             page: location.href,
@@ -1057,6 +1092,19 @@
             known,
             recentEvents: debugLog.slice()
         };
+    }
+
+    async function copyText(text, button, okLabel) {
+        try {
+            await navigator.clipboard.writeText(text);
+            if (button) {
+                const prev = button.textContent;
+                button.textContent = okLabel || 'Copied';
+                setTimeout(() => { button.textContent = prev; }, 1500);
+            }
+        } catch (_) {
+            window.prompt('Copy:', text);
+        }
     }
 
     function renderDebugPanel(container) {
@@ -1083,15 +1131,8 @@
         copyBtn.type = 'button';
         copyBtn.className = 'tsh-debug-btn';
         copyBtn.textContent = 'Copy diagnostics';
-        copyBtn.addEventListener('click', async () => {
-            const text = JSON.stringify(buildDiagnosticsPayload(), null, 2);
-            try {
-                await navigator.clipboard.writeText(text);
-                copyBtn.textContent = 'Copied';
-                setTimeout(() => { copyBtn.textContent = 'Copy diagnostics'; }, 1500);
-            } catch (_) {
-                window.prompt('Copy diagnostics:', text);
-            }
+        copyBtn.addEventListener('click', () => {
+            copyText(JSON.stringify(buildDiagnosticsPayload(), null, 2), copyBtn);
         });
         actions.appendChild(copyBtn);
 
@@ -1125,7 +1166,7 @@
 
         const listTitle = document.createElement('div');
         listTitle.className = 'tsh-debug-section-title';
-        listTitle.textContent = 'Registered on this page';
+        listTitle.textContent = 'Registered on this page — click a script for actions';
         wrap.appendChild(listTitle);
 
         const list = document.createElement('div');
@@ -1139,20 +1180,126 @@
         } else {
             scripts.forEach(s => {
                 const row = document.createElement('div');
-                row.className = 'tsh-debug-row';
-                let statusText = '';
-                try {
-                    if (typeof s.status === 'function') statusText = String(s.status() || '');
-                } catch (_) {
-                    statusText = '(status error)';
-                }
-                row.innerHTML =
-                    `<div class="tsh-debug-row-main"><strong>${escapeHtml(s.name)}</strong>` +
+                row.className = 'tsh-debug-row tsh-debug-row-clickable';
+                row.tabIndex = 0;
+                row.setAttribute('role', 'button');
+                row.title = 'Show actions for this script';
+
+                const statusText = safeScriptStatus(s);
+                const head = document.createElement('div');
+                head.className = 'tsh-debug-row-main';
+                head.innerHTML =
+                    `<strong>${escapeHtml(s.name)}</strong>` +
                     `<span class="tsh-debug-id">${escapeHtml(s.id)}</span>` +
-                    (s.version ? `<span class="tsh-debug-ver">v${escapeHtml(s.version)}</span>` : '') +
-                    `</div>` +
-                    `<div class="tsh-debug-row-sub">${s.prefs ? 'prefs' : 'no prefs'}` +
-                    `${statusText ? ' · ' + escapeHtml(statusText) : ''}</div>`;
+                    (s.version ? `<span class="tsh-debug-ver">v${escapeHtml(s.version)}</span>` : '');
+                row.appendChild(head);
+
+                const sub = document.createElement('div');
+                sub.className = 'tsh-debug-row-sub';
+                sub.textContent = (s.prefs ? 'prefs' : 'no prefs') + (statusText ? ' · ' + statusText : '');
+                row.appendChild(sub);
+
+                const detail = document.createElement('div');
+                detail.className = 'tsh-debug-detail';
+                detail.hidden = true;
+
+                const detailStatus = document.createElement('div');
+                detailStatus.className = 'tsh-debug-detail-status';
+                detailStatus.textContent = statusText ? `Status: ${statusText}` : 'Status: (none)';
+                detail.appendChild(detailStatus);
+
+                const detailActions = document.createElement('div');
+                detailActions.className = 'tsh-debug-actions';
+
+                const refreshBtn = document.createElement('button');
+                refreshBtn.type = 'button';
+                refreshBtn.className = 'tsh-debug-btn tsh-debug-btn-muted';
+                refreshBtn.textContent = 'Refresh status';
+                refreshBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    const next = safeScriptStatus(s);
+                    detailStatus.textContent = next ? `Status: ${next}` : 'Status: (none)';
+                    sub.textContent = (s.prefs ? 'prefs' : 'no prefs') + (next ? ' · ' + next : '');
+                    pushDebugLog(`status: ${s.id} → ${next || '(none)'}`);
+                });
+                detailActions.appendChild(refreshBtn);
+
+                const openBtn = document.createElement('button');
+                openBtn.type = 'button';
+                openBtn.className = 'tsh-debug-btn';
+                openBtn.textContent = 'Open';
+                openBtn.disabled = typeof s.open !== 'function';
+                openBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    pushDebugLog(`open: ${s.id}`);
+                    try { s.open(); } catch (err) {
+                        pushDebugLog(`open error: ${s.id} ${err && err.message ? err.message : ''}`);
+                    }
+                });
+                detailActions.appendChild(openBtn);
+
+                if (s.prefs) {
+                    const prefsBtn = document.createElement('button');
+                    prefsBtn.type = 'button';
+                    prefsBtn.className = 'tsh-debug-btn tsh-debug-btn-muted';
+                    prefsBtn.textContent = 'Settings';
+                    prefsBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        currentPrefsScriptId = s.id;
+                        const dash = document.getElementById(IDS.DASHBOARD);
+                        if (!dash) return;
+                        dash.querySelectorAll('.tsh-dash-tab').forEach(t => t.classList.remove('active'));
+                        dash.querySelectorAll('.tsh-dash-panel-content').forEach(p => p.classList.remove('active'));
+                        const tab = dash.querySelector('.tsh-dash-tab[data-tab="prefs"]');
+                        const panel = dash.querySelector('[data-panel="prefs"]');
+                        if (tab) tab.classList.add('active');
+                        if (panel) {
+                            panel.classList.add('active');
+                            renderPrefsPanel(panel);
+                        }
+                    });
+                    detailActions.appendChild(prefsBtn);
+                }
+
+                const copyOneBtn = document.createElement('button');
+                copyOneBtn.type = 'button';
+                copyOneBtn.className = 'tsh-debug-btn';
+                copyOneBtn.textContent = 'Copy diagnostic';
+                copyOneBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    const payload = buildScriptDiagnostic(s);
+                    pushDebugLog(`diagnostic: ${s.id}`);
+                    copyText(JSON.stringify(payload, null, 2), copyOneBtn);
+                });
+                detailActions.appendChild(copyOneBtn);
+
+                detail.appendChild(detailActions);
+                row.appendChild(detail);
+
+                const toggleDetail = () => {
+                    const opening = detail.hidden;
+                    list.querySelectorAll('.tsh-debug-detail').forEach(d => { d.hidden = true; });
+                    list.querySelectorAll('.tsh-debug-row').forEach(r => r.classList.remove('tsh-debug-row-open'));
+                    if (opening) {
+                        detail.hidden = false;
+                        row.classList.add('tsh-debug-row-open');
+                        // live refresh when opened
+                        const next = safeScriptStatus(s);
+                        detailStatus.textContent = next ? `Status: ${next}` : 'Status: (none)';
+                        sub.textContent = (s.prefs ? 'prefs' : 'no prefs') + (next ? ' · ' + next : '');
+                    }
+                };
+                row.addEventListener('click', (ev) => {
+                    if (ev.target.closest('button')) return;
+                    toggleDetail();
+                });
+                row.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault();
+                        toggleDetail();
+                    }
+                });
+
                 list.appendChild(row);
             });
         }
@@ -1441,9 +1588,17 @@
                 padding:6px 8px; border:1px solid var(--tsh-border,#bbb); border-radius:3px;
                 background:var(--tsh-row-bg,rgba(0,0,0,.02)); font-size:11px;
             }
+            .tsh-debug-row-clickable { cursor:pointer; }
+            .tsh-debug-row-clickable:hover { border-color:rgba(78,138,199,.55); background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-debug-row-open { border-color:rgba(78,138,199,.7); }
             .tsh-debug-row-main { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; }
             .tsh-debug-id, .tsh-debug-ver { font-size:10px; opacity:.5; font-weight:400; }
             .tsh-debug-row-sub { margin-top:2px; font-size:10px; opacity:.6; line-height:1.35; }
+            .tsh-debug-detail {
+                margin-top:8px; padding-top:8px; border-top:1px solid var(--tsh-border,#bbb);
+                display:flex; flex-direction:column; gap:8px;
+            }
+            .tsh-debug-detail-status { font-size:11px; opacity:.8; line-height:1.4; word-break:break-word; }
             .tsh-debug-empty { font-size:12px; opacity:.55; padding:6px 0; }
             .tsh-debug-log {
                 margin:0; padding:8px; max-height:160px; overflow:auto;
