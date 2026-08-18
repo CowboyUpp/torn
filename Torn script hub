@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.1.2
-// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Clean professional dashboard for launch, prefs, and a library of compatible scripts.
+// @version      4.2.0
+// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.1.2';
+    const HUB_VERSION = '4.2.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -33,6 +33,14 @@
     const STORAGE_KEY = 'tsh-onboarded';
     const KNOWN_SCRIPTS_KEY = 'tsh-known-scripts';
     const UI_ENABLED_KEY = 'tsh-ui-enabled';
+    const DEBUG_LOG_MAX = 40;
+    const debugLog = [];
+
+    function pushDebugLog(message) {
+        const ts = new Date().toISOString().slice(11, 19);
+        debugLog.unshift(`[${ts}] ${message}`);
+        if (debugLog.length > DEBUG_LOG_MAX) debugLog.length = DEBUG_LOG_MAX;
+    }
 
     // =========================================================================
     // LIBRARY — Hub-compatible scripts, shown in the Library tab. Version and
@@ -202,8 +210,10 @@
     function registerScript(detail) {
         const script = normalizeRegistration(detail);
         if (!script) return;
+        const existed = registry.has(script.id);
         registry.set(script.id, script);
         saveKnownScript(script);
+        pushDebugLog(`${existed ? 're-register' : 'register'}: ${script.name} (${script.id}) v${script.version || '?'}`);
         renderMenu();
         if (dashboardOpen) renderDashboard();
     }
@@ -212,7 +222,9 @@
         if (!detail) return;
         const id = typeof detail === 'string' ? detail : String(detail.id || '').trim();
         if (!id) return;
+        const prev = registry.get(id);
         registry.delete(id);
+        pushDebugLog(`unregister: ${prev ? prev.name : id} (${id})`);
         renderMenu();
         if (dashboardOpen) renderDashboard();
     }
@@ -500,11 +512,13 @@
                     <button data-tab="launch" class="tsh-dash-tab active">Scripts</button>
                     <button data-tab="prefs" class="tsh-dash-tab">Settings</button>
                     <button data-tab="library" class="tsh-dash-tab">Library</button>
+                    <button data-tab="debug" class="tsh-dash-tab">Debug</button>
                 </div>
                 <div class="tsh-dash-body">
                     <div data-panel="launch" class="tsh-dash-panel-content active"></div>
                     <div data-panel="prefs" class="tsh-dash-panel-content"></div>
                     <div data-panel="library" class="tsh-dash-panel-content"></div>
+                    <div data-panel="debug" class="tsh-dash-panel-content"></div>
                 </div>
             </div>
         `;
@@ -525,6 +539,7 @@
                 if (tab.dataset.tab === 'prefs') renderPrefsPanel(panel);
                 if (tab.dataset.tab === 'launch') renderLaunchPanel(panel);
                 if (tab.dataset.tab === 'library') renderLibraryPanel(panel);
+                if (tab.dataset.tab === 'debug') renderDebugPanel(panel);
             });
         });
 
@@ -544,6 +559,7 @@
         renderLaunchPanel(dash.querySelector('[data-panel="launch"]'));
         renderPrefsPanel(dash.querySelector('[data-panel="prefs"]'));
         renderLibraryPanel(dash.querySelector('[data-panel="library"]'));
+        renderDebugPanel(dash.querySelector('[data-panel="debug"]'));
     }
 
     // ----- Scripts tab -----
@@ -1020,6 +1036,141 @@
         container.appendChild(wrap);
     }
 
+    // ----- Debug (lightweight) -----
+    function buildDiagnosticsPayload() {
+        const known = getKnownScripts();
+        const live = Array.from(registry.values()).map(s => ({
+            id: s.id,
+            name: s.name,
+            version: s.version || '',
+            active: !!s.active,
+            hasPrefs: !!(s.prefs && s.prefs.fields && s.prefs.fields.length),
+            hasStatus: typeof s.status === 'function'
+        }));
+        return {
+            hubVersion: HUB_VERSION,
+            page: location.href,
+            uiEnabled: isUIEnabled(),
+            registeredCount: live.length,
+            knownCount: known.length,
+            registered: live,
+            known,
+            recentEvents: debugLog.slice()
+        };
+    }
+
+    function renderDebugPanel(container) {
+        if (!container) return;
+        container.innerHTML = '';
+
+        const wrap = document.createElement('div');
+        wrap.className = 'tsh-debug-wrap';
+
+        const intro = document.createElement('p');
+        intro.className = 'tsh-debug-intro';
+        intro.textContent = 'Lightweight diagnostics for Hub-aware scripts. Start here when something looks wrong.';
+        wrap.appendChild(intro);
+
+        const meta = document.createElement('div');
+        meta.className = 'tsh-debug-meta';
+        meta.textContent = `Hub v${HUB_VERSION} · ${registry.size} registered · ${getKnownScripts().length} known · UI ${isUIEnabled() ? 'on' : 'off'}`;
+        wrap.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'tsh-debug-actions';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'tsh-debug-btn';
+        copyBtn.textContent = 'Copy diagnostics';
+        copyBtn.addEventListener('click', async () => {
+            const text = JSON.stringify(buildDiagnosticsPayload(), null, 2);
+            try {
+                await navigator.clipboard.writeText(text);
+                copyBtn.textContent = 'Copied';
+                setTimeout(() => { copyBtn.textContent = 'Copy diagnostics'; }, 1500);
+            } catch (_) {
+                window.prompt('Copy diagnostics:', text);
+            }
+        });
+        actions.appendChild(copyBtn);
+
+        const pingBtn = document.createElement('button');
+        pingBtn.type = 'button';
+        pingBtn.className = 'tsh-debug-btn';
+        pingBtn.textContent = 'Ping scripts';
+        pingBtn.title = 'Re-dispatch hub ready so scripts can re-register';
+        pingBtn.addEventListener('click', () => {
+            pushDebugLog('ping: torn-script-hub:ready');
+            document.dispatchEvent(new CustomEvent(EVENTS.READY));
+            renderDebugPanel(container);
+        });
+        actions.appendChild(pingBtn);
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'tsh-debug-btn tsh-debug-btn-muted';
+        clearBtn.textContent = 'Clear known list';
+        clearBtn.title = 'Removes saved known-scripts cache (Library installed flags). Live registry is unchanged.';
+        clearBtn.addEventListener('click', () => {
+            if (!confirm('Clear Hub known-scripts cache? Library “Installed” flags reset until scripts register again.')) return;
+            try { localStorage.removeItem(KNOWN_SCRIPTS_KEY); } catch (_) {}
+            pushDebugLog('cleared known-scripts cache');
+            renderDebugPanel(container);
+            renderLibraryPanel(document.querySelector('[data-panel="library"]'));
+        });
+        actions.appendChild(clearBtn);
+
+        wrap.appendChild(actions);
+
+        const listTitle = document.createElement('div');
+        listTitle.className = 'tsh-debug-section-title';
+        listTitle.textContent = 'Registered on this page';
+        wrap.appendChild(listTitle);
+
+        const list = document.createElement('div');
+        list.className = 'tsh-debug-list';
+        const scripts = Array.from(registry.values()).sort((a, b) => (a.order || 1000) - (b.order || 1000) || a.name.localeCompare(b.name));
+        if (!scripts.length) {
+            const empty = document.createElement('div');
+            empty.className = 'tsh-debug-empty';
+            empty.textContent = 'No scripts registered yet on this page.';
+            list.appendChild(empty);
+        } else {
+            scripts.forEach(s => {
+                const row = document.createElement('div');
+                row.className = 'tsh-debug-row';
+                let statusText = '';
+                try {
+                    if (typeof s.status === 'function') statusText = String(s.status() || '');
+                } catch (_) {
+                    statusText = '(status error)';
+                }
+                row.innerHTML =
+                    `<div class="tsh-debug-row-main"><strong>${escapeHtml(s.name)}</strong>` +
+                    `<span class="tsh-debug-id">${escapeHtml(s.id)}</span>` +
+                    (s.version ? `<span class="tsh-debug-ver">v${escapeHtml(s.version)}</span>` : '') +
+                    `</div>` +
+                    `<div class="tsh-debug-row-sub">${s.prefs ? 'prefs' : 'no prefs'}` +
+                    `${statusText ? ' · ' + escapeHtml(statusText) : ''}</div>`;
+                list.appendChild(row);
+            });
+        }
+        wrap.appendChild(list);
+
+        const logTitle = document.createElement('div');
+        logTitle.className = 'tsh-debug-section-title';
+        logTitle.textContent = 'Recent Hub events';
+        wrap.appendChild(logTitle);
+
+        const log = document.createElement('pre');
+        log.className = 'tsh-debug-log';
+        log.textContent = debugLog.length ? debugLog.join('\n') : 'No events yet.';
+        wrap.appendChild(log);
+
+        container.appendChild(wrap);
+    }
+
     // =========================================================================
     // ONBOARDING
     // =========================================================================
@@ -1268,6 +1419,38 @@
             }
             .tsh-lib-contact a { color:#4e8ac7; text-decoration:none; font-weight:600; }
             .tsh-lib-contact a:hover { text-decoration:underline; }
+
+            .tsh-debug-wrap { display:flex; flex-direction:column; gap:10px; }
+            .tsh-debug-intro { margin:0; font-size:12px; opacity:.7; line-height:1.5; }
+            .tsh-debug-meta { font-size:11px; opacity:.65; }
+            .tsh-debug-actions { display:flex; flex-wrap:wrap; gap:6px; }
+            .tsh-debug-btn {
+                padding:5px 10px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:11px; font-weight:600; cursor:pointer; min-height:30px;
+            }
+            .tsh-debug-btn:hover { background:#355e94; }
+            .tsh-debug-btn-muted {
+                background:transparent; color:inherit; border-color:var(--tsh-border,#bbb); font-weight:500;
+            }
+            .tsh-debug-btn-muted:hover { background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-debug-section-title {
+                font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; opacity:.55; margin-top:2px;
+            }
+            .tsh-debug-list { display:flex; flex-direction:column; gap:4px; }
+            .tsh-debug-row {
+                padding:6px 8px; border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02)); font-size:11px;
+            }
+            .tsh-debug-row-main { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; }
+            .tsh-debug-id, .tsh-debug-ver { font-size:10px; opacity:.5; font-weight:400; }
+            .tsh-debug-row-sub { margin-top:2px; font-size:10px; opacity:.6; line-height:1.35; }
+            .tsh-debug-empty { font-size:12px; opacity:.55; padding:6px 0; }
+            .tsh-debug-log {
+                margin:0; padding:8px; max-height:160px; overflow:auto;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-input-bg,#fff); font-size:10px; line-height:1.4;
+                white-space:pre-wrap; word-break:break-word;
+            }
 
             .tsh-onboarding {
                 position:fixed; inset:0; z-index:2147483647;
