@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.6
+// @version      4.9.7
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.6';
+    const VERSION = '4.9.7';
     // TODO after deploying cct-sync-worker.js: replace both this URL and the
     // @connect host above with your real *.workers.dev address (or custom
     // domain). Cross-device sync stays fully inert — no requests fired, no
@@ -1162,93 +1162,143 @@
             root;
     }
 
+    function isExcludedNativeBadgeContext(el) {
+        if (!el || !el.closest) return true;
+        if (el.closest('#cct-root')) return true;
+        // Top bars / menus often hold points, energy, happy — never treat those as chain
+        if (el.closest('#header, #top-header, .header, .top-header, #sidebar, .sidebar, #nav, nav')) return true;
+        if (el.closest('[class*="header-wrapper" i], [class*="top-banner" i], [class*="menu-items" i]')) return true;
+        // Points / money / bars tooltips
+        if (el.closest('[class*="point" i][class*="value" i], [class*="user-info" i]')) return true;
+        return false;
+    }
+
+    function scoreNativeBadgeCandidate(el, labelEl) {
+        let score = 0;
+        const cls = String(el.className || '');
+        if (/chain|value|count|badge/i.test(cls)) score += 8;
+        if (labelEl && el.parentElement && el.parentElement === labelEl.parentElement) score += 6;
+        if (labelEl && (el.previousElementSibling === labelEl || el.nextElementSibling === labelEl)) score += 10;
+        if (labelEl && labelEl.contains(el)) score += 4;
+        // Prefer smaller numbers near the label; huge page-wide scans get low score
+        try {
+            const labelRect = labelEl.getBoundingClientRect();
+            const elRect = el.getBoundingClientRect();
+            const dist = Math.abs(elRect.left - labelRect.left) + Math.abs(elRect.top - labelRect.top);
+            if (dist < 80) score += 5;
+            else if (dist < 160) score += 2;
+            else score -= 4;
+        } catch (_) {}
+        return score;
+    }
+
     function findNativeChainBadge() {
-        if (cachedNativeChainValueEl && cachedNativeChainValueEl.isConnected && !cachedNativeChainValueEl.closest('#cct-root')) {
+        // Re-validate cache: must still look like a chain digit leaf next to crimes UI
+        if (
+            cachedNativeChainValueEl &&
+            cachedNativeChainValueEl.isConnected &&
+            !isExcludedNativeBadgeContext(cachedNativeChainValueEl)
+        ) {
             const text = (cachedNativeChainValueEl.textContent || '').trim();
-            if (/^\d{1,4}$/.test(text)) return { element: cachedNativeChainValueEl, value: parseInt(text, 10) };
+            if (/^\d{1,4}$/.test(text)) {
+                return { element: cachedNativeChainValueEl, value: parseInt(text, 10) };
+            }
         }
         cachedNativeChainValueEl = null;
 
-        // Locate the native "CRIME CHAIN" label, then find the numeric
-        // value displayed alongside it (Torn's own chain counter).
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        // Prefer Torn crimes app scope so sidebar points (e.g. P 3024) cannot win
+        const scope =
+            document.querySelector('.crimes-app') ||
+            document.querySelector('[class*="crimes-app"]') ||
+            document.querySelector('#mainContainer') ||
+            document.body;
+
+        const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
         let labelNode = null;
         let node;
         while ((node = walker.nextNode())) {
             const txt = node.nodeValue;
-            if (node.parentElement && node.parentElement.closest('#cct-root')) continue;
-            if (txt && /crime\s*chain/i.test(txt)) {
-                labelNode = node;
-                break;
-            }
+            if (!txt || !/crime\s*chain/i.test(txt)) continue;
+            if (!node.parentElement || isExcludedNativeBadgeContext(node.parentElement)) continue;
+            // Exact-ish label text, not a long paragraph that merely mentions it
+            if (txt.trim().length > 24) continue;
+            labelNode = node;
+            break;
         }
         if (!labelNode) return null;
+        const labelEl = labelNode.parentElement;
+        if (!labelEl) return null;
 
-        // Walk up a few ancestor levels looking for a container that also
-        // holds a short numeric text node (the chain count badge).
-        let container = labelNode.parentElement;
-        for (let i = 0; i < 5 && container; i++) {
+        // Search only a tight ancestor chain — large containers pull in points/nerve
+        let container = labelEl;
+        let best = null;
+        let bestScore = -Infinity;
+        for (let depth = 0; depth < 4 && container; depth += 1) {
+            if (isExcludedNativeBadgeContext(container) && container !== labelEl) break;
+
             const candidates = Array.from(container.querySelectorAll('*')).filter((el) => {
-                if (el.closest('#cct-root')) return false;
-                if (el.children.length > 0) return false; // want leaf nodes
+                if (isExcludedNativeBadgeContext(el)) return false;
+                if (el.children.length > 0) return false;
                 return /^\d{1,4}$/.test((el.textContent || '').trim());
             });
 
-            if (candidates.length) {
-                // Prefer a leaf whose own class hints it's the chain value
-                // itself, so a stray unrelated number (energy, level, an id)
-                // in the same container can't be picked up by mistake.
-                const hinted = candidates.find((el) => /chain|value|count|badge/i.test(el.className || ''));
-                const chosen = hinted || candidates[0];
-                cachedNativeChainValueEl = chosen;
-                return { element: chosen, value: parseInt(chosen.textContent.trim(), 10) };
+            for (const el of candidates) {
+                const score = scoreNativeBadgeCandidate(el, labelEl) - depth;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = el;
+                }
             }
-
             container = container.parentElement;
         }
-        return null;
+
+        // Require a minimum confidence so a random digit in a fat parent is ignored
+        if (!best || bestScore < 4) return null;
+
+        cachedNativeChainValueEl = best;
+        return { element: best, value: parseInt(best.textContent.trim(), 10) };
     }
 
     function syncFromNativeBadge() {
-    const badge = findNativeChainBadge();
-    if (!badge) return false;
+        const badge = findNativeChainBadge();
+        if (!badge) return false;
+        if (!Number.isFinite(badge.value) || badge.value < 0) return false;
 
-    // ── Hardening against false positives ──────────────────────────────
-    // Torn (or another script) currently exposes an element that the
-    // finder mis-identifies as the live chain and reads as 100
-    // (coincidentally the same value as CHAIN_CAP_DISPLAY).
-    // Reject readings that look like the visual display cap when they
-    // would overwrite a different, previously-known chain value.
-    if (badge.value === CHAIN_CAP_DISPLAY && chain > 0 && chain !== CHAIN_CAP_DISPLAY) {
-        logDiagnostic('native-badge-rejected', {
-            reason: 'value equals display cap while current chain differs',
-            badgeValue: badge.value,
-            currentChain: chain,
-        });
-        return false;               // do not trust this reading
+        const current = Number.isFinite(chain) ? chain : 0;
+
+        // Hardening against false positives (points, display-cap ghosts, etc.)
+        if (badge.value === CHAIN_CAP_DISPLAY && current > 0 && current !== CHAIN_CAP_DISPLAY) {
+            logDiagnostic('native-badge-rejected', {
+                reason: 'value equals display cap while current chain differs',
+                badgeValue: badge.value,
+                currentChain: current,
+            });
+            cachedNativeChainValueEl = null;
+            return false;
+        }
+
+        const delta = Math.abs(badge.value - current);
+        // Always reject implausible jumps (including non-finite edge cases).
+        // Real chain steps come from outcome counters / log verify / manual set.
+        if (!Number.isFinite(delta) || (delta > MAX_REASONABLE_COUNTER_DELTA && badge.value !== 0)) {
+            logDiagnostic('native-badge-rejected', {
+                reason: 'implausible jump from current chain',
+                badgeValue: badge.value,
+                currentChain: current,
+                delta,
+            });
+            // Drop cache so the next pass re-resolves the DOM node
+            cachedNativeChainValueEl = null;
+            return false;
+        }
+
+        pendingCriticalConfirm = null;
+        pendingResultCountReseed = null;
+        const oldChain = chain;
+        chain = clampChain(badge.value);
+        commitChainIfChanged('native', oldChain, null, `Torn's own chain badge read ${badge.value}`);
+        return true;
     }
-
-    // Optional extra safety: ignore large unexplained jumps that are not
-    // a reset to zero.  Real chain changes come from the counters or logs.
-    const delta = Math.abs(badge.value - chain);
-    if (delta > MAX_REASONABLE_COUNTER_DELTA && badge.value !== 0) {
-        logDiagnostic('native-badge-rejected', {
-            reason: 'implausible jump from current chain',
-            badgeValue: badge.value,
-            currentChain: chain,
-            delta,
-        });
-        return false;
-    }
-    // ─────────────────────────────────────────────────────────────────
-
-    pendingCriticalConfirm = null;
-    pendingResultCountReseed = null;
-    const oldChain = chain;
-    chain = clampChain(badge.value);
-    commitChainIfChanged('native', oldChain, null, `Torn's own chain badge read ${badge.value}`);
-    return true;
-}
 
     function parseResultCount(value) {
         const n = parseInt(String(value || '').replace(/,/g, ''), 10);
@@ -2655,9 +2705,9 @@
                 id: 'crime-chain-tracker',
                 name: 'Crime Chain Tracker',
                 version: VERSION,
-                icon: '🔗',
                 order: 100,
                 open: openCCT,
+                status: () => `Chain ${chain}` + (statusText(chain) ? ` · ${statusText(chain)}` : ''),
                 prefs: {
                     fields: [
                         { key: 'apiKey', type: 'password', label: 'API Key', hint: 'Torn API key with log and items selections' },
