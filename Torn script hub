@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.2.1
+// @version      4.2.2
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.2.1';
+    const HUB_VERSION = '4.2.2';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -1570,14 +1570,15 @@
             .tsh-debug-wrap { display:flex; flex-direction:column; gap:10px; }
             .tsh-debug-intro { margin:0; font-size:12px; opacity:.7; line-height:1.5; }
             .tsh-debug-meta { font-size:11px; opacity:.65; }
-            .tsh-debug-actions { display:flex; flex-wrap:wrap; gap:6px; }
+            .tsh-debug-actions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
             .tsh-debug-btn {
-                padding:5px 10px; border:1px solid #3d6eac; border-radius:3px;
-                background:#3d6eac; color:#fff; font-size:11px; font-weight:600; cursor:pointer; min-height:30px;
+                flex-shrink:0; padding:5px 12px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:11px; font-weight:600;
+                cursor:pointer; line-height:1.2; white-space:nowrap;
             }
             .tsh-debug-btn:hover { background:#355e94; }
             .tsh-debug-btn-muted {
-                background:transparent; color:inherit; border-color:var(--tsh-border,#bbb); font-weight:500;
+                background:transparent; color:inherit; border-color:var(--tsh-border,#bbb); font-weight:600;
             }
             .tsh-debug-btn-muted:hover { background:var(--tsh-hover,rgba(0,0,0,.05)); }
             .tsh-debug-section-title {
