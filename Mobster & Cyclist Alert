@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.1
+// @version      1.2.2
 // @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,14 +18,14 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.2.1';
+    const SCRIPT_VERSION = '1.2.2';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TYPES = ['mobster', 'cyclist'];
     const BEEP_COUNTS = { mobster: 3, cyclist: 1 };
     const CRIME_TITLES = { mobster: 'Mobster', cyclist: 'Cyclist' };
 
-    // System beep (Web Audio) is the reliable default. Custom URL is optional for anyone who wants to try external files.
+    // System beep is the reliable path. Custom URL remains optional.
     const PRESET_SOUNDS = {
         beep: { label: 'System beep (Web Audio)', url: '' },
         custom: { label: 'Custom URL…', url: '' }
@@ -34,11 +34,9 @@
         value: key,
         label: PRESET_SOUNDS[key].label
     }));
-    // Retired external presets from 1.2.0 — force back to system beep
     const RETIRED_SOUNDS = new Set(['gunshot', 'bell', 'siren']);
 
     const STORAGE_KEY = (type, suffix) => `mca-${type}-${suffix}`;
-
     const lastAvailable = { mobster: false, cyclist: false };
 
     function isHubPresent() {
@@ -54,6 +52,7 @@
 
     function loadSettings() {
         const settings = {};
+        let migrated = false;
         TYPES.forEach(type => {
             const enabledRaw = localStorage.getItem(STORAGE_KEY(type, 'enabled'));
             const waveformRaw = localStorage.getItem(STORAGE_KEY(type, 'waveform'));
@@ -65,19 +64,43 @@
             if (!sound) {
                 sound = audioUrlRaw ? 'custom' : DEFAULT_SOUND;
             }
-            // Drop broken external presets → system beep
             if (RETIRED_SOUNDS.has(sound) || !PRESET_SOUNDS[sound]) {
                 sound = DEFAULT_SOUND;
+                migrated = true;
+            }
+
+            // Custom only if explicitly chosen and a URL exists; otherwise beep
+            let audioUrl = (audioUrlRaw || '').trim();
+            if (sound === 'custom' && !audioUrl) {
+                sound = DEFAULT_SOUND;
+                migrated = true;
+            }
+            if (sound !== 'custom') audioUrl = '';
+
+            let volume = volumeRaw !== null ? Number(volumeRaw) : DEFAULT_VOLUME;
+            if (!Number.isFinite(volume)) volume = DEFAULT_VOLUME;
+            volume = Math.max(0, Math.min(100, volume));
+            if (volume === 0) {
+                volume = DEFAULT_VOLUME;
+                migrated = true;
             }
 
             settings[type] = {
                 enabled: enabledRaw !== null ? enabledRaw === 'true' : hubPresent,
                 waveform: waveformRaw || DEFAULT_WAVEFORM,
-                volume: volumeRaw !== null ? Number(volumeRaw) : DEFAULT_VOLUME,
+                volume,
                 sound,
-                audioUrl: sound === 'custom' ? (audioUrlRaw || '') : ''
+                audioUrl
             };
         });
+        if (migrated) {
+            TYPES.forEach(type => {
+                const s = settings[type];
+                localStorage.setItem(STORAGE_KEY(type, 'sound'), s.sound);
+                localStorage.setItem(STORAGE_KEY(type, 'audiourl'), s.audioUrl);
+                localStorage.setItem(STORAGE_KEY(type, 'volume'), String(s.volume));
+            });
+        }
         return settings;
     }
 
@@ -85,20 +108,18 @@
 
     function persistType(type) {
         const s = settings[type];
-        localStorage.setItem(STORAGE_KEY(type, 'enabled'), s.enabled);
+        localStorage.setItem(STORAGE_KEY(type, 'enabled'), String(!!s.enabled));
         localStorage.setItem(STORAGE_KEY(type, 'waveform'), s.waveform);
-        localStorage.setItem(STORAGE_KEY(type, 'volume'), s.volume);
+        localStorage.setItem(STORAGE_KEY(type, 'volume'), String(s.volume));
         localStorage.setItem(STORAGE_KEY(type, 'sound'), s.sound);
-        localStorage.setItem(STORAGE_KEY(type, 'audiourl'), s.audioUrl);
+        localStorage.setItem(STORAGE_KEY(type, 'audiourl'), s.audioUrl || '');
     }
 
-    function resolvePlayUrl(type) {
-        const s = settings[type];
-        if (s.sound === 'custom') return (s.audioUrl || '').trim();
-        return '';
-    }
-
+    // -------------------------------------------------------------------------
+    // SOUND — unlock AudioContext on first user gesture (required by browsers)
+    // -------------------------------------------------------------------------
     let audioCtx = null;
+    let audioUnlocked = false;
     const BEEP_DURATION = 0.15;
     const BEEP_GAP = 0.12;
 
@@ -108,21 +129,35 @@
             if (!Ctx) return null;
             audioCtx = new Ctx();
         }
-        if (audioCtx.state === 'suspended') {
-            audioCtx.resume();
-        }
         return audioCtx;
     }
 
-    function beep(count, waveform, volumePercent) {
+    function unlockAudio() {
         const ctx = getAudioCtx();
-        if (!ctx) return;
+        if (!ctx) return Promise.resolve(null);
+        if (ctx.state === 'suspended') {
+            return ctx.resume().then(() => {
+                audioUnlocked = true;
+                return ctx;
+            }).catch(() => ctx);
+        }
+        audioUnlocked = true;
+        return Promise.resolve(ctx);
+    }
+
+    // Any click/tap/key unlocks audio for later automatic alerts
+    ['pointerdown', 'keydown', 'touchstart'].forEach(evt => {
+        document.addEventListener(evt, () => { unlockAudio(); }, { once: true, passive: true, capture: true });
+    });
+
+    function scheduleBeeps(ctx, count, waveform, volumePercent) {
         const peak = Math.max(0.0001, Math.min(1, (volumePercent || 0) / 100));
+        const type = waveform || DEFAULT_WAVEFORM;
         for (let i = 0; i < count; i++) {
             const startTime = ctx.currentTime + i * (BEEP_DURATION + BEEP_GAP);
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
-            osc.type = waveform || DEFAULT_WAVEFORM;
+            osc.type = type;
             osc.frequency.value = 880;
             gain.gain.setValueAtTime(0.0001, startTime);
             gain.gain.exponentialRampToValueAtTime(peak, startTime + 0.01);
@@ -133,6 +168,20 @@
         }
     }
 
+    function beep(count, waveform, volumePercent) {
+        unlockAudio().then(ctx => {
+            if (!ctx) {
+                console.log('[MobsterCyclistAlert] No AudioContext available');
+                return;
+            }
+            try {
+                scheduleBeeps(ctx, count, waveform, volumePercent);
+            } catch (err) {
+                console.log('[MobsterCyclistAlert] Beep failed', err);
+            }
+        });
+    }
+
     function playExternal(url, count, volumePercent) {
         const vol = Math.max(0, Math.min(1, (volumePercent || 0) / 100));
         for (let i = 0; i < count; i++) {
@@ -141,7 +190,7 @@
                     const audio = new Audio(url);
                     audio.volume = vol;
                     audio.play().catch(err => {
-                        console.log('[MobsterCyclistAlert] Custom audio failed to play, falling back to beep.', err);
+                        console.log('[MobsterCyclistAlert] Custom audio failed, falling back to beep.', err);
                         beep(1, DEFAULT_WAVEFORM, volumePercent);
                     });
                 } catch (err) {
@@ -154,18 +203,32 @@
 
     function playAlert(type) {
         const s = settings[type];
-        const count = BEEP_COUNTS[type];
-        const url = resolvePlayUrl(type);
-        if (url) {
-            playExternal(url, count, s.volume);
+        if (!s) return;
+        const count = BEEP_COUNTS[type] || 1;
+        // Only use external audio when explicitly on custom + non-empty URL
+        if (s.sound === 'custom' && s.audioUrl) {
+            playExternal(s.audioUrl, count, s.volume);
         } else {
             beep(count, s.waveform, s.volume);
         }
     }
 
+    // -------------------------------------------------------------------------
+    // CRIME DETECTION
+    // -------------------------------------------------------------------------
+    function crimesListFromPayload(response) {
+        const raw = response && response.DB && response.DB.crimesByType;
+        if (!raw) return [];
+        if (Array.isArray(raw)) return raw;
+        if (typeof raw === 'object') return Object.values(raw);
+        return [];
+    }
+
     function isCrimeAvailable(crimes, title) {
         for (let i = 0; i < crimes.length; i++) {
-            if (crimes[i].title === title && crimes[i].available === true) {
+            const c = crimes[i];
+            if (!c) continue;
+            if (c.title === title && (c.available === true || c.available === 1 || c.available === '1')) {
                 return true;
             }
         }
@@ -173,13 +236,15 @@
     }
 
     function highlightAvailable() {
-        if (typeof window.jQuery === 'undefined' && typeof window.$ === 'undefined') return;
         const $ = window.jQuery || window.$;
-        $('.CircularProgressbar').nextAll().each(function() {
-            if ($(this).css('background-position-y') == '0px') {
-                $(this).parent().parent().parent().parent().css('background-color', '#00ff00');
-            }
-        });
+        if (!$) return;
+        try {
+            $('.CircularProgressbar').nextAll().each(function() {
+                if ($(this).css('background-position-y') == '0px') {
+                    $(this).parent().parent().parent().parent().css('background-color', '#00ff00');
+                }
+            });
+        } catch (_) {}
     }
 
     function checkType(type, crimes) {
@@ -191,16 +256,25 @@
         lastAvailable[type] = available;
     }
 
-    function startWatching() {
-        interceptFetch('torn.com', '/page.php?sid=crimesData', (response) => {
-            const crimes = response && response.DB && response.DB.crimesByType;
-            if (!Array.isArray(crimes)) return;
-            checkType('cyclist', crimes);
-            checkType('mobster', crimes);
-        });
+    function handleCrimesPayload(response) {
+        const crimes = crimesListFromPayload(response);
+        if (!crimes.length) return;
+        checkType('cyclist', crimes);
+        checkType('mobster', crimes);
     }
 
+    let watching = false;
+    function startWatching() {
+        if (watching) return;
+        watching = true;
+        interceptFetch(['crimesData', 'sid=crimesData'], handleCrimesPayload);
+    }
+
+    // -------------------------------------------------------------------------
+    // STANDALONE UI
+    // -------------------------------------------------------------------------
     function initStandaloneUI() {
+        startWatching();
         waitForElementToExist('.pickpocketing-root').then(() => {
             const $ = window.jQuery || window.$;
             if (!$) return;
@@ -213,9 +287,8 @@
             );
             updateButtonLabel('mobster');
             updateButtonLabel('cyclist');
-            $('#mobster-toggle-btn').click(() => toggleAlert('mobster'));
-            $('#cyclist-toggle-btn').click(() => toggleAlert('cyclist'));
-            startWatching();
+            $('#mobster-toggle-btn').on('click', () => toggleAlert('mobster'));
+            $('#cyclist-toggle-btn').on('click', () => toggleAlert('cyclist'));
         });
     }
 
@@ -223,7 +296,9 @@
         settings[type].enabled = !settings[type].enabled;
         persistType(type);
         updateButtonLabel(type);
-        if (settings[type].enabled) playAlert(type);
+        unlockAudio().then(() => {
+            if (settings[type].enabled) playAlert(type);
+        });
     }
 
     function updateButtonLabel(type) {
@@ -235,6 +310,9 @@
         $btn.css('background-color', settings[type].enabled ? '#2e7d32' : '');
     }
 
+    // -------------------------------------------------------------------------
+    // HUB
+    // -------------------------------------------------------------------------
     const WAVEFORM_OPTIONS = [
         { value: 'sine', label: 'Sine (soft)' },
         { value: 'triangle', label: 'Triangle' },
@@ -246,7 +324,7 @@
         const fields = [];
         TYPES.forEach(type => {
             const label = type === 'mobster' ? 'Mobster' : 'Cyclist';
-            const countLabel = type === 'mobster' ? '3 plays' : '1 play';
+            const countLabel = type === 'mobster' ? '3 beeps' : '1 beep';
 
             fields.push({ key: type + 'Enabled', label: label + ' Alert (' + countLabel + ')', type: 'toggle', default: settings[type].enabled });
             fields.push({
@@ -255,28 +333,30 @@
                 type: 'select',
                 options: SOUND_OPTIONS,
                 default: settings[type].sound,
-                hint: 'System beep is reliable offline; Custom URL is optional and may fail on some hosts/PDA'
+                hint: 'Use System beep. Custom URL is optional and often blocked.'
             });
             fields.push({
                 key: type + 'AudioUrl',
                 label: label + ' Custom Sound URL',
                 type: 'text',
-                placeholder: 'Only used when Sound = Custom URL…',
-                hint: 'Paste a direct .mp3/.ogg link when Custom URL is selected'
+                placeholder: 'Only if Sound = Custom URL…',
+                hint: 'Direct .mp3/.ogg link; leave empty to use system beep'
             });
             fields.push({
                 key: type + 'Waveform',
                 label: label + ' Beep tone',
                 type: 'select',
                 options: WAVEFORM_OPTIONS,
-                hint: 'Only used when Sound = System beep'
+                hint: 'Used for system beep'
             });
-            fields.push({ key: type + 'Volume', label: label + ' Volume (%)', type: 'number', min: 0, max: 100, step: 5 });
+            fields.push({ key: type + 'Volume', label: label + ' Volume (%)', type: 'number', min: 1, max: 100, step: 5 });
             fields.push({
                 key: type + 'Test',
                 label: 'Test ' + label + ' Alert',
                 type: 'button',
-                onClick: () => playAlert(type)
+                onClick: () => {
+                    unlockAudio().then(() => playAlert(type));
+                }
             });
         });
         return fields;
@@ -307,15 +387,18 @@
             settings[type].sound = sound;
 
             let vol = Number(values[type + 'Volume']);
-            if (!Number.isFinite(vol)) vol = DEFAULT_VOLUME;
-            settings[type].volume = Math.max(0, Math.min(100, vol));
+            if (!Number.isFinite(vol) || vol <= 0) vol = DEFAULT_VOLUME;
+            settings[type].volume = Math.max(1, Math.min(100, vol));
 
-            settings[type].audioUrl = (values[type + 'AudioUrl'] || '').trim();
+            settings[type].audioUrl = sound === 'custom' ? (values[type + 'AudioUrl'] || '').trim() : '';
+            if (sound === 'custom' && !settings[type].audioUrl) {
+                settings[type].sound = DEFAULT_SOUND;
+            }
 
             persistType(type);
 
             if (nowEnabled && !wasEnabled) {
-                playAlert(type);
+                unlockAudio().then(() => playAlert(type));
             }
         });
     }
@@ -350,12 +433,9 @@
     function initHubMode() {
         registerWithHub();
         document.addEventListener('torn-script-hub:ready', registerWithHub);
-        waitForElementToExist('.pickpocketing-root').then(() => {
-            startWatching();
-        });
+        startWatching();
     }
 
-    // --- helpers (standalone deps: jQuery often present on Torn; fetch intercept) ---
     function waitForElementToExist(selector) {
         return new Promise(resolve => {
             const el = document.querySelector(selector);
@@ -371,17 +451,26 @@
         });
     }
 
-    function interceptFetch(hostIncludes, pathIncludes, onJson) {
+    function interceptFetch(pathNeedles, onJson) {
+        const needles = Array.isArray(pathNeedles) ? pathNeedles : [pathNeedles];
         const originalFetch = window.fetch;
         if (typeof originalFetch !== 'function') return;
+
         window.fetch = async function() {
             const response = await originalFetch.apply(this, arguments);
             try {
-                const url = (arguments[0] && arguments[0].url) ? arguments[0].url : String(arguments[0] || '');
-                if (url.includes(hostIncludes) && url.includes(pathIncludes)) {
+                let url = '';
+                const arg0 = arguments[0];
+                if (typeof arg0 === 'string') url = arg0;
+                else if (arg0 && typeof arg0.url === 'string') url = arg0.url;
+                else url = String(arg0 || '');
+
+                if (needles.some(n => url.includes(n))) {
                     const clone = response.clone();
                     clone.json().then(data => {
-                        try { onJson(data); } catch (e) { console.log('[MobsterCyclistAlert] handler error', e); }
+                        try { onJson(data); } catch (e) {
+                            console.log('[MobsterCyclistAlert] handler error', e);
+                        }
                     }).catch(() => {});
                 }
             } catch (_) {}
@@ -389,9 +478,14 @@
         };
     }
 
+    // Boot
     if (hubPresent) {
         initHubMode();
     } else {
         initStandaloneUI();
     }
+
+    console.log('[MobsterCyclistAlert] v' + SCRIPT_VERSION + ' started · hub=' + hubPresent +
+        ' · mobster=' + settings.mobster.enabled + '/' + settings.mobster.sound +
+        ' · cyclist=' + settings.cyclist.enabled + '/' + settings.cyclist.sound);
 })();
