@@ -1,15 +1,16 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.1.0
+// @version      1.2.0
 // @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
 // @author       cowboyup
-// @match        https://www.torn.com/page.php?sid=crimes
+// @match        https://www.torn.com/page.php?sid=crimes*
+// @match        https://www.torn.com/loader.php?sid=crimes*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @license      MIT
-// @downloadURL  https://update.greasyfork.org/scripts/591579/Mobster%20%26%20Cyclist%20Alert.user.js
-// @updateURL    https://update.greasyfork.org/scripts/591579/Mobster%20%26%20Cyclist%20Alert.meta.js
+// @downloadURL https://update.greasyfork.org/scripts/591579/Mobster%20%20Cyclist%20Alert.user.js
+// @updateURL https://update.greasyfork.org/scripts/591579/Mobster%20%20Cyclist%20Alert.meta.js
 // ==/UserScript==
 
 (function() {
@@ -17,25 +18,30 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.1.0';
+    const SCRIPT_VERSION = '1.2.0';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TYPES = ['mobster', 'cyclist'];
     const BEEP_COUNTS = { mobster: 3, cyclist: 1 };
     const CRIME_TITLES = { mobster: 'Mobster', cyclist: 'Cyclist' };
 
+    // Preset themed sounds (external MP3). "beep" uses Web Audio; "custom" uses free-text URL.
+    const PRESET_SOUNDS = {
+        beep: { label: 'System beep (Web Audio)', url: '' },
+        gunshot: { label: 'Gunshot', url: 'https://soundbible.com/grab.php?id=1998&type=mp3' },
+        bell: { label: 'Bicycle bell', url: 'https://cdn.freesound.org/previews/318/318193_5123851-lq.mp3' },
+        siren: { label: 'Police siren', url: 'https://soundbible.com/grab.php?id=579&type=mp3' },
+        custom: { label: 'Custom URL…', url: '' }
+    };
+    const SOUND_OPTIONS = Object.keys(PRESET_SOUNDS).map(key => ({
+        value: key,
+        label: PRESET_SOUNDS[key].label
+    }));
+
     const STORAGE_KEY = (type, suffix) => `mca-${type}-${suffix}`;
 
-    // Edge-triggered: only alert once per availability window, not on every poll
     const lastAvailable = { mobster: false, cyclist: false };
 
-    // =========================================================================
-    // HUB DETECTION
-    // =========================================================================
-    // Torn Script Hub runs at document-start on every torn.com page and, if
-    // present, synchronously patches window.__tornScriptHubQueue (marking it
-    // __tshPatched) before our document-idle script runs. That flag is a
-    // reliable signal the Hub is installed and already initialized.
     function isHubPresent() {
         const q = window[QUEUE_PROPERTY];
         return !!(q && q.__tshPatched);
@@ -43,15 +49,9 @@
 
     const hubPresent = isHubPresent();
 
-    // =========================================================================
-    // SETTINGS — per-type enabled/waveform/volume/custom audio URL.
-    // "Enabled" defaults on when the Hub manages it, off (manual activation)
-    // when running standalone. Waveform/volume/audio URL only ever get
-    // adjusted through the Hub Settings tab, but always apply either way.
-    // A previously saved value always takes priority over any default.
-    // =========================================================================
     const DEFAULT_WAVEFORM = 'sine';
-    const DEFAULT_VOLUME = 75; // percent
+    const DEFAULT_VOLUME = 75;
+    const DEFAULT_SOUND = { mobster: 'gunshot', cyclist: 'bell' };
 
     function loadSettings() {
         const settings = {};
@@ -60,11 +60,21 @@
             const waveformRaw = localStorage.getItem(STORAGE_KEY(type, 'waveform'));
             const volumeRaw = localStorage.getItem(STORAGE_KEY(type, 'volume'));
             const audioUrlRaw = localStorage.getItem(STORAGE_KEY(type, 'audiourl'));
+            const soundRaw = localStorage.getItem(STORAGE_KEY(type, 'sound'));
+
+            let sound = soundRaw || '';
+            // Migrate: old installs with a free-text URL and no sound key → custom
+            if (!sound) {
+                if (audioUrlRaw) sound = 'custom';
+                else sound = DEFAULT_SOUND[type] || 'beep';
+            }
+            if (!PRESET_SOUNDS[sound]) sound = DEFAULT_SOUND[type] || 'beep';
 
             settings[type] = {
                 enabled: enabledRaw !== null ? enabledRaw === 'true' : hubPresent,
                 waveform: waveformRaw || DEFAULT_WAVEFORM,
                 volume: volumeRaw !== null ? Number(volumeRaw) : DEFAULT_VOLUME,
+                sound,
                 audioUrl: audioUrlRaw || ''
             };
         });
@@ -78,16 +88,21 @@
         localStorage.setItem(STORAGE_KEY(type, 'enabled'), s.enabled);
         localStorage.setItem(STORAGE_KEY(type, 'waveform'), s.waveform);
         localStorage.setItem(STORAGE_KEY(type, 'volume'), s.volume);
+        localStorage.setItem(STORAGE_KEY(type, 'sound'), s.sound);
         localStorage.setItem(STORAGE_KEY(type, 'audiourl'), s.audioUrl);
     }
 
-    // =========================================================================
-    // SOUND — system beep (Web Audio API) by default, or an optional
-    // user-supplied external audio file per type.
-    // =========================================================================
+    function resolvePlayUrl(type) {
+        const s = settings[type];
+        if (s.sound === 'custom') return (s.audioUrl || '').trim();
+        const preset = PRESET_SOUNDS[s.sound];
+        if (preset && preset.url) return preset.url;
+        return '';
+    }
+
     let audioCtx = null;
-    const BEEP_DURATION = 0.15; // seconds
-    const BEEP_GAP = 0.12;      // seconds between repeated beeps/plays
+    const BEEP_DURATION = 0.15;
+    const BEEP_GAP = 0.12;
 
     function getAudioCtx() {
         if (!audioCtx) {
@@ -142,16 +157,14 @@
     function playAlert(type) {
         const s = settings[type];
         const count = BEEP_COUNTS[type];
-        if (s.audioUrl) {
-            playExternal(s.audioUrl, count, s.volume);
+        const url = resolvePlayUrl(type);
+        if (url) {
+            playExternal(url, count, s.volume);
         } else {
             beep(count, s.waveform, s.volume);
         }
     }
 
-    // =========================================================================
-    // CRIME DETECTION
-    // =========================================================================
     function isCrimeAvailable(crimes, title) {
         for (let i = 0; i < crimes.length; i++) {
             if (crimes[i].title === title && crimes[i].available === true) {
@@ -162,10 +175,11 @@
     }
 
     function highlightAvailable() {
-        /* Highlight all available crime icons (generic, unchanged from prior versions) */
+        if (typeof window.jQuery === 'undefined' && typeof window.$ === 'undefined') return;
+        const $ = window.jQuery || window.$;
         $('.CircularProgressbar').nextAll().each(function() {
             if ($(this).css('background-position-y') == '0px') {
-                $(this).parent().parent().parent().parent().css("background-color", "#00ff00");
+                $(this).parent().parent().parent().parent().css('background-color', '#00ff00');
             }
         });
     }
@@ -180,33 +194,29 @@
     }
 
     function startWatching() {
-        interceptFetch("torn.com", "/page.php?sid=crimesData", (response) => {
-            const crimes = response.DB.crimesByType;
+        interceptFetch('torn.com', '/page.php?sid=crimesData', (response) => {
+            const crimes = response && response.DB && response.DB.crimesByType;
+            if (!Array.isArray(crimes)) return;
             checkType('cyclist', crimes);
             checkType('mobster', crimes);
         });
     }
 
-    // =========================================================================
-    // STANDALONE MODE — on-page toggle buttons (Hub not installed)
-    // =========================================================================
     function initStandaloneUI() {
         waitForElementToExist('.pickpocketing-root').then(() => {
-            $('.pickpocketing-root').append(`
-                <div id="crime-alert-div">
-                    <a id="mobster-toggle-btn" class="torn-btn btn-big"></a>
-                    &nbsp;
-                    <a id="cyclist-toggle-btn" class="torn-btn btn-big"></a>
-                    <br/><br/>
-                </div>
-            `);
-
+            const $ = window.jQuery || window.$;
+            if (!$) return;
+            if (document.getElementById('crime-alert-div')) return;
+            $('.pickpocketing-root').append(
+                '<div id="crime-alert-div">' +
+                '<a id="mobster-toggle-btn" class="torn-btn btn-big"></a>&nbsp;' +
+                '<a id="cyclist-toggle-btn" class="torn-btn btn-big"></a><br/><br/>' +
+                '</div>'
+            );
             updateButtonLabel('mobster');
             updateButtonLabel('cyclist');
-
             $('#mobster-toggle-btn').click(() => toggleAlert('mobster'));
             $('#cyclist-toggle-btn').click(() => toggleAlert('cyclist'));
-
             startWatching();
         });
     }
@@ -215,22 +225,18 @@
         settings[type].enabled = !settings[type].enabled;
         persistType(type);
         updateButtonLabel(type);
-
-        if (settings[type].enabled) {
-            playAlert(type); // test sound when enabled
-        }
+        if (settings[type].enabled) playAlert(type);
     }
 
     function updateButtonLabel(type) {
+        const $ = window.jQuery || window.$;
+        if (!$) return;
         const label = type === 'mobster' ? 'Mobster' : 'Cyclist';
-        const $btn = $(`#${type}-toggle-btn`);
-        $btn.text(`${settings[type].enabled ? 'Disable' : 'Enable'} ${label} Alert`);
+        const $btn = $('#' + type + '-toggle-btn');
+        $btn.text((settings[type].enabled ? 'Disable' : 'Enable') + ' ' + label + ' Alert');
         $btn.css('background-color', settings[type].enabled ? '#2e7d32' : '');
     }
 
-    // =========================================================================
-    // HUB MODE — no page UI, registers with Torn Script Hub for control
-    // =========================================================================
     const WAVEFORM_OPTIONS = [
         { value: 'sine', label: 'Sine (soft)' },
         { value: 'triangle', label: 'Triangle' },
@@ -242,15 +248,35 @@
         const fields = [];
         TYPES.forEach(type => {
             const label = type === 'mobster' ? 'Mobster' : 'Cyclist';
-            const countLabel = type === 'mobster' ? '3 beeps' : '1 beep';
+            const countLabel = type === 'mobster' ? '3 plays' : '1 play';
 
-            fields.push({ key: `${type}Enabled`, label: `${label} Alert (${countLabel})`, type: 'toggle', default: settings[type].enabled });
-            fields.push({ key: `${type}Waveform`, label: `${label} Tone`, type: 'select', options: WAVEFORM_OPTIONS });
-            fields.push({ key: `${type}Volume`, label: `${label} Volume (%)`, type: 'number', min: 0, max: 100, step: 5 });
-            fields.push({ key: `${type}AudioUrl`, label: `${label} Custom Sound URL`, type: 'text', placeholder: 'https://... (optional, overrides tone)' });
+            fields.push({ key: type + 'Enabled', label: label + ' Alert (' + countLabel + ')', type: 'toggle', default: settings[type].enabled });
             fields.push({
-                key: `${type}Test`,
-                label: `Test ${label} Alert`,
+                key: type + 'Sound',
+                label: label + ' Sound',
+                type: 'select',
+                options: SOUND_OPTIONS,
+                default: settings[type].sound,
+                hint: 'Gunshot / bell / siren use external MP3s; system beep works offline'
+            });
+            fields.push({
+                key: type + 'AudioUrl',
+                label: label + ' Custom Sound URL',
+                type: 'text',
+                placeholder: 'Only used when Sound = Custom URL…',
+                hint: 'Paste a direct .mp3/.ogg link when Custom URL is selected'
+            });
+            fields.push({
+                key: type + 'Waveform',
+                label: label + ' Beep tone',
+                type: 'select',
+                options: WAVEFORM_OPTIONS,
+                hint: 'Only used when Sound = System beep'
+            });
+            fields.push({ key: type + 'Volume', label: label + ' Volume (%)', type: 'number', min: 0, max: 100, step: 5 });
+            fields.push({
+                key: type + 'Test',
+                label: 'Test ' + label + ' Alert',
                 type: 'button',
                 onClick: () => playAlert(type)
             });
@@ -261,10 +287,11 @@
     function buildPrefValues() {
         const values = {};
         TYPES.forEach(type => {
-            values[`${type}Enabled`] = settings[type].enabled;
-            values[`${type}Waveform`] = settings[type].waveform;
-            values[`${type}Volume`] = settings[type].volume;
-            values[`${type}AudioUrl`] = settings[type].audioUrl;
+            values[type + 'Enabled'] = settings[type].enabled;
+            values[type + 'Sound'] = settings[type].sound;
+            values[type + 'Waveform'] = settings[type].waveform;
+            values[type + 'Volume'] = settings[type].volume;
+            values[type + 'AudioUrl'] = settings[type].audioUrl;
         });
         return values;
     }
@@ -272,21 +299,25 @@
     function applyPrefValues(values) {
         TYPES.forEach(type => {
             const wasEnabled = settings[type].enabled;
-            const nowEnabled = !!values[`${type}Enabled`];
+            const nowEnabled = !!values[type + 'Enabled'];
 
             settings[type].enabled = nowEnabled;
-            settings[type].waveform = values[`${type}Waveform`] || DEFAULT_WAVEFORM;
+            settings[type].waveform = values[type + 'Waveform'] || DEFAULT_WAVEFORM;
 
-            let vol = Number(values[`${type}Volume`]);
+            let sound = values[type + 'Sound'] || DEFAULT_SOUND[type] || 'beep';
+            if (!PRESET_SOUNDS[sound]) sound = DEFAULT_SOUND[type] || 'beep';
+            settings[type].sound = sound;
+
+            let vol = Number(values[type + 'Volume']);
             if (!Number.isFinite(vol)) vol = DEFAULT_VOLUME;
             settings[type].volume = Math.max(0, Math.min(100, vol));
 
-            settings[type].audioUrl = (values[`${type}AudioUrl`] || '').trim();
+            settings[type].audioUrl = (values[type + 'AudioUrl'] || '').trim();
 
             persistType(type);
 
             if (nowEnabled && !wasEnabled) {
-                playAlert(type); // test sound when freshly enabled
+                playAlert(type);
             }
         });
     }
@@ -298,13 +329,15 @@
             version: SCRIPT_VERSION,
             order: 200,
             open: () => {
-                // No standalone UI of its own — jump straight to this script's
-                // Settings panel in the Hub dashboard.
                 document.dispatchEvent(new CustomEvent('torn-script-hub:open', {
                     detail: { scriptId: HUB_ID }
                 }));
             },
-            status: () => `Mobster: ${settings.mobster.enabled ? 'On' : 'Off'} · Cyclist: ${settings.cyclist.enabled ? 'On' : 'Off'}`,
+            status: () => {
+                const soundLabel = (t) => (PRESET_SOUNDS[settings[t].sound] || {}).label || settings[t].sound;
+                return 'Mobster: ' + (settings.mobster.enabled ? 'On (' + soundLabel('mobster') + ')' : 'Off') +
+                    ' · Cyclist: ' + (settings.cyclist.enabled ? 'On (' + soundLabel('cyclist') + ')' : 'Off');
+            },
             prefs: {
                 fields: buildPrefFields(),
                 values: buildPrefValues(),
@@ -313,67 +346,54 @@
         };
 
         (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail: registration }));
     }
 
     function initHubMode() {
         registerWithHub();
+        document.addEventListener('torn-script-hub:ready', registerWithHub);
         waitForElementToExist('.pickpocketing-root').then(() => {
             startWatching();
         });
     }
 
-    // =========================================================================
-    // START
-    // =========================================================================
+    // --- helpers (standalone deps: jQuery often present on Torn; fetch intercept) ---
+    function waitForElementToExist(selector) {
+        return new Promise(resolve => {
+            const el = document.querySelector(selector);
+            if (el) return resolve(el);
+            const obs = new MutationObserver(() => {
+                const found = document.querySelector(selector);
+                if (found) {
+                    obs.disconnect();
+                    resolve(found);
+                }
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+        });
+    }
+
+    function interceptFetch(hostIncludes, pathIncludes, onJson) {
+        const originalFetch = window.fetch;
+        if (typeof originalFetch !== 'function') return;
+        window.fetch = async function() {
+            const response = await originalFetch.apply(this, arguments);
+            try {
+                const url = (arguments[0] && arguments[0].url) ? arguments[0].url : String(arguments[0] || '');
+                if (url.includes(hostIncludes) && url.includes(pathIncludes)) {
+                    const clone = response.clone();
+                    clone.json().then(data => {
+                        try { onJson(data); } catch (e) { console.log('[MobsterCyclistAlert] handler error', e); }
+                    }).catch(() => {});
+                }
+            } catch (_) {}
+            return response;
+        };
+    }
+
     if (hubPresent) {
         initHubMode();
     } else {
         initStandaloneUI();
     }
 })();
-
-function interceptFetch(url, q, callback) {
-	const originalFetch = window.fetch;
-
-	window.fetch = function() {
-		return new Promise((resolve, reject) => {
-			return originalFetch.apply(this, arguments).then(function(data) {
-					let dataurl = data.url.toString();
-					if (dataurl.includes(url) && dataurl.includes(q)) {
-						const clone = data.clone();
-						if (clone) {
-							clone.json().then((response) => callback(response, data.url))
-								.catch((error) => {
-									console.log("[MobsterCyclistAlert][InterceptFetch] Error with clone.json(). Most likely not JSON data.", error)
-								})
-						}
-					}
-
-					resolve(data);
-				})
-				.catch((error) => {
-					console.log("[MobsterCyclistAlert][InterceptFetch] Error with fetch.", error)
-				})
-		});
-	};
-}
-
-function waitForElementToExist(selector) {
-    return new Promise(resolve => {
-        if (document.querySelector(selector)) {
-            return resolve(document.querySelector(selector));
-        }
-
-        const observer = new MutationObserver(() => {
-            if (document.querySelector(selector)) {
-                resolve(document.querySelector(selector));
-                observer.disconnect();
-            }
-        });
-
-        observer.observe(document.body, {
-            subtree: true,
-            childList: true,
-        });
-    });
-}
