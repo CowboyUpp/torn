@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.0
+// @version      1.2.1
 // @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,25 +18,24 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.2.0';
+    const SCRIPT_VERSION = '1.2.1';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TYPES = ['mobster', 'cyclist'];
     const BEEP_COUNTS = { mobster: 3, cyclist: 1 };
     const CRIME_TITLES = { mobster: 'Mobster', cyclist: 'Cyclist' };
 
-    // Preset themed sounds (external MP3). "beep" uses Web Audio; "custom" uses free-text URL.
+    // System beep (Web Audio) is the reliable default. Custom URL is optional for anyone who wants to try external files.
     const PRESET_SOUNDS = {
         beep: { label: 'System beep (Web Audio)', url: '' },
-        gunshot: { label: 'Gunshot', url: 'https://soundbible.com/grab.php?id=1998&type=mp3' },
-        bell: { label: 'Bicycle bell', url: 'https://cdn.freesound.org/previews/318/318193_5123851-lq.mp3' },
-        siren: { label: 'Police siren', url: 'https://soundbible.com/grab.php?id=579&type=mp3' },
         custom: { label: 'Custom URL…', url: '' }
     };
     const SOUND_OPTIONS = Object.keys(PRESET_SOUNDS).map(key => ({
         value: key,
         label: PRESET_SOUNDS[key].label
     }));
+    // Retired external presets from 1.2.0 — force back to system beep
+    const RETIRED_SOUNDS = new Set(['gunshot', 'bell', 'siren']);
 
     const STORAGE_KEY = (type, suffix) => `mca-${type}-${suffix}`;
 
@@ -51,7 +50,7 @@
 
     const DEFAULT_WAVEFORM = 'sine';
     const DEFAULT_VOLUME = 75;
-    const DEFAULT_SOUND = { mobster: 'gunshot', cyclist: 'bell' };
+    const DEFAULT_SOUND = 'beep';
 
     function loadSettings() {
         const settings = {};
@@ -63,19 +62,20 @@
             const soundRaw = localStorage.getItem(STORAGE_KEY(type, 'sound'));
 
             let sound = soundRaw || '';
-            // Migrate: old installs with a free-text URL and no sound key → custom
             if (!sound) {
-                if (audioUrlRaw) sound = 'custom';
-                else sound = DEFAULT_SOUND[type] || 'beep';
+                sound = audioUrlRaw ? 'custom' : DEFAULT_SOUND;
             }
-            if (!PRESET_SOUNDS[sound]) sound = DEFAULT_SOUND[type] || 'beep';
+            // Drop broken external presets → system beep
+            if (RETIRED_SOUNDS.has(sound) || !PRESET_SOUNDS[sound]) {
+                sound = DEFAULT_SOUND;
+            }
 
             settings[type] = {
                 enabled: enabledRaw !== null ? enabledRaw === 'true' : hubPresent,
                 waveform: waveformRaw || DEFAULT_WAVEFORM,
                 volume: volumeRaw !== null ? Number(volumeRaw) : DEFAULT_VOLUME,
                 sound,
-                audioUrl: audioUrlRaw || ''
+                audioUrl: sound === 'custom' ? (audioUrlRaw || '') : ''
             };
         });
         return settings;
@@ -95,8 +95,6 @@
     function resolvePlayUrl(type) {
         const s = settings[type];
         if (s.sound === 'custom') return (s.audioUrl || '').trim();
-        const preset = PRESET_SOUNDS[s.sound];
-        if (preset && preset.url) return preset.url;
         return '';
     }
 
@@ -257,7 +255,7 @@
                 type: 'select',
                 options: SOUND_OPTIONS,
                 default: settings[type].sound,
-                hint: 'Gunshot / bell / siren use external MP3s; system beep works offline'
+                hint: 'System beep is reliable offline; Custom URL is optional and may fail on some hosts/PDA'
             });
             fields.push({
                 key: type + 'AudioUrl',
@@ -304,8 +302,8 @@
             settings[type].enabled = nowEnabled;
             settings[type].waveform = values[type + 'Waveform'] || DEFAULT_WAVEFORM;
 
-            let sound = values[type + 'Sound'] || DEFAULT_SOUND[type] || 'beep';
-            if (!PRESET_SOUNDS[sound]) sound = DEFAULT_SOUND[type] || 'beep';
+            let sound = values[type + 'Sound'] || DEFAULT_SOUND;
+            if (RETIRED_SOUNDS.has(sound) || !PRESET_SOUNDS[sound]) sound = DEFAULT_SOUND;
             settings[type].sound = sound;
 
             let vol = Number(values[type + 'Volume']);
