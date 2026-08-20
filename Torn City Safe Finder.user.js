@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.4.0
+// @version      1.4.1
 // @description  Safety-first city item helper: native map-top status bar, map pins, centered list panel, local history, optional Public API values, no automated pickup, Torn Script Hub support.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -20,12 +20,11 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.4.0';
-    // v1.4.0 — Native map-top status bar (no floating bullseye FAB). Bar always
-    // shows find count including zero, sits above the city map, matches Torn UI.
-    // Pins always render. Click bar opens centered panel. With Hub: settings
-    // live in Hub prefs only; bar still opens panel for a quick peek. Standalone
-    // keeps in-panel settings. Hub library registration improved with prefs.
+    const VERSION = '1.4.1';
+    // v1.4.1 — Fix Hub/PDA settings persistence (dual-write GM + localStorage),
+    // never wipe API key on empty password blur, raise panel z-index above map,
+    // harden bar click → open centered stats panel on desktop and PDA.
+    // v1.4.0 — Native map-top status bar (no floating bullseye FAB).
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -83,22 +82,14 @@
             return fallback;
         },
         set(key, value) {
-            let storedPrivately = false;
+            // Dual-write: GM storage (Tampermonkey) AND localStorage (TornPDA /
+            // grant-none fallbacks). Never drop localStorage just because GM_*
+            // exists — some PDA builds expose a no-op GM_setValue.
             try {
                 if (typeof GM_setValue === 'function') {
                     GM_setValue(STORE_PREFIX + key, value);
-                    storedPrivately = true;
                 }
             } catch (_) {}
-
-            if (storedPrivately) {
-                // Migrate away from the old page-accessible fallback. This is
-                // especially important for settings because they may contain an API key.
-                try {
-                    localStorage.removeItem(STORE_PREFIX + key);
-                } catch (_) {}
-                return;
-            }
 
             try {
                 localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value));
@@ -716,7 +707,7 @@
                 width: 380px;
                 max-width: calc(100vw - 20px);
                 max-height: min(76vh, 620px);
-                z-index: 2147483001;
+                z-index: 2147483645;
                 display: none;
                 flex-direction: column;
                 overflow: hidden;
@@ -727,7 +718,7 @@
                 box-shadow: 0 18px 54px rgba(0,0,0,.58);
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
             }
-            #tcfs-panel.tcfs-open { display: flex; }
+            #tcfs-panel.tcfs-open { display: flex !important; visibility: visible !important; opacity: 1 !important; }
             .tcfs-head {
                 display: flex;
                 align-items: center;
@@ -1088,7 +1079,7 @@
                 bottom: 82px;
                 transform: translateX(-50%);
                 max-width: min(420px, calc(100vw - 30px));
-                z-index: 2147483002;
+                z-index: 2147483645;
                 opacity: 0;
                 transition: opacity .18s ease;
                 padding: 9px 13px;
@@ -1642,7 +1633,24 @@
             <span class="tcfs-bar-action">Open</span>
         `;
         badge = bar.querySelector('[data-role="count"]');
-        bar.addEventListener('click', () => togglePanel());
+        let barTouchLockUntil = 0;
+        const onBarActivate = (event) => {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            // Ignore the synthetic click that follows a touch we already handled
+            if (Date.now() < barTouchLockUntil) return;
+            togglePanel();
+        };
+        bar.addEventListener('click', onBarActivate);
+        bar.addEventListener('pointerup', (event) => {
+            if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
+            event.preventDefault();
+            event.stopPropagation();
+            barTouchLockUntil = Date.now() + 450;
+            togglePanel();
+        });
 
         panel = document.createElement('div');
         panel.id = 'tcfs-panel';
@@ -1959,11 +1967,21 @@
             if (action) action.textContent = next ? 'Close' : 'Open';
         }
         if (next) {
+            // Close Hub dashboard if open so the stats panel is not buried under it
+            try {
+                const dash = document.getElementById('tsh-dashboard');
+                if (dash) dash.classList.remove('tsh-dash-open');
+            } catch (_) {}
             panel.classList.add('tcfs-open');
-            render();
+            panel.style.display = 'flex';
+            panel.style.zIndex = '2147483645';
+            try { render(); } catch (err) { console.error('[TCMF] render failed', err); }
             anchorPanel();
+            // Re-anchor after layout so max-height content sizes correctly
+            requestAnimationFrame(() => anchorPanel());
         } else {
             panel.classList.remove('tcfs-open');
+            panel.style.display = 'none';
             if (settingsEl) settingsEl.classList.remove('tcfs-open');
             panel.classList.remove('tcfs-settings-mode');
         }
@@ -2561,6 +2579,7 @@
                     historyLimit: settings.historyLimit
                 },
                 onSave: (values) => {
+                    if (!values || typeof values !== 'object') return;
                     if (values.theme === 'dark' || values.theme === 'light') {
                         settings.theme = values.theme;
                         applyTheme();
@@ -2571,17 +2590,33 @@
                     if (typeof values.apiEnabled === 'boolean') {
                         settings.apiEnabled = values.apiEnabled;
                     }
+                    // Password fields only commit on blur; a toggle save can arrive
+                    // with an empty apiKey string. Never wipe a known key that way.
                     if (typeof values.apiKey === 'string') {
-                        settings.apiKey = values.apiKey.trim().slice(0, 16);
+                        const trimmed = values.apiKey.trim().slice(0, 16);
+                        if (trimmed) {
+                            settings.apiKey = trimmed;
+                        } else if (!settings.apiKey) {
+                            settings.apiKey = '';
+                        }
+                        // keep existing settings.apiKey when trimmed is empty
                     }
-                    if (values.historyLimit != null) {
+                    if (values.historyLimit != null && values.historyLimit !== '') {
                         const n = Number(values.historyLimit);
                         if (Number.isFinite(n)) settings.historyLimit = Math.max(50, Math.min(2000, Math.round(n)));
                     }
                     saveSettings();
+                    // Keep Hub's live snapshot in sync with what we actually stored
+                    try {
+                        values.apiKey = settings.apiKey || '';
+                        values.apiEnabled = settings.apiEnabled;
+                        values.showImages = settings.showImages;
+                        values.theme = settings.theme;
+                        values.historyLimit = settings.historyLimit;
+                    } catch (_) {}
                     if (settings.apiEnabled && settings.apiKey) fetchItemMetadata(false);
-                    renderMapPins();
-                    render();
+                    try { renderMapPins(); } catch (_) {}
+                    try { render(); } catch (_) {}
                 }
             }
         };
