@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.3.0
-// @description  Safety-first city item helper: map pins, floating item window, local history, optional Public API values, no automated pickup, and Torn Script Hub support.
+// @version      1.4.0
+// @description  Safety-first city item helper: native map-top status bar, map pins, centered list panel, local history, optional Public API values, no automated pickup, Torn Script Hub support.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
 // @match        https://*.torn.com/city.php*
@@ -13,18 +13,19 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.torn.com
+// @downloadURL https://update.greasyfork.org/scripts/583629/Torn%20City%20Map%20Finder.user.js
+// @updateURL https://update.greasyfork.org/scripts/583629/Torn%20City%20Map%20Finder.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.3.0';
-    // v1.3.0 — Torn Script Hub support (auto-registers and hides the floating
-    // button when the Hub is installed, launching via the Hub instead). For
-    // standalone use, dragging is now actually wired up and the dragged
-    // position persists across reloads; a MutationObserver keeps the
-    // auto-dock position accurate while Torn's header finishes rendering,
-    // and right-clicking the button resets it back to automatic docking.
+    const VERSION = '1.4.0';
+    // v1.4.0 — Native map-top status bar (no floating bullseye FAB). Bar always
+    // shows find count including zero, sits above the city map, matches Torn UI.
+    // Pins always render. Click bar opens centered panel. With Hub: settings
+    // live in Hub prefs only; bar still opens panel for a quick peek. Standalone
+    // keeps in-panel settings. Hub library registration improved with prefs.
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -125,7 +126,7 @@
     let lastRenderedItemSignature = '';
     let markerMap = null;
 
-    let fab = null;
+    let bar = null;
     let badge = null;
     let panel = null;
     let listEl = null;
@@ -475,6 +476,83 @@
         if (document.getElementById('tcfs-styles')) return;
 
         const css = `
+            /* v1.4 — native map-top status bar */
+            #tcfs-map-bar {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                width: 100%;
+                box-sizing: border-box;
+                margin: 0 0 6px;
+                padding: 6px 10px;
+                border: 1px solid var(--tcfs-bar-border, #ccc);
+                border-radius: 5px;
+                background: var(--tcfs-bar-bg, #f2f2f2);
+                color: var(--tcfs-bar-text, #333);
+                font: 600 12px/1.3 Arial, Helvetica, sans-serif;
+                cursor: pointer;
+                user-select: none;
+                -webkit-user-select: none;
+            }
+            #tcfs-map-bar:hover { filter: brightness(0.98); }
+            #tcfs-map-bar:focus-visible {
+                outline: 2px solid #f0b14b;
+                outline-offset: 2px;
+            }
+            #tcfs-map-bar.tcfs-has-items {
+                border-color: var(--tcfs-bar-accent-border, #c9a227);
+                background: var(--tcfs-bar-accent-bg, #fff8e6);
+            }
+            #tcfs-map-bar .tcfs-bar-pin {
+                flex: 0 0 auto;
+                width: 16px;
+                height: 16px;
+                color: var(--tcfs-bar-muted, #666);
+            }
+            #tcfs-map-bar.tcfs-has-items .tcfs-bar-pin {
+                color: var(--tcfs-bar-accent, #b8860b);
+            }
+            #tcfs-map-bar .tcfs-bar-label {
+                flex: 1 1 auto;
+                min-width: 0;
+                font-weight: 700;
+                letter-spacing: 0.2px;
+            }
+            #tcfs-map-bar .tcfs-bar-count {
+                flex: 0 0 auto;
+                color: var(--tcfs-bar-muted, #666);
+                font-weight: 600;
+            }
+            #tcfs-map-bar.tcfs-has-items .tcfs-bar-count {
+                color: var(--tcfs-bar-accent, #8a6d12);
+            }
+            #tcfs-map-bar .tcfs-bar-action {
+                flex: 0 0 auto;
+                color: var(--tcfs-bar-muted, #666);
+                font-weight: 600;
+                font-size: 11px;
+            }
+            #tcfs-map-bar.tcfs-new-find-pulse {
+                animation: tcfs-bar-pulse 1.6s ease 2;
+            }
+            @keyframes tcfs-bar-pulse {
+                0%, 100% { box-shadow: none; }
+                40% { box-shadow: 0 0 0 3px rgba(200, 162, 39, 0.35); }
+            }
+            body:not(.light) #tcfs-map-bar,
+            .dark-mode #tcfs-map-bar,
+            body[data-theme="dark"] #tcfs-map-bar {
+                --tcfs-bar-bg: #2e2e2e;
+                --tcfs-bar-border: #444;
+                --tcfs-bar-text: #ddd;
+                --tcfs-bar-muted: #999;
+                --tcfs-bar-accent: #e0b24a;
+                --tcfs-bar-accent-border: #6b5520;
+                --tcfs-bar-accent-bg: #3a3428;
+            }
+            /* Legacy FAB retired */
+            #tcfs-fab { display: none !important; }
+
             #tcfs-fab {
                 position: fixed;
                 z-index: 2147483000;
@@ -1545,49 +1623,54 @@
 
     function buildUI() {
         injectStyles();
-        if (document.getElementById('tcfs-fab')) return;
+        if (document.getElementById('tcfs-map-bar') || document.getElementById('tcfs-panel')) return;
 
-        fab = document.createElement('button');
-        fab.id = 'tcfs-fab';
-        fab.type = 'button';
-        fab.title = 'City Find / Collect';
-        fab.setAttribute('aria-label', 'Open City Finds');
-        fab.setAttribute('aria-controls', 'tcfs-panel');
-        fab.setAttribute('aria-expanded', 'false');
-  
-        fab.innerHTML = `
-            <div class="cfc-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="6.2" />
-                    <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none" />
-                    <path d="M12 2.2v3.2M12 18.6v3.2M2.2 12h3.2M18.6 12h3.2" />
-                </svg>
-            </div>
-            <span class="cfc-label">Find / Collect</span>
-            <span class="tcfs-badge" aria-label="0 active finds"></span>
+        bar = document.createElement('button');
+        bar.id = 'tcfs-map-bar';
+        bar.type = 'button';
+        bar.title = 'City finds — click to open list';
+        bar.setAttribute('aria-label', 'City finds');
+        bar.setAttribute('aria-controls', 'tcfs-panel');
+        bar.setAttribute('aria-expanded', 'false');
+        bar.innerHTML = `
+            <svg class="tcfs-bar-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 21s-6-5.3-6-10a6 6 0 1 1 12 0c0 4.7-6 10-6 10z"/>
+                <circle cx="12" cy="11" r="2.2"/>
+            </svg>
+            <span class="tcfs-bar-label">City finds</span>
+            <span class="tcfs-bar-count" data-role="count">No finds on map</span>
+            <span class="tcfs-bar-action">Open</span>
         `;
-        document.body.appendChild(fab);
-        badge = fab.querySelector('.tcfs-badge');
+        badge = bar.querySelector('[data-role="count"]');
+        bar.addEventListener('click', () => togglePanel());
 
         panel = document.createElement('div');
         panel.id = 'tcfs-panel';
         panel.dataset.theme = settings.theme;
         panel.setAttribute('role', 'dialog');
         panel.setAttribute('aria-label', 'City Finds');
+
+        const settingsBtn = hubPresent
+            ? ''
+            : '<button class="tcfs-iconbtn" type="button" data-action="settings" title="Settings">&#9881;</button>';
+        const themeBtn = hubPresent
+            ? ''
+            : `<button class="tcfs-iconbtn" type="button" data-action="theme" title="Use dark theme" aria-label="Use dark theme">
+                    <svg class="tcfs-theme-icon tcfs-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8a8.5 8.5 0 1 0 11.6 11.6Z"/></svg>
+                    <svg class="tcfs-theme-icon tcfs-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+                </button>`;
+
         panel.innerHTML = `
             <div class="tcfs-head">
                 <div class="tcfs-brandmark" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
-                        <circle cx="12" cy="12" r="6.2"/><circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/>
-                        <path d="M12 2.2v3.2M12 18.6v3.2M2.2 12h3.2M18.6 12h3.2"/>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 21s-6-5.3-6-10a6 6 0 1 1 12 0c0 4.7-6 10-6 10z"/>
+                        <circle cx="12" cy="11" r="2.2"/>
                     </svg>
                 </div>
                 <div class="tcfs-title">City Finder <span>v${VERSION}</span><div class="tcfs-head-status">Scanner ready</div></div>
-                <button class="tcfs-iconbtn" type="button" data-action="theme" title="Use dark theme" aria-label="Use dark theme">
-                    <svg class="tcfs-theme-icon tcfs-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8a8.5 8.5 0 1 0 11.6 11.6Z"/></svg>
-                    <svg class="tcfs-theme-icon tcfs-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-                </button>
-                <button class="tcfs-iconbtn" type="button" data-action="settings" title="Settings">&#9881;</button>
+                ${themeBtn}
+                ${settingsBtn}
                 <button class="tcfs-iconbtn" type="button" data-action="refresh" title="Refresh">&#8635;</button>
                 <button class="tcfs-iconbtn" type="button" data-action="close" title="Close">x</button>
             </div>
@@ -1614,52 +1697,70 @@
         settingsEl = panel.querySelector('.tcfs-settings');
         listEl = panel.querySelector('.tcfs-list');
         detailEl = panel.querySelector('.tcfs-detail');
-        applyTheme();
 
-        if (hubPresent) {
-            fab.style.display = 'none';
-            fab.setAttribute('aria-hidden', 'true');
-            fab.tabIndex = -1;
-        } else {
-            fab.title = 'City Find / Collect — drag to move, right-click to reset position';
-            if (settings.fabX !== null && settings.fabY !== null) {
-                placeFab(settings.fabX, settings.fabY, false);
-            } else {
-                positionHeaderFab();
-                setupHeaderObserver();
-            }
-            makeFabDraggable();
-            fab.addEventListener('contextmenu', onFabContextMenu);
-        }
+        const searchInput = panel.querySelector('[data-role="search"]');
+        const sortSelect = panel.querySelector('[data-role="sort"]');
+        if (searchInput) searchInput.value = settings.search || '';
+        if (sortSelect) sortSelect.value = settings.sort || 'date';
+
+        applyTheme();
+        mountMapBar();
 
         panel.addEventListener('click', onPanelClick);
-        panel.querySelector('[data-role="search"]').addEventListener('input', (event) => {
-            settings.search = event.target.value;
-            saveSettings();
-            render();
-        });
-        panel.querySelector('[data-role="sort"]').addEventListener('change', (event) => {
-            settings.sort = event.target.value;
-            saveSettings();
-            render();
-        });
+        if (searchInput) {
+            searchInput.addEventListener('input', (event) => {
+                settings.search = event.target.value;
+                saveSettings();
+                render();
+            });
+        }
+        if (sortSelect) {
+            sortSelect.addEventListener('change', (event) => {
+                settings.sort = event.target.value;
+                saveSettings();
+                render();
+            });
+        }
         document.addEventListener('keydown', onDocumentKeydown);
 
         window.addEventListener('resize', () => {
-            if (!hubPresent) {
-                if (settings.fabX !== null && settings.fabY !== null) {
-                    placeFab(settings.fabX, settings.fabY, false);
-                } else {
-                    positionHeaderFab();
-                }
-            }
+            mountMapBar();
             if (panel.classList.contains('tcfs-open')) anchorPanel();
         });
 
-        renderSettings();
+        if (!hubPresent) renderSettings();
         render();
+        updateFabCounter();
 
         if (settings.panelOpen) togglePanel(true);
+    }
+
+    function mountMapBar() {
+        if (!bar) return;
+        let anchor = null;
+        try {
+            if (tornReady()) {
+                const mapEl = getTorn().map.lmap.getContainer();
+                if (mapEl && mapEl.parentElement) {
+                    anchor = mapEl;
+                }
+            }
+        } catch (_) {}
+
+        if (!anchor) {
+            anchor = document.querySelector('.leaflet-container') ||
+                document.querySelector('#map') ||
+                document.querySelector('[class*="city-map"]') ||
+                document.querySelector('[class*="leaflet"]');
+        }
+
+        if (anchor && anchor.parentElement) {
+            if (bar.parentElement !== anchor.parentElement || bar.nextElementSibling !== anchor) {
+                anchor.parentElement.insertBefore(bar, anchor);
+            }
+        } else if (!bar.isConnected) {
+            document.body.appendChild(bar);
+        }
     }
 
     function isTypingTarget(target) {
@@ -1673,7 +1774,7 @@
     }
 
     function focusSearchShortcut() {
-        if (!panel || !fab) return;
+        if (!panel) return;
         if (!panel.classList.contains('tcfs-open')) togglePanel(true);
         if (settingsEl) settingsEl.classList.remove('tcfs-open');
         panel.classList.remove('tcfs-settings-mode');
@@ -1716,12 +1817,14 @@
         const key = actionEl.closest('[data-key]') ? actionEl.closest('[data-key]').dataset.key : selectedKey;
 
         if (action === 'settings') {
+            if (hubPresent || !settingsEl) return;
             const open = !settingsEl.classList.contains('tcfs-open');
             settingsEl.classList.toggle('tcfs-open', open);
             panel.classList.toggle('tcfs-settings-mode', open);
             return;
         }
         if (action === 'theme') {
+            if (hubPresent) return;
             settings.theme = settings.theme === 'dark' ? 'light' : 'dark';
             saveSettings();
             applyTheme();
@@ -1783,7 +1886,7 @@
     }
 
     function renderSettings() {
-        if (!settingsEl) return;
+        if (!settingsEl || hubPresent) return;
 
         settingsEl.innerHTML = `
             <div class="tcfs-setting-row">
@@ -1846,10 +1949,15 @@
     }
 
     function togglePanel(forceOpen) {
+        if (!panel) return;
         const next = forceOpen === undefined ? !panel.classList.contains('tcfs-open') : Boolean(forceOpen);
-        fab.classList.toggle('tcfs-open', next);
-        fab.setAttribute('aria-expanded', String(next));
-        fab.setAttribute('aria-label', next ? 'Close City Finds' : 'Open City Finds');
+        if (bar) {
+            bar.classList.toggle('tcfs-open', next);
+            bar.setAttribute('aria-expanded', String(next));
+            bar.setAttribute('aria-label', next ? 'Close city finds panel' : 'City finds');
+            const action = bar.querySelector('.tcfs-bar-action');
+            if (action) action.textContent = next ? 'Close' : 'Open';
+        }
         if (next) {
             panel.classList.add('tcfs-open');
             render();
@@ -1861,252 +1969,6 @@
         }
         settings.panelOpen = next;
         saveSettings();
-    }
-
-    function isVisibleAnchor(element) {
-        if (!element || !element.isConnected) return false;
-        const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < 90;
-    }
-
-    function firstVisible(selectors) {
-        for (const selector of selectors) {
-            try {
-                const matches = document.querySelectorAll(selector);
-                for (const element of matches) {
-                    if (isVisibleAnchor(element)) return element;
-                }
-            } catch (_) {}
-        }
-        return null;
-    }
-
-    function exactTextAnchor(label) {
-        const wanted = label.toUpperCase();
-        const candidates = document.querySelectorAll('a, button, [role="button"], li, span');
-        for (const element of candidates) {
-            if (cleanText(element.textContent).toUpperCase() === wanted && isVisibleAnchor(element)) {
-                return element.closest('a, button, [role="button"], li') || element;
-            }
-        }
-        return null;
-    }
-
-    function positionHeaderFab() {
-        if (!fab) return;
-
-        const toolAnchor = firstVisible([
-            '[title*="Torn Tools" i]',
-            '[aria-label*="Torn Tools" i]',
-            'img[alt*="Torn Tools" i]',
-            'a[href*="torn.tools" i]',
-            '[id*="torntools" i]',
-            '[class*="torntools" i]'
-        ]);
-        const bustrAnchor = firstVisible([
-            '[title*="BUSTR" i]',
-            '[aria-label*="BUSTR" i]',
-            'a[href*="bustr" i]',
-            '[id*="bustr" i]',
-            '[class*="bustr" i]'
-        ]) || exactTextAnchor('BUSTR+');
-
-        const buttonWidth = 30;
-        let left;
-        let top;
-
-        if (toolAnchor) {
-            const toolRect = toolAnchor.getBoundingClientRect();
-            left = toolRect.right + 14;
-            top = toolRect.top + (toolRect.height - buttonWidth) / 2;
-
-            if (bustrAnchor) {
-                const bustrRect = bustrAnchor.getBoundingClientRect();
-                left = Math.min(left, bustrRect.left - buttonWidth - 14);
-            }
-        } else if (bustrAnchor) {
-            const bustrRect = bustrAnchor.getBoundingClientRect();
-            left = bustrRect.left - buttonWidth - 18;
-            top = bustrRect.top + (bustrRect.height - buttonWidth) / 2;
-        } else {
-            left = window.innerWidth - buttonWidth - 250;
-            top = 8;
-        }
-
-        left = Math.max(10, Math.min(window.innerWidth - buttonWidth - 10, left));
-        top = Math.max(4, Math.min(52, Number.isFinite(top) ? top : 8));
-        fab.style.left = Math.round(left) + 'px';
-        fab.style.top = Math.round(top) + 'px';
-
-        if (panel && panel.classList.contains('tcfs-open')) anchorPanel();
-    }
-
-    function setupHeaderObserver() {
-        if (hubPresent) return;
-        if (settings.fabX !== null && settings.fabY !== null) return;
-
-        let scheduled = false;
-        const observer = new MutationObserver(() => {
-            if (scheduled) return;
-            scheduled = true;
-            requestAnimationFrame(() => {
-                scheduled = false;
-                if (settings.fabX === null && settings.fabY === null) positionHeaderFab();
-            });
-        });
-
-        try {
-            observer.observe(document.body, { childList: true, subtree: true });
-        } catch (_) {}
-
-        // Torn's header finishes rendering well within this window; stop
-        // watching afterwards so this isn't running a subtree observer
-        // indefinitely for the lifetime of the page.
-        setTimeout(() => observer.disconnect(), 12000);
-    }
-
-    function onFabContextMenu(event) {
-        if (hubPresent) return;
-        event.preventDefault();
-        settings.fabX = null;
-        settings.fabY = null;
-        saveSettings();
-        positionHeaderFab();
-        showToast('Button position reset to automatic docking.');
-    }
-
-    function placeFab(left, top, persist) {
-        if (!fab) return;
-        const pad = 10;
-        const w = 46;
-        const h = 46;
-
-        const x = Math.max(pad, Math.min(window.innerWidth - w - pad, left));
-        const y = Math.max(pad, Math.min(window.innerHeight - h - pad, top));
-
-        fab.style.left = x + 'px';
-        fab.style.top = y + 'px';
-        fab.classList.toggle('tcfs-expand-left', x + (w / 2) > window.innerWidth / 2);
-
-        settings.fabX = x;
-        settings.fabY = y;
-        if (persist) saveSettings();
-    }
-
-    function anchorPanel() {
-        if (!panel) return;
-        const pW = panel.offsetWidth || 380;
-        const pH = panel.offsetHeight || 500;
-        const pad = 12;
-
-        if (hubPresent || !fab || fab.style.display === 'none') {
-            let centerLeft = (window.innerWidth - pW) / 2;
-            let centerTop = (window.innerHeight - pH) / 2;
-            centerLeft = Math.max(pad, Math.min(window.innerWidth - pW - pad, centerLeft));
-            centerTop = Math.max(pad, Math.min(window.innerHeight - pH - pad, centerTop));
-            panel.style.left = Math.round(centerLeft) + 'px';
-            panel.style.top = Math.round(centerTop) + 'px';
-            return;
-        }
-
-        const fRect = fab.getBoundingClientRect();
-        let left = fRect.left + (fRect.width / 2) - (pW / 2);
-        if (left + pW > window.innerWidth - pad) left = window.innerWidth - pW - pad;
-        if (left < pad) left = pad;
-
-        let top = fRect.top - pH - pad;
-        if (top < pad) {
-            top = fRect.bottom + pad;
-            if (top + pH > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - pH - pad);
-        }
-
-        panel.style.left = left + 'px';
-        panel.style.top = top + 'px';
-    }
-
-    function makeFabDraggable() {
-        let dragging = false;
-        let suppressClick = false;
-        let pointerId = null;
-        let originX = 0;
-        let originY = 0;
-        let startX = 0;
-        let startY = 0;
-
-        fab.addEventListener('pointerdown', onStart);
-        fab.addEventListener('pointermove', onMove);
-        fab.addEventListener('pointerup', onEnd);
-        fab.addEventListener('pointercancel', onCancel);
-        fab.addEventListener('click', onClick);
-
-        function onStart(event) {
-            if (event.button !== 0 || pointerId !== null) return;
-
-            dragging = false;
-            suppressClick = false;
-            pointerId = event.pointerId;
-            originX = event.clientX;
-            originY = event.clientY;
-            const rect = fab.getBoundingClientRect();
-            const cssLeft = parseFloat(fab.style.left);
-            const cssTop = parseFloat(fab.style.top);
-            startX = event.clientX - (Number.isFinite(cssLeft) ? cssLeft : rect.left);
-            startY = event.clientY - (Number.isFinite(cssTop) ? cssTop : rect.top);
-
-            try {
-                fab.setPointerCapture(pointerId);
-            } catch (_) {}
-        }
-
-        function onMove(event) {
-            if (event.pointerId !== pointerId) return;
-
-            if (!dragging) {
-                const distance = Math.hypot(event.clientX - originX, event.clientY - originY);
-                if (distance < DRAG_THRESHOLD_PX) return;
-                dragging = true;
-                suppressClick = true;
-                fab.classList.add('tcfs-dragging');
-            }
-
-            if (event.cancelable) event.preventDefault();
-            placeFab(event.clientX - startX, event.clientY - startY, false);
-            if (panel.classList.contains('tcfs-open')) anchorPanel();
-        }
-
-        function finishPointer(event, cancelled) {
-            if (event.pointerId !== pointerId) return;
-            try {
-                fab.releasePointerCapture(pointerId);
-            } catch (_) {}
-            pointerId = null;
-            fab.classList.remove('tcfs-dragging');
-
-            if (dragging) {
-                saveSettings();
-                if (panel.classList.contains('tcfs-open')) anchorPanel();
-            }
-            dragging = false;
-            if (cancelled) suppressClick = false;
-            else setTimeout(() => { suppressClick = false; }, 0);
-        }
-
-        function onEnd(event) {
-            finishPointer(event, false);
-        }
-
-        function onCancel(event) {
-            finishPointer(event, true);
-        }
-
-        function onClick(event) {
-            if (suppressClick) {
-                event.preventDefault();
-                suppressClick = false;
-                return;
-            }
-            togglePanel();
-        }
     }
 
     function showToast(message) {
@@ -2402,16 +2264,15 @@
     }
 
     function updateFabCounter() {
-        if (!badge) return;
         const count = visibleActiveItems().length;
-        fab.classList.toggle('tcfs-has-items', count > 0);
-        badge.setAttribute('aria-label', `${count} active ${count === 1 ? 'find' : 'finds'}`);
-        if (count > 0) {
-            badge.innerText = count;
-            badge.style.display = 'inline-flex';
-        } else {
-            badge.innerText = '';
-            badge.style.display = 'none';
+        if (bar) {
+            bar.classList.toggle('tcfs-has-items', count > 0);
+            if (badge) {
+                badge.textContent = count > 0
+                    ? `${count} active find${count === 1 ? '' : 's'}`
+                    : 'No finds on map';
+                badge.setAttribute('aria-label', badge.textContent);
+            }
         }
 
         const status = panel && panel.querySelector('.tcfs-head-status');
@@ -2423,13 +2284,13 @@
     }
 
     function pulseNewFind(count) {
-        if (!fab || !count) return;
+        if (!bar || !count) return;
         clearTimeout(newFindPulseTimer);
-        fab.classList.remove('tcfs-new-find-pulse');
+        bar.classList.remove('tcfs-new-find-pulse');
         requestAnimationFrame(() => {
-            fab.classList.add('tcfs-new-find-pulse');
+            bar.classList.add('tcfs-new-find-pulse');
             newFindPulseTimer = setTimeout(() => {
-                if (fab) fab.classList.remove('tcfs-new-find-pulse');
+                if (bar) bar.classList.remove('tcfs-new-find-pulse');
             }, 2600);
         });
     }
@@ -2532,6 +2393,7 @@
         activeItems = freshItems;
 
         const newCount = updateHistory(freshItems, true);
+        mountMapBar();
         updateFabCounter();
         pulseNewFind(newCount);
         if (getTorn().map.lmap !== markerMap || markerSignature() !== lastRenderedItemSignature) renderMapPins();
@@ -2646,16 +2508,92 @@
             close: () => { togglePanel(false); },
             status: () => {
                 const count = visibleActiveItems().length;
-                return `${count} active find${count === 1 ? '' : 's'} tracked`;
+                return count > 0
+                    ? `${count} active find${count === 1 ? '' : 's'} on map`
+                    : 'No finds on map';
+            },
+            prefs: {
+                fields: [
+                    {
+                        key: 'theme',
+                        type: 'select',
+                        label: 'Panel theme',
+                        default: 'light',
+                        options: [
+                            { value: 'light', label: 'Light' },
+                            { value: 'dark', label: 'Dark' }
+                        ]
+                    },
+                    {
+                        key: 'showImages',
+                        type: 'toggle',
+                        label: 'Show item images on pins',
+                        default: false
+                    },
+                    {
+                        key: 'apiEnabled',
+                        type: 'toggle',
+                        label: 'Fetch market values (Public API)',
+                        default: false,
+                        hint: 'Uses a limited Public API key for item market values'
+                    },
+                    {
+                        key: 'apiKey',
+                        type: 'password',
+                        label: 'Public API key',
+                        default: '',
+                        placeholder: '16-character public key'
+                    },
+                    {
+                        key: 'historyLimit',
+                        type: 'number',
+                        label: 'History limit',
+                        default: 500,
+                        min: 50,
+                        max: 2000
+                    }
+                ],
+                values: {
+                    theme: settings.theme,
+                    showImages: settings.showImages,
+                    apiEnabled: settings.apiEnabled,
+                    apiKey: settings.apiKey || '',
+                    historyLimit: settings.historyLimit
+                },
+                onSave: (values) => {
+                    if (values.theme === 'dark' || values.theme === 'light') {
+                        settings.theme = values.theme;
+                        applyTheme();
+                    }
+                    if (typeof values.showImages === 'boolean') {
+                        settings.showImages = values.showImages;
+                    }
+                    if (typeof values.apiEnabled === 'boolean') {
+                        settings.apiEnabled = values.apiEnabled;
+                    }
+                    if (typeof values.apiKey === 'string') {
+                        settings.apiKey = values.apiKey.trim().slice(0, 16);
+                    }
+                    if (values.historyLimit != null) {
+                        const n = Number(values.historyLimit);
+                        if (Number.isFinite(n)) settings.historyLimit = Math.max(50, Math.min(2000, Math.round(n)));
+                    }
+                    saveSettings();
+                    if (settings.apiEnabled && settings.apiKey) fetchItemMetadata(false);
+                    renderMapPins();
+                    render();
+                }
             }
         };
 
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail: registration }));
         (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
     }
 
     function initLoop() {
         buildUI();
-        if (hubPresent) registerWithHub();
+        registerWithHub();
+        document.addEventListener('torn-script-hub:ready', registerWithHub);
         if (settings.apiEnabled && (!itemMetaFetchedAt || Date.now() - itemMetaFetchedAt > METADATA_CACHE_MAX_AGE_MS)) {
             fetchItemMetadata(false);
         }
