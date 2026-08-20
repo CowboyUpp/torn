@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.2.2
+// @version      4.2.3
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.2.2';
+    const HUB_VERSION = '4.2.3';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -59,7 +59,8 @@
         { id: 587089, name: 'Cracking Heat Badge', description: 'Shows a live heat badge while cracking.' },
         { id: 585434, name: 'Item Market Portfolio', description: 'Tracks the value of your Item Market listings over time.' },
         { id: 582128, name: 'Activity Log Filter & CSV', description: 'Filters your activity log and exports it to CSV.' },
-        { id: 588262, name: 'Torn: Travel Inventory', description: 'Shows your travel inventory and item info while abroad.' }
+        { id: 588262, name: 'Torn: Travel Inventory', description: 'Shows your travel inventory and item info while abroad.' },
+        { id: 583629, name: 'Torn City Map Finder', description: 'Map pins and city-find list above the city map. Optional Public API values; no automated pickup.' }
     ];
 
     const registry = new Map();
