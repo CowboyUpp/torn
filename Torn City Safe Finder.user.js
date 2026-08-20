@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.4.1
+// @version      1.4.2
 // @description  Safety-first city item helper: native map-top status bar, map pins, centered list panel, local history, optional Public API values, no automated pickup, Torn Script Hub support.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -20,7 +20,8 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.4.1';
+    const VERSION = '1.4.2';
+    // v1.4.2 — Restore missing anchorPanel (bar click opened panel then threw).
     // v1.4.1 — Fix Hub/PDA settings persistence (dual-write GM + localStorage),
     // never wipe API key on empty password blur, raise panel z-index above map,
     // harden bar click → open centered stats panel on desktop and PDA.
@@ -1987,6 +1988,20 @@
         }
         settings.panelOpen = next;
         saveSettings();
+    }
+
+
+    function anchorPanel() {
+        if (!panel) return;
+        const pW = panel.offsetWidth || 380;
+        const pH = panel.offsetHeight || 500;
+        const pad = 12;
+        let centerLeft = (window.innerWidth - pW) / 2;
+        let centerTop = (window.innerHeight - pH) / 2;
+        centerLeft = Math.max(pad, Math.min(window.innerWidth - pW - pad, centerLeft));
+        centerTop = Math.max(pad, Math.min(window.innerHeight - pH - pad, centerTop));
+        panel.style.left = Math.round(centerLeft) + 'px';
+        panel.style.top = Math.round(centerTop) + 'px';
     }
 
     function showToast(message) {
