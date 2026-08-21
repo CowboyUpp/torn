@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.3.1-hub
-// @description  Add quality and bonus percentages to the item market, auction house, and bazaars. Now with Script Hub integration.
+// @version      1.4.1-hub
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
 // @match        https://www.torn.com/bazaar.php*
 // @match        https://www.torn.com/displaycase.php*
+// @match        https://www.torn.com/item.php*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @run-at       document-start
@@ -26,6 +27,7 @@
         enableBazaar: true,
         enableDisplayCase: true,
         showDisplayCaseBonuses: true,
+        enableInventory: true,
         debug: false
     };
 
@@ -34,7 +36,7 @@
     // =========================================================================
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.3.1';
+    const HUB_VERSION = '1.4.1';
     const HUB_ICON = '📊';
 
     function registerWithHub() {
@@ -54,6 +56,7 @@
                     { key: 'enableBazaar', type: 'toggle', label: 'Bazaar', default: true },
                     { key: 'enableDisplayCase', type: 'toggle', label: 'Display Case', default: true },
                     { key: 'showDisplayCaseBonuses', type: 'toggle', label: 'Display Case bonuses', default: true },
+                    { key: 'enableInventory', type: 'toggle', label: 'Inventory (Items)', default: true },
                     { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
                 ],
                 values: {
@@ -62,6 +65,7 @@
                     enableBazaar: CONFIG.enableBazaar,
                     enableDisplayCase: CONFIG.enableDisplayCase,
                     showDisplayCaseBonuses: CONFIG.showDisplayCaseBonuses,
+                    enableInventory: CONFIG.enableInventory,
                     debug: CONFIG.debug
                 },
                 onSave: (values) => {
@@ -70,6 +74,7 @@
                     CONFIG.enableBazaar = !!values.enableBazaar;
                     CONFIG.enableDisplayCase = !!values.enableDisplayCase;
                     CONFIG.showDisplayCaseBonuses = !!values.showDisplayCaseBonuses;
+                    CONFIG.enableInventory = !!values.enableInventory;
                     CONFIG.debug = !!values.debug;
                     activateHandlerForCurrentUrl();
                 }
@@ -160,6 +165,23 @@
             statTypeElement: 'icon',
             statTypeAttribute: 'className',
             bonusIcons: '[class*="iconBonuses___"] i',
+            bonusTitleAttr: 'data-bonus-attachment-title',
+            bonusDescAttr: 'data-bonus-attachment-description'
+        },
+        // Inventory (item.php) — row list of owned weapons/armour
+        inventory: {
+            root: '.items-wrap, #mainContainer, body',
+            tile: 'li[data-item], li[data-weaponinfo="1"], li[data-weaponInfo="1"]',
+            imageWrapper: '.img-wrap, .thumbnail-wrap, .item-plate, [class*="img"]',
+            image: 'img',
+            title: '.name-wrap, .title-wrap, .name, [class*="name"]',
+            statsContainer: '.bonuses-wrap, .info-cont, .cont-wrap, [class*="infoBonuses"], [class*="bonuses"]',
+            statEntry: '[class*="bonus"], [class*="property"], span, li, div',
+            statIcon: 'i',
+            statValue: 'span, b, strong, [class*="value"]',
+            statTypeElement: 'icon',
+            statTypeAttribute: 'className',
+            bonusIcons: 'i[class*="bonus-attachment-"], [data-bonus-attachment-title], .iconsbonuses i, [class*="iconsbonuses"] i',
             bonusTitleAttr: 'data-bonus-attachment-title',
             bonusDescAttr: 'data-bonus-attachment-description'
         }
@@ -1038,6 +1060,311 @@
         }
     };
 
+
+    // =========================================================================
+    // INVENTORY (item.php)
+    // Shows quality % and bonus lines (e.g. Poison / Toxin on blowguns) on
+    // owned weapon and armour rows without opening the detail panel.
+    // =========================================================================
+    const inventory = {
+        selectors: SELECTORS.inventory,
+        observer: null,
+        pendingTimeoutId: null,
+
+        getItemId(el) {
+            const attr = el.getAttribute('data-item') || el.getAttribute('itemid') || el.getAttribute('data-itemid');
+            if (attr && /^\d+$/.test(attr)) return attr;
+
+            const hover = qs('.item-hover, [itemid]', el);
+            if (hover) {
+                const id = hover.getAttribute('itemid') || hover.getAttribute('data-item');
+                if (id && /^\d+$/.test(id)) return id;
+            }
+
+            const img = qs(this.selectors.image, el) || qs('img', el);
+            if (img && img.src) {
+                const m = img.src.match(/\/images\/items\/(\d+)\//);
+                if (m) return m[1];
+            }
+            return null;
+        },
+
+        extractInventoryBonuses(el) {
+            const bonuses = [];
+            const seen = new Set();
+
+            // data-bonus-attachment-* icons (same as bazaar)
+            qsa(this.selectors.bonusIcons, el).forEach(icon => {
+                let titleAttr = icon.getAttribute(this.selectors.bonusTitleAttr) || '';
+                let descAttr = icon.getAttribute(this.selectors.bonusDescAttr) || '';
+
+                // Fallbacks used on inventory rows
+                if (!titleAttr) titleAttr = icon.getAttribute('title') || icon.getAttribute('aria-label') || '';
+                if (!descAttr) descAttr = icon.getAttribute('data-title') || '';
+
+                if (!titleAttr && !descAttr) return;
+
+                const tmp = create('div');
+                tmp.innerHTML = titleAttr;
+                const title = qs('b', tmp)?.textContent || tmp.textContent?.split(/[:<\n]/)[0]?.trim() || '';
+                const descText = (tmp.textContent || '').replace(title, '').trim() || descAttr;
+
+                const valueMatch = descText.match(NUMBER_REGEX) || titleAttr.match(NUMBER_REGEX);
+                const value = valueMatch ? parseFloat(valueMatch[1]) : null;
+
+                if (title && !seen.has(title.toLowerCase())) {
+                    seen.add(title.toLowerCase());
+                    bonuses.push({ title, value, description: descText || titleAttr });
+                }
+            });
+
+            // title= on span wrappers around bonus icons
+            qsa('.iconsbonuses span[title], [class*="iconsbonuses"] span[title]', el).forEach(span => {
+                const titleAttr = span.getAttribute('title') || '';
+                if (!titleAttr) return;
+                const tmp = create('div');
+                tmp.innerHTML = titleAttr;
+                const title = qs('b', tmp)?.textContent || tmp.textContent?.split(/[:<\n]/)[0]?.trim() || '';
+                const descText = (tmp.textContent || '').replace(title, '').trim();
+                const valueMatch = (descText || titleAttr).match(NUMBER_REGEX);
+                const value = valueMatch ? parseFloat(valueMatch[1]) : null;
+                if (title && !seen.has(title.toLowerCase())) {
+                    seen.add(title.toLowerCase());
+                    bonuses.push({ title, value, description: descText || titleAttr });
+                }
+            });
+
+            return bonuses;
+        },
+
+        extractInventoryStats(el, itemID) {
+            // Prefer structured extractStats when containers exist
+            let stats = extractStats(el, this.selectors);
+            if (stats.damage || stats.accuracy || stats.armour) return stats;
+
+            let damage = 0, accuracy = 0, armour = 0;
+
+            // Icon-class / aria based (same approach as displayCase)
+            qsa('i, svg, [class*="icon"]', el).forEach(icon => {
+                const indicators = [
+                    icon.className,
+                    icon.getAttribute('aria-label'),
+                    icon.getAttribute('title'),
+                    icon.getAttribute('data-title')
+                ].filter(Boolean).join(' ').toLowerCase();
+
+                if (!indicators.includes('damage') && !indicators.includes('accuracy') &&
+                    !indicators.includes('armor') && !indicators.includes('armour') &&
+                    !indicators.includes('defence') && !indicators.includes('defense')) {
+                    return;
+                }
+
+                let valueEl = icon.nextElementSibling;
+                if (!valueEl || isNaN(parseFloat(valueEl.textContent))) {
+                    valueEl = icon.parentElement?.querySelector('span, div, b, strong, [class*="value"]');
+                }
+                if (!valueEl || isNaN(parseFloat(valueEl.textContent))) {
+                    valueEl = icon.parentElement?.nextElementSibling;
+                }
+                // Inventory often puts the number in a sibling span after the icon wrap
+                if (!valueEl || isNaN(parseFloat(valueEl.textContent))) {
+                    const wrap = icon.closest('li, span, div, [class*="bonus"], [class*="stat"]');
+                    const numSpan = wrap && [...wrap.querySelectorAll('span, b, strong')].find(s =>
+                        /^\d+(?:\.\d+)?$/.test((s.textContent || '').trim())
+                    );
+                    if (numSpan) valueEl = numSpan;
+                }
+                const val = parseFloat(valueEl?.textContent) || 0;
+                if (val <= 0) return;
+
+                if (indicators.includes('damage')) damage = val;
+                else if (indicators.includes('accuracy')) accuracy = val;
+                else if (indicators.includes('armor') || indicators.includes('armour') ||
+                         indicators.includes('defence') || indicators.includes('defense')) armour = val;
+            });
+
+            // Text fallback: "Damage: 17.15" / "Accuracy: 42.30" in expanded or compact rows
+            if (!damage && !accuracy && !armour) {
+                const blob = el.textContent || '';
+                const dmgM = blob.match(/Damage\s*:?\s*([\d.]+)/i);
+                const accM = blob.match(/Accuracy\s*:?\s*([\d.]+)/i);
+                const armM = blob.match(/(?:Armor|Armour|Defence|Defense)\s*:?\s*([\d.]+)/i);
+                if (dmgM) damage = parseFloat(dmgM[1]) || 0;
+                if (accM) accuracy = parseFloat(accM[1]) || 0;
+                if (armM) armour = parseFloat(armM[1]) || 0;
+            }
+
+            // Last resort: inventory list often shows two floats in order (dmg then acc)
+            // for weapons that have no icon class markers we recognised.
+            if (!damage && !accuracy && !armour && BASE_STATS_MAP[itemID]) {
+                const base = BASE_STATS_MAP[itemID];
+                if (base.baseArmour > 0) {
+                    // armour piece — look for a single plausible armour number
+                    const nums = [...(el.textContent || '').matchAll(/\b(\d{1,2}(?:\.\d+)?)\b/g)]
+                        .map(m => parseFloat(m[1]))
+                        .filter(n => n >= 5 && n <= 80);
+                    if (nums.length) armour = nums[0];
+                } else {
+                    // weapon: find two numbers near the expected base ranges
+                    const nums = [...(el.textContent || '').matchAll(/\b(\d{1,3}(?:\.\d+)?)\b/g)]
+                        .map(m => parseFloat(m[1]));
+                    // Prefer numbers close to base±10
+                    const dmgCands = nums.filter(n => Math.abs(n - base.baseDamage) <= 12);
+                    const accCands = nums.filter(n => Math.abs(n - base.baseAccuracy) <= 12);
+                    if (dmgCands.length) damage = dmgCands[0];
+                    if (accCands.length) {
+                        // avoid reusing the same number for both
+                        accuracy = accCands.find(n => n !== damage) || accCands[0];
+                    }
+                }
+            }
+
+            return { damage, accuracy, armour };
+        },
+
+        processAll() {
+            if (!isPageActive()) return;
+
+            qsa(this.selectors.tile).forEach(el => {
+                // Skip non-visible / category headers
+                if (el.offsetParent === null && el.getClientRects().length === 0) return;
+
+                const itemID = this.getItemId(el);
+                if (!itemID || !BASE_STATS_MAP[itemID]) return;
+
+                const stats = this.extractInventoryStats(el, itemID);
+                if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) return;
+
+                const bonuses = this.extractInventoryBonuses(el);
+
+                const key = computeItemKey(itemID, stats, bonuses);
+                if (isProcessed(el, key)) return;
+
+                // Resolve image + title anchors (inventory markup varies by category)
+                let imageWrapper = qs('.img-wrap, .thumbnail-wrap, .item-plate, [class*="img-wrap"]', el) ||
+                    qs(this.selectors.imageWrapper, el) ||
+                    qs('img', el)?.parentElement ||
+                    el;
+
+                let titleEl = qs('.name-wrap, .title-wrap .name, .name-wrap .name, .title-wrap .t-overflow', el) ||
+                    qs(this.selectors.title, el);
+
+                // Mark via processItem gate only (no DOM from it — inventory layout differs)
+                processItem(el, {
+                    itemID,
+                    stats,
+                    bonuses,
+                    selectors: {
+                        imageWrapper: null,
+                        title: null
+                    }
+                });
+
+                const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
+                const maxRange = stats.armour > 0 ? 100 : 300;
+                const numericQuality = quality !== null ? parseFloat(quality) : null;
+                const qualityOk = numericQuality !== null &&
+                    numericQuality >= -10 && numericQuality <= maxRange + 10;
+
+                // Inventory rows are list layout — put quality as an inline "column"
+                // next to the name (and keep a small badge on the icon when possible).
+                if (titleEl) {
+                    const existingMeta = qs('.openmarket-inventory-meta', el);
+                    if (existingMeta) existingMeta.remove();
+                    const existingBonuses = qs('.openmarket-bonuses', el);
+                    if (existingBonuses) existingBonuses.remove();
+
+                    const meta = create('span', {
+                        className: 'openmarket-inventory-meta',
+                        style: {
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            flexWrap: 'wrap',
+                            gap: '4px 8px',
+                            marginLeft: '8px',
+                            verticalAlign: 'middle',
+                            fontSize: '11px',
+                            lineHeight: '1.3',
+                            fontWeight: 'bold'
+                        }
+                    });
+
+                    if (qualityOk) {
+                        const qColour = getQualityColour(Math.min(Math.max(numericQuality, 0), maxRange), maxRange);
+                        meta.appendChild(create('span', {
+                            className: 'openmarket-inventory-quality',
+                            textContent: `Q ${numericQuality.toFixed(1)}%`,
+                            style: {
+                                color: qColour,
+                                padding: '0 4px',
+                                borderRadius: '3px',
+                                background: getQualityBoxBg()
+                            }
+                        }));
+                    }
+
+                    if (bonuses.length > 0) {
+                        const bonusContainer = create('span', {
+                            className: 'openmarket-bonuses openmarket-inventory-bonuses',
+                            style: {
+                                display: 'inline',
+                                color: getBonusColour()
+                            }
+                        });
+                        bonuses.forEach((bonus, i) => {
+                            if (i > 0) {
+                                bonusContainer.appendChild(document.createTextNode(' · '));
+                            }
+                            bonusContainer.appendChild(createBonusEl(bonus));
+                        });
+                        meta.appendChild(bonusContainer);
+                    }
+
+                    if (meta.childNodes.length > 0) {
+                        titleEl.appendChild(meta);
+                    }
+                }
+
+                // Also try a compact badge on the thumbnail when we found a real image wrap
+                if (qualityOk && imageWrapper && imageWrapper !== el) {
+                    const existingQualityBox = qs('.openmarket-quality-box', imageWrapper);
+                    if (existingQualityBox) existingQualityBox.remove();
+                    insertQualityBox(imageWrapper, quality, maxRange);
+                }
+            });
+        },
+
+        init() {
+            const self = this;
+            const root = qs('.items-wrap') || qs('#mainContainer') || document.body;
+
+            const observer = new MutationObserver(() => {
+                self.processAll();
+            });
+            observer.observe(root, { childList: true, subtree: true });
+            self.observer = observer;
+
+            // Inventory categories lazy-load rows; poll briefly after init
+            let polls = 0;
+            self.pollTimer = setInterval(() => {
+                self.processAll();
+                polls++;
+                if (polls >= 20) {
+                    clearInterval(self.pollTimer);
+                    self.pollTimer = null;
+                }
+            }, 500);
+
+            self.processAll();
+        },
+
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
+            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+        }
+    };
+
+
     // =========================================================================
     // SPA NAVIGATION HANDLING
     // =========================================================================
@@ -1046,6 +1373,7 @@
         if (href.includes('amarket.php')) return 'auctionHouse';
         if (href.includes('bazaar.php')) return 'bazaar';
         if (href.includes('displaycase.php')) return 'displayCase';
+        if (href.includes('item.php')) return 'inventory';
         return null;
     }
 
@@ -1069,12 +1397,13 @@
 
     function activateHandlerForCurrentUrl() {
         const type = detectPageType(window.location.href);
-        const handlers = { itemMarket, auctionHouse, bazaar, displayCase };
+        const handlers = { itemMarket, auctionHouse, bazaar, displayCase, inventory };
         const enabledMap = {
             itemMarket: CONFIG.enableItemMarket,
             auctionHouse: CONFIG.enableAuctionHouse,
             bazaar: CONFIG.enableBazaar,
-            displayCase: CONFIG.enableDisplayCase
+            displayCase: CONFIG.enableDisplayCase,
+            inventory: CONFIG.enableInventory
         };
 
         if (!type || !enabledMap[type]) {
@@ -1163,6 +1492,20 @@
         }
         .openmarket-bonuses div {
             font-size: 11px !important;
+        }
+        .openmarket-inventory-bonuses {
+            max-width: 280px;
+            white-space: normal;
+        }
+        .openmarket-inventory-bonuses div {
+            display: inline;
+            font-size: 11px !important;
+        }
+        .openmarket-inventory-quality {
+            white-space: nowrap;
+        }
+        .openmarket-inventory-meta {
+            max-width: 320px;
         }
     `;
         const style = document.createElement('style');
