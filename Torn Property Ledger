@@ -1,0 +1,1028 @@
+// ==UserScript==
+// @name         Torn Rental Ledger
+// @namespace    https://github.com/CowboyUpp/torn
+// @version      1.2.2
+// @description  Rich per-property rental income ledger on yourProperties. Hub users: all settings in Script Hub. Custom User/Log API key (pre-filled Generate). Desktop, PDA, Hub.
+// @author       CowboyUp
+// @match        https://www.torn.com/properties.php*
+// @match        https://*.torn.com/properties.php*
+// @run-at       document-idle
+// @license      MIT
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      api.torn.com
+// @downloadURL  https://update.greasyfork.org/scripts/0/Torn%20Rental%20Ledger.user.js
+// @updateURL    https://update.greasyfork.org/scripts/0/Torn%20Rental%20Ledger.meta.js
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const VERSION = '1.2.2';
+    // v1.2.2 — Pre-filled custom API key URL like other Hub scripts
+    // (preferences.php#tab=api?step=addNewKey&title=RentalLedger&user=log&user=properties).
+    // v1.2.1 — When Hub is present: hide ALL property-page chrome (no Sync/Settings bar).
+    // Dynamic hub detection; Hub prefs only for key + sync. Clearer API key setup link.
+    // v1.2.0 — Hub-first settings: when Script Hub is present, all prefs live in Hub only
+    // (no in-page settings panel). API prefs button → preferences.php#tab=api.
+    // v1.1.0 — Expanded columns/stats, portfolio, CSV, live status.
+    // v1.0.0 — Initial log-based ledger (5937 / 5943).
+
+    const STORE_PREFIX = 'trl_';
+    const LOG_TYPES = '5937,5943';
+    const LOG_PAGE_SIZE = 100;
+    const MAX_PAGES_PER_SYNC = 40;
+    const POLL_MS = 2500;
+    const HUB_ID = 'torn-rental-ledger';
+    const HUB_NAME = 'Torn Rental Ledger';
+    const QUEUE_PROPERTY = '__tornScriptHubQueue';
+    const API_PREFS_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=RentalLedger&user=log&user=properties';
+    // Same pattern as Bustr+ / Crime Chain / Travel Inventory — opens Torn key creator pre-filled.
+
+
+    function isHubPresent() {
+        try {
+            const q = window[QUEUE_PROPERTY];
+            if (q && q.__tshPatched) return true;
+        } catch (_) {}
+        // Fallback: registry event already fired / Hub dashboard exists
+        try {
+            if (document.getElementById('tsh-sidebar-row') || document.getElementById('tsh-dashboard')) return true;
+        } catch (_) {}
+        return false;
+    }
+    // Live check — never cache at load (Hub may patch before or after this script)
+    function hubPresent() { return isHubPresent(); }
+
+    const DEFAULT_SETTINGS = {
+        apiKey: '',
+        autoSync: true,
+        entriesShown: 15,
+        theme: 'auto',
+        showOnList: true,
+        showOnDetail: true,
+        showPortfolio: true,
+        showRawData: false
+    };
+
+    const STORE = {
+        get(key, fallback) {
+            try {
+                if (typeof GM_getValue === 'function') {
+                    const v = GM_getValue(STORE_PREFIX + key, undefined);
+                    if (v !== undefined) return v;
+                }
+            } catch (_) {}
+            try {
+                const raw = localStorage.getItem(STORE_PREFIX + key);
+                if (raw !== null) return JSON.parse(raw);
+            } catch (_) {}
+            return fallback;
+        },
+        set(key, value) {
+            try {
+                if (typeof GM_setValue === 'function') GM_setValue(STORE_PREFIX + key, value);
+            } catch (_) {}
+            try {
+                localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value));
+            } catch (_) {}
+        }
+    };
+
+    let settings = Object.assign({}, DEFAULT_SETTINGS, STORE.get('settings', {}));
+    let ledger = STORE.get('ledger', {}) || {};
+    let lastSyncTs = STORE.get('lastSyncTs', 0) || 0;
+    let propertyMeta = STORE.get('propertyMeta', {}) || {};
+    let syncing = false;
+    let lastError = '';
+    let lastSyncPages = 0;
+    let lastSyncNew = 0;
+
+    function saveSettings() { STORE.set('settings', settings); }
+    function saveLedger() {
+        STORE.set('ledger', ledger);
+        STORE.set('lastSyncTs', lastSyncTs);
+        STORE.set('propertyMeta', propertyMeta);
+    }
+
+    function fmtMoney(n) {
+        const x = Math.round(Number(n) || 0);
+        return '$' + x.toLocaleString('en-US');
+    }
+    function fmtNum(n) {
+        if (n == null || n === '' || Number.isNaN(Number(n))) return '—';
+        return Number(n).toLocaleString('en-US');
+    }
+    function fmtDate(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts * 1000);
+        return d.toLocaleString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+        });
+    }
+    function fmtDateShort(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts * 1000);
+        return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+    function typeLabel(logType) {
+        if (Number(logType) === 5943) return 'Extension';
+        if (Number(logType) === 5937) return 'New lease';
+        return 'Rental';
+    }
+    function escapeHtml(s) {
+        return String(s ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+    function tenantLink(id, name) {
+        if (!id) return escapeHtml(name || '—');
+        const label = name ? escapeHtml(name) : ('#' + id);
+        return '<a class="t-blue h" href="/profiles.php?XID=' + encodeURIComponent(id) + '" target="_blank" rel="noopener">' + label + '</a>';
+    }
+
+    function computeStats(bucket) {
+        const entries = bucket.entries || [];
+        const rents = entries.map((e) => Number(e.rent) || 0);
+        const days = entries.map((e) => Number(e.days) || 0).filter((d) => d > 0);
+        const perDay = entries
+            .map((e) => (e.days > 0 ? e.rent / e.days : null))
+            .filter((x) => x != null && Number.isFinite(x));
+        const tenants = new Set();
+        let newCount = 0;
+        let extCount = 0;
+        entries.forEach((e) => {
+            if (e.renter) tenants.add(String(e.renter));
+            if (Number(e.type) === 5937) newCount++;
+            else if (Number(e.type) === 5943) extCount++;
+        });
+        const sortedTs = entries.map((e) => e.ts).filter(Boolean).sort((a, b) => a - b);
+        return {
+            count: entries.length,
+            total: rents.reduce((s, n) => s + n, 0),
+            avgRent: rents.length ? rents.reduce((s, n) => s + n, 0) / rents.length : 0,
+            highRent: rents.length ? Math.max(...rents) : 0,
+            lowRent: rents.length ? Math.min(...rents) : 0,
+            totalDays: days.reduce((s, n) => s + n, 0),
+            avgDays: days.length ? days.reduce((s, n) => s + n, 0) / days.length : 0,
+            avgPerDay: perDay.length ? perDay.reduce((s, n) => s + n, 0) / perDay.length : 0,
+            uniqueTenants: tenants.size,
+            newLeases: newCount,
+            extensions: extCount,
+            firstTs: sortedTs[0] || 0,
+            lastTs: sortedTs[sortedTs.length - 1] || 0
+        };
+    }
+
+    function portfolioStats() {
+        const ids = Object.keys(ledger);
+        let total = 0, events = 0, totalDays = 0;
+        const tenants = new Set();
+        ids.forEach((id) => {
+            const st = computeStats(ledger[id] || {});
+            total += st.total;
+            events += st.count;
+            totalDays += st.totalDays;
+            (ledger[id].entries || []).forEach((e) => {
+                if (e.renter) tenants.add(String(e.renter));
+            });
+        });
+        return { properties: ids.length, total, events, uniqueTenants: tenants.size, totalDays };
+    }
+
+    function apiGet(path) {
+        return new Promise((resolve, reject) => {
+            const key = (settings.apiKey || '').trim();
+            if (!key || key.length < 16) {
+                reject(new Error(hubPresent()
+                    ? 'Custom API key required — set it in Script Hub → Settings → Torn Rental Ledger (Generate User / Log key).'
+                    : 'Custom API key required (Settings → Generate User / Log key).'));
+                return;
+            }
+            const url = 'https://api.torn.com' + path + (path.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key) + '&comment=TornRentalLedger';
+            const doXhr = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null;
+            if (doXhr) {
+                doXhr({
+                    method: 'GET',
+                    url,
+                    onload: (res) => {
+                        try {
+                            const data = JSON.parse(res.responseText);
+                            if (data.error) reject(new Error(data.error.error || JSON.stringify(data.error)));
+                            else resolve(data);
+                        } catch (e) { reject(e); }
+                    },
+                    onerror: (e) => reject(e || new Error('Network error'))
+                });
+            } else {
+                fetch(url).then((r) => r.json()).then((data) => {
+                    if (data.error) reject(new Error(data.error.error || JSON.stringify(data.error)));
+                    else resolve(data);
+                }).catch(reject);
+            }
+        });
+    }
+
+    function pickFirst(obj, keys) {
+        for (const k of keys) {
+            if (obj[k] != null && obj[k] !== '') return obj[k];
+        }
+        return null;
+    }
+
+    async function syncLogs(full = false) {
+        if (syncing) return;
+        syncing = true;
+        lastError = '';
+        lastSyncPages = 0;
+        lastSyncNew = 0;
+        updateChromeStatus();
+        try {
+            let pages = 0;
+            let newestTs = lastSyncTs;
+            let toParam = null;
+            while (pages < MAX_PAGES_PER_SYNC) {
+                let path = '/user/?selections=log&log=' + LOG_TYPES;
+                if (toParam) path += '&to=' + toParam;
+                const data = await apiGet(path);
+                const logs = data.log || {};
+                const ids = Object.keys(logs);
+                if (!ids.length) break;
+                let pageMinTs = Infinity;
+                for (const id of ids) {
+                    const entry = logs[id];
+                    const ts = Number(entry.timestamp) || 0;
+                    if (ts > newestTs) newestTs = ts;
+                    if (ts < pageMinTs) pageMinTs = ts;
+                    const d = entry.data || {};
+                    const propId = String(pickFirst(d, ['property_id', 'property', 'propertyId', 'id']) ?? '');
+                    if (!propId) continue;
+                    const rent = Number(pickFirst(d, ['rent', 'cost', 'money', 'amount', 'price']) ?? 0) || 0;
+                    const days = Number(pickFirst(d, ['days', 'rental_period', 'period', 'duration']) ?? 0) || 0;
+                    const renter = String(pickFirst(d, ['renter', 'renter_id', 'user', 'user_id', 'player_id', 'tenant']) ?? '');
+                    const renterName = pickFirst(d, ['renter_name', 'name', 'playername', 'player_name', 'username', 'tenant_name']) || '';
+                    const propName = pickFirst(d, ['property_name', 'propertyname', 'property_type', 'type_name']) || '';
+                    if (!ledger[propId]) ledger[propId] = { total: 0, entries: [], name: propName || '' };
+                    const bucket = ledger[propId];
+                    if (bucket.entries.some((e) => e.id === id)) continue;
+                    const costPerDay = days > 0 ? rent / days : null;
+                    bucket.entries.push({
+                        id, ts, rent, days, costPerDay, renter, renterName,
+                        type: entry.log,
+                        title: entry.title || typeLabel(entry.log),
+                        category: entry.category || '',
+                        propertyName: propName,
+                        raw: d
+                    });
+                    lastSyncNew++;
+                    if (propName && !bucket.name) bucket.name = propName;
+                }
+                pages++;
+                lastSyncPages = pages;
+                if (!full && lastSyncTs > 0 && pageMinTs <= lastSyncTs) break;
+                toParam = pageMinTs - 1;
+                if (ids.length < LOG_PAGE_SIZE) break;
+            }
+            for (const pid of Object.keys(ledger)) {
+                ledger[pid].entries.sort((a, b) => b.ts - a.ts);
+                const chrono = [...ledger[pid].entries].sort((a, b) => a.ts - b.ts);
+                let run = 0;
+                const runMap = {};
+                chrono.forEach((e) => { run += Number(e.rent) || 0; runMap[e.id] = run; });
+                ledger[pid].entries.forEach((e) => { e.runningTotal = runMap[e.id] || 0; });
+                ledger[pid].total = run;
+            }
+            lastSyncTs = Math.max(lastSyncTs, newestTs);
+            saveLedger();
+            await enrichFromProperties();
+        } catch (e) {
+            lastError = (e && e.message) ? e.message : String(e);
+            console.warn('[TRL]', lastError);
+        } finally {
+            syncing = false;
+            updateChromeStatus();
+            renderAllLedgers();
+        }
+    }
+
+    async function enrichFromProperties() {
+        try {
+            let props = {};
+            try {
+                const data = await apiGet('/user/?selections=properties');
+                props = data.properties || {};
+            } catch (_) {
+                try {
+                    const data = await apiGet('/v2/user/properties?filters=ownedByUser');
+                    if (Array.isArray(data.properties)) {
+                        data.properties.forEach((p) => { if (p && p.id != null) props[p.id] = p; });
+                    } else {
+                        props = data.properties || data || {};
+                    }
+                } catch (__) {}
+            }
+            for (const [id, p] of Object.entries(props)) {
+                const pid = String(id);
+                const propertyObj = p.property || p;
+                const name = (propertyObj && propertyObj.name) || p.name ||
+                    (propertyObj && propertyObj.property && propertyObj.property.name) || '';
+                const status = p.status || propertyObj.status || '';
+                const costPerDay = Number(p.cost_per_day ?? propertyObj.cost_per_day ?? p.costPerDay ?? 0) || 0;
+                const period = Number(p.rental_period ?? propertyObj.rental_period ?? 0) || 0;
+                const remaining = Number(p.rental_period_remaining ?? propertyObj.rental_period_remaining ?? 0) || 0;
+                const happy = Number(p.happy ?? propertyObj.happy ?? (propertyObj.upgrades && propertyObj.upgrades.happy) ?? 0) || 0;
+                const upkeep = Number(p.upkeep ?? propertyObj.upkeep ?? p.cost ?? 0) || 0;
+                const typeName = (propertyObj && propertyObj.name) || (p.property && p.property.name) || name || '';
+                let renterId = '', renterName = '';
+                const rented = p.rented || p.rented_by || propertyObj.rented_by;
+                if (rented) {
+                    if (typeof rented === 'object') {
+                        renterId = String(rented.id || rented.user_id || rented.player_id || '');
+                        renterName = rented.name || rented.playername || '';
+                    } else renterId = String(rented);
+                }
+                const usedBy = p.used_by || propertyObj.used_by;
+                if (!renterId && Array.isArray(usedBy) && usedBy.length) {
+                    const u = usedBy[0];
+                    renterId = String(u.id || u.user_id || '');
+                    renterName = u.name || '';
+                }
+                propertyMeta[pid] = {
+                    status, costPerDay, period, remaining, renterId, renterName,
+                    happy, upkeep, typeName, name: name || typeName, rawStatus: status
+                };
+                if (!ledger[pid]) ledger[pid] = { total: 0, entries: [], name: name || typeName };
+                else if (name || typeName) ledger[pid].name = name || typeName || ledger[pid].name;
+                ledger[pid].live = propertyMeta[pid];
+            }
+            saveLedger();
+        } catch (e) {
+            console.warn('[TRL] enrichFromProperties', e);
+        }
+    }
+
+    function getHashParams() {
+        const h = location.hash || '';
+        const out = {};
+        h.replace(/([^=&#]+)=([^&#]*)/g, (_, k, v) => {
+            out[decodeURIComponent(k)] = decodeURIComponent(v);
+            return '';
+        });
+        return out;
+    }
+    function isYourPropertiesView() {
+        const h = location.hash || '';
+        return !h || h.includes('p=yourProperties') || h === '#' || h === '#/';
+    }
+    function isPropertyDetailView() {
+        const p = getHashParams();
+        return !!(p.ID || p.id);
+    }
+    function currentPropertyId() {
+        const p = getHashParams();
+        return p.ID || p.id || null;
+    }
+
+    function findPropertyRows() {
+        const results = [];
+        const seen = new Set();
+        const candidates = document.querySelectorAll([
+            'ul.properties-list > li', 'ul.your-properties > li', '.properties-list > li',
+            '[class*="property"][data-id]', '.property-info-wrap',
+            '.properties-page-wrap li[id]', 'li[id^="property"]', '.cont-gray[id]'
+        ].join(','));
+        candidates.forEach((el) => {
+            if (el.closest('.trl-ledger') || el.closest('#trl-chrome') || el.closest('#trl-portfolio')) return;
+            let id = el.getAttribute('data-id') || el.getAttribute('data-property-id') ||
+                (el.id && el.id.replace(/\D/g, '')) || null;
+            if (!id) {
+                const a = el.querySelector('a[href*="ID="], a[href*="p=options"]');
+                if (a) {
+                    const m = (a.getAttribute('href') || '').match(/ID=(\d+)/i);
+                    if (m) id = m[1];
+                }
+            }
+            if (!id) {
+                const a = el.querySelector('a[href*="#"]');
+                if (a) {
+                    const m = (a.getAttribute('href') || '').match(/ID=(\d+)/i);
+                    if (m) id = m[1];
+                }
+            }
+            if (!id || seen.has(id)) return;
+            seen.add(id);
+            results.push({ el, propertyId: String(id) });
+        });
+        if (!results.length) {
+            document.querySelectorAll('a[href*="ID="]').forEach((a) => {
+                const m = (a.getAttribute('href') || '').match(/ID=(\d+)/i);
+                if (!m) return;
+                const id = m[1];
+                if (seen.has(id)) return;
+                const row = a.closest('li, .property, .cont-gray, tr, .info-cont') || a.parentElement;
+                if (!row || row.closest('.trl-ledger') || row.closest('#trl-chrome')) return;
+                seen.add(id);
+                results.push({ el: row, propertyId: String(id) });
+            });
+        }
+        return results;
+    }
+
+    function ensureStyles() {
+        if (document.getElementById('trl-style')) return;
+        const style = document.createElement('style');
+        style.id = 'trl-style';
+        style.textContent = `
+.trl-ledger, #trl-chrome, #trl-portfolio {
+  margin: 8px 0 12px; border: 1px solid rgba(0,0,0,.12); border-radius: 6px;
+  background: var(--trl-bg, #f7f7f7); color: var(--trl-fg, #222); font-size: 12px; overflow: hidden;
+}
+.trl-ledger.dark, #trl-chrome.dark, #trl-portfolio.dark {
+  --trl-bg: #1c1c1c; --trl-fg: #e8e8e8; border-color: rgba(255,255,255,.12);
+}
+.trl-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px;
+  background: linear-gradient(180deg, rgba(0,0,0,.04), transparent); cursor: pointer; user-select: none;
+}
+.trl-ledger.dark .trl-head, #trl-portfolio.dark .trl-head {
+  background: linear-gradient(180deg, rgba(255,255,255,.06), transparent);
+}
+.trl-title { font-weight: 700; flex: 1 1 auto; min-width: 120px; }
+.trl-total { font-weight: 700; color: #1a7f37; white-space: nowrap; }
+.trl-ledger.dark .trl-total, #trl-portfolio.dark .trl-total { color: #3dd68c; }
+.trl-meta { opacity: .75; font-size: 11px; }
+.trl-body { display: none; border-top: 1px solid rgba(0,0,0,.08); padding: 8px 10px 12px; overflow-x: auto; }
+.trl-ledger.open .trl-body, #trl-portfolio.open .trl-body { display: block; }
+.trl-ledger.dark .trl-body, #trl-portfolio.dark .trl-body { border-top-color: rgba(255,255,255,.08); }
+.trl-stats {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 8px; padding: 6px 8px;
+  background: rgba(0,0,0,.03); border-radius: 4px; font-size: 11px;
+}
+.trl-ledger.dark .trl-stats, #trl-portfolio.dark .trl-stats { background: rgba(255,255,255,.04); }
+.trl-stats b { font-weight: 700; }
+.trl-live { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 8px; font-size: 11px; padding: 4px 0; }
+.trl-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; background: rgba(0,0,0,.08); font-weight: 600; }
+.trl-ledger.dark .trl-badge { background: rgba(255,255,255,.1); }
+.trl-badge.rented { background: #d4edda; color: #155724; }
+.trl-ledger.dark .trl-badge.rented { background: #1e3a28; color: #a8e6b8; }
+.trl-badge.vacant, .trl-badge.for_rent, .trl-badge.none { background: #fff3cd; color: #856404; }
+.trl-ledger.dark .trl-badge.vacant, .trl-ledger.dark .trl-badge.for_rent, .trl-ledger.dark .trl-badge.none { background: #3a3218; color: #ffe08a; }
+.trl-badge.in_use { background: #cce5ff; color: #004085; }
+.trl-ledger.dark .trl-badge.in_use { background: #1a2a40; color: #9ec9ff; }
+.trl-table { width: 100%; border-collapse: collapse; min-width: 720px; }
+.trl-table th, .trl-table td {
+  padding: 4px 6px; text-align: left; border-bottom: 1px solid rgba(0,0,0,.06);
+  vertical-align: top; white-space: nowrap;
+}
+.trl-ledger.dark .trl-table th, .trl-ledger.dark .trl-table td { border-bottom-color: rgba(255,255,255,.06); }
+.trl-table th {
+  font-size: 10px; text-transform: uppercase; opacity: .7; font-weight: 600;
+  position: sticky; top: 0; background: var(--trl-bg, #f7f7f7);
+}
+.trl-rent, .trl-run { font-weight: 600; }
+.trl-empty { padding: 8px; opacity: .7; font-style: italic; }
+#trl-chrome {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; background: #f0f4f8;
+}
+#trl-chrome.dark { background: #222; color: #eee; }
+#trl-chrome button, .trl-btn {
+  cursor: pointer; border: 1px solid rgba(0,0,0,.2); background: #fff;
+  border-radius: 4px; padding: 4px 10px; font-size: 12px;
+}
+#trl-chrome.dark button, .trl-ledger.dark .trl-btn { background: #333; color: #eee; border-color: rgba(255,255,255,.2); }
+#trl-chrome .trl-err { color: #b00020; }
+#trl-chrome.dark .trl-err { color: #ff8a80; }
+#trl-chrome a.trl-link { color: #4e8ac7; text-decoration: none; font-size: 11px; }
+#trl-chrome a.trl-link:hover { text-decoration: underline; }
+.trl-settings {
+  display: none; width: 100%; margin-top: 6px; padding-top: 8px; border-top: 1px dashed rgba(0,0,0,.15);
+}
+.trl-settings.open { display: block; }
+.trl-settings label { display: block; margin: 4px 0; }
+.trl-settings input[type="text"], .trl-settings input[type="password"], .trl-settings input[type="number"] {
+  width: min(280px, 100%); padding: 4px 6px; margin-left: 6px;
+}
+.trl-chevron::before { content: '▸ '; }
+.trl-ledger.open .trl-chevron::before, #trl-portfolio.open .trl-chevron::before { content: '▾ '; }
+.trl-raw { font-family: monospace; font-size: 10px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; opacity: .65; }
+.trl-port-table { min-width: 640px; }
+.trl-hub-note { opacity: .8; font-size: 11px; }
+@media (max-width: 700px) {
+  .trl-table { min-width: 560px; }
+  .trl-hide-sm { display: none !important; }
+}
+`;
+        document.head.appendChild(style);
+    }
+
+    function isDarkTheme() {
+        if (settings.theme === 'dark') return true;
+        if (settings.theme === 'light') return false;
+        return !!(document.body && (
+            document.body.classList.contains('dark-mode') ||
+            document.documentElement.classList.contains('dark-mode') ||
+            document.body.dataset.theme === 'dark'
+        ));
+    }
+
+    function buildLedgerPanel(propertyId, opts) {
+        opts = opts || {};
+        const data = ledger[propertyId] || { total: 0, entries: [], name: '' };
+        const live = data.live || propertyMeta[propertyId] || null;
+        const st = computeStats(data);
+        const limit = Math.max(1, Number(settings.entriesShown) || 15);
+        const entries = (data.entries || []).slice(0, limit);
+        const dark = isDarkTheme() ? ' dark' : '';
+        const openClass = opts.startOpen ? ' open' : '';
+        const displayName = data.name || (live && live.name) || ('Property #' + propertyId);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'trl-ledger' + dark + openClass;
+        wrap.dataset.propertyId = propertyId;
+        wrap.setAttribute('data-trl', '1');
+
+        const head = document.createElement('div');
+        head.className = 'trl-head';
+        head.innerHTML =
+            '<span class="trl-title"><span class="trl-chevron"></span>' + escapeHtml(displayName) +
+            ' <span class="trl-meta">#' + escapeHtml(propertyId) + '</span></span>' +
+            '<span class="trl-total" title="Accumulated rental income">' + fmtMoney(st.total) + '</span>' +
+            '<span class="trl-meta">' + st.count + ' event' + (st.count === 1 ? '' : 's') +
+            (st.uniqueTenants ? ' · ' + st.uniqueTenants + ' tenant' + (st.uniqueTenants === 1 ? '' : 's') : '') +
+            '</span>';
+        head.addEventListener('click', function () { wrap.classList.toggle('open'); });
+
+        const body = document.createElement('div');
+        body.className = 'trl-body';
+
+        let liveHtml = '';
+        if (live) {
+            const badgeClass = (live.status || 'none').replace(/\s+/g, '_');
+            liveHtml = '<div class="trl-live">' +
+                '<span class="trl-badge ' + escapeHtml(badgeClass) + '">' + escapeHtml(live.status || 'unknown') + '</span>' +
+                (live.remaining ? '<span>Days left: <b>' + fmtNum(live.remaining) + '</b></span>' : '') +
+                (live.costPerDay ? '<span>Current $/day: <b>' + fmtMoney(live.costPerDay) + '</b></span>' : '') +
+                (live.period ? '<span>Lease period: <b>' + fmtNum(live.period) + 'd</b></span>' : '') +
+                (live.happy ? '<span>Happy: <b>' + fmtNum(live.happy) + '</b></span>' : '') +
+                (live.upkeep ? '<span>Upkeep: <b>' + fmtMoney(live.upkeep) + '</b></span>' : '') +
+                (live.renterId || live.renterName ? '<span>Tenant: ' + tenantLink(live.renterId, live.renterName) + '</span>' : '') +
+                (live.typeName ? '<span>Type: <b>' + escapeHtml(live.typeName) + '</b></span>' : '') +
+                '</div>';
+        }
+
+        const statsHtml = st.count ? '<div class="trl-stats">' +
+            '<span>Lifetime: <b>' + fmtMoney(st.total) + '</b></span>' +
+            '<span>Events: <b>' + st.count + '</b> (' + st.newLeases + ' new / ' + st.extensions + ' ext)</span>' +
+            '<span>Avg lease: <b>' + fmtMoney(st.avgRent) + '</b></span>' +
+            '<span>High / Low: <b>' + fmtMoney(st.highRent) + '</b> / <b>' + fmtMoney(st.lowRent) + '</b></span>' +
+            '<span>Avg days: <b>' + (st.avgDays ? st.avgDays.toFixed(1) : '—') + '</b></span>' +
+            '<span>Total days leased: <b>' + fmtNum(st.totalDays) + '</b></span>' +
+            '<span>Avg $/day: <b>' + (st.avgPerDay ? fmtMoney(Math.round(st.avgPerDay)) : '—') + '</b></span>' +
+            '<span>Unique tenants: <b>' + st.uniqueTenants + '</b></span>' +
+            '<span>First: <b>' + fmtDateShort(st.firstTs) + '</b></span>' +
+            '<span>Last: <b>' + fmtDateShort(st.lastTs) + '</b></span>' +
+            '</div>' : '';
+
+        if (!entries.length) {
+            body.innerHTML = liveHtml + '<div class="trl-empty">No recorded leases yet for this property. ' +
+                (hubPresent()
+                    ? 'Set your custom API key in Script Hub → Settings → Torn Rental Ledger, then Sync.'
+                    : 'Generate a User / Log key and Sync to pull activity log history (5937 new lease, 5943 extension).') +
+                '</div>';
+        } else {
+            const showRaw = !!settings.showRawData;
+            const rows = entries.map(function (e) {
+                const perDay = e.costPerDay != null
+                    ? fmtMoney(Math.round(e.costPerDay))
+                    : (e.days > 0 ? fmtMoney(Math.round(e.rent / e.days)) : '—');
+                return '<tr>' +
+                    '<td>' + fmtDate(e.ts) + '</td>' +
+                    '<td class="trl-rent">' + fmtMoney(e.rent) + '</td>' +
+                    '<td>' + (e.days ? e.days + 'd' : '—') + '</td>' +
+                    '<td>' + perDay + '</td>' +
+                    '<td>' + tenantLink(e.renter, e.renterName) + '</td>' +
+                    '<td class="trl-hide-sm">' + (e.renter ? escapeHtml(e.renter) : '—') + '</td>' +
+                    '<td>' + escapeHtml(typeLabel(e.type)) + '</td>' +
+                    '<td class="trl-hide-sm">' + escapeHtml(e.title || '') + '</td>' +
+                    '<td class="trl-run">' + fmtMoney(e.runningTotal) + '</td>' +
+                    '<td class="trl-hide-sm">' + escapeHtml(e.propertyName || data.name || '') + '</td>' +
+                    '<td class="trl-hide-sm">' + escapeHtml(String(e.id)) + '</td>' +
+                    (showRaw ? '<td class="trl-raw trl-hide-sm" title="' + escapeHtml(JSON.stringify(e.raw || {})) + '">' +
+                        escapeHtml(JSON.stringify(e.raw || {})) + '</td>' : '') +
+                    '</tr>';
+            }).join('');
+            body.innerHTML = liveHtml + statsHtml +
+                '<table class="trl-table"><thead><tr>' +
+                '<th>When</th><th>Income</th><th>Days</th><th>$/day</th><th>Tenant</th>' +
+                '<th class="trl-hide-sm">Tenant ID</th><th>Type</th><th class="trl-hide-sm">Log title</th>' +
+                '<th>Running total</th><th class="trl-hide-sm">Property name</th><th class="trl-hide-sm">Log ID</th>' +
+                (showRaw ? '<th class="trl-hide-sm">Raw data</th>' : '') +
+                '</tr></thead><tbody>' + rows + '</tbody></table>' +
+                (st.count > limit
+                    ? '<div class="trl-meta" style="margin-top:6px">Showing ' + limit + ' of ' + st.count +
+                      '. Raise “Entries shown” in ' + (hubPresent() ? 'Script Hub settings' : 'settings') + ' for more.</div>'
+                    : '');
+        }
+        wrap.appendChild(head);
+        wrap.appendChild(body);
+        return wrap;
+    }
+
+    function buildPortfolioPanel() {
+        const dark = isDarkTheme() ? ' dark' : '';
+        const port = portfolioStats();
+        const wrap = document.createElement('div');
+        wrap.id = 'trl-portfolio';
+        wrap.className = dark;
+        wrap.setAttribute('data-trl', 'portfolio');
+        const head = document.createElement('div');
+        head.className = 'trl-head';
+        head.innerHTML =
+            '<span class="trl-title"><span class="trl-chevron"></span>Portfolio rental summary</span>' +
+            '<span class="trl-total">' + fmtMoney(port.total) + '</span>' +
+            '<span class="trl-meta">' + port.properties + ' properties · ' + port.events +
+            ' events · ' + port.uniqueTenants + ' tenants</span>';
+        head.addEventListener('click', function () { wrap.classList.toggle('open'); });
+        const body = document.createElement('div');
+        body.className = 'trl-body';
+        const rows = Object.keys(ledger).map(function (id) {
+            const b = ledger[id];
+            const st = computeStats(b);
+            const live = b.live || propertyMeta[id] || {};
+            return { id: id, name: b.name || live.name || live.typeName || ('#' + id), st: st, live: live };
+        }).sort(function (a, b) { return b.st.total - a.st.total; });
+
+        if (!rows.length) {
+            body.innerHTML = '<div class="trl-empty">No properties in ledger yet. Sync logs after setting your API key' +
+                (hubPresent() ? ' in Script Hub' : '') + '.</div>';
+        } else {
+            body.innerHTML =
+                '<div class="trl-stats">' +
+                '<span>Lifetime income: <b>' + fmtMoney(port.total) + '</b></span>' +
+                '<span>Properties: <b>' + port.properties + '</b></span>' +
+                '<span>Events: <b>' + port.events + '</b></span>' +
+                '<span>Unique tenants: <b>' + port.uniqueTenants + '</b></span>' +
+                '<span>Total days leased: <b>' + fmtNum(port.totalDays) + '</b></span></div>' +
+                '<table class="trl-table trl-port-table"><thead><tr>' +
+                '<th>Property</th><th>ID</th><th>Lifetime</th><th>Events</th><th>New / Ext</th>' +
+                '<th>Avg lease</th><th>Avg $/day</th><th>Days leased</th><th>Tenants</th>' +
+                '<th>Status</th><th>Days left</th><th>Current $/day</th><th>Happy</th><th>Last rental</th>' +
+                '</tr></thead><tbody>' +
+                rows.map(function (r) {
+                    return '<tr><td>' + escapeHtml(r.name) + '</td><td>' + escapeHtml(r.id) + '</td>' +
+                        '<td class="trl-rent">' + fmtMoney(r.st.total) + '</td><td>' + r.st.count + '</td>' +
+                        '<td>' + r.st.newLeases + ' / ' + r.st.extensions + '</td>' +
+                        '<td>' + fmtMoney(Math.round(r.st.avgRent)) + '</td>' +
+                        '<td>' + (r.st.avgPerDay ? fmtMoney(Math.round(r.st.avgPerDay)) : '—') + '</td>' +
+                        '<td>' + fmtNum(r.st.totalDays) + '</td><td>' + r.st.uniqueTenants + '</td>' +
+                        '<td><span class="trl-badge ' + (r.live.status || '').replace(/\s+/g, '_') + '">' +
+                        escapeHtml(r.live.status || '—') + '</span></td>' +
+                        '<td>' + (r.live.remaining != null && r.live.remaining !== '' ? fmtNum(r.live.remaining) : '—') + '</td>' +
+                        '<td>' + (r.live.costPerDay ? fmtMoney(r.live.costPerDay) : '—') + '</td>' +
+                        '<td>' + (r.live.happy ? fmtNum(r.live.happy) : '—') + '</td>' +
+                        '<td>' + fmtDateShort(r.st.lastTs) + '</td></tr>';
+                }).join('') +
+                '</tbody></table>';
+        }
+        wrap.appendChild(head);
+        wrap.appendChild(body);
+        return wrap;
+    }
+
+    function exportCsv() {
+        const headers = [
+            'property_id', 'property_name', 'log_id', 'timestamp', 'date_iso',
+            'income', 'days', 'cost_per_day', 'running_total',
+            'tenant_id', 'tenant_name', 'type', 'type_label', 'log_title', 'category'
+        ];
+        const lines = [headers.join(',')];
+        const esc = function (v) {
+            const s = String(v ?? '');
+            if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+            return s;
+        };
+        Object.keys(ledger).forEach(function (pid) {
+            const b = ledger[pid];
+            (b.entries || []).forEach(function (e) {
+                const iso = e.ts ? new Date(e.ts * 1000).toISOString() : '';
+                lines.push([
+                    pid, b.name || e.propertyName || '', e.id, e.ts, iso,
+                    e.rent, e.days,
+                    e.costPerDay != null ? Math.round(e.costPerDay * 100) / 100 : '',
+                    e.runningTotal, e.renter, e.renterName, e.type, typeLabel(e.type), e.title, e.category
+                ].map(esc).join(','));
+            });
+        });
+        const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'torn-rental-ledger-' + new Date().toISOString().slice(0, 10) + '.csv';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    }
+
+    function renderAllLedgers() {
+        ensureStyles();
+        document.querySelectorAll('.trl-ledger, #trl-portfolio').forEach(function (el) { el.remove(); });
+        if (settings.showPortfolio) {
+            const port = buildPortfolioPanel();
+            const mount = document.getElementById('trl-chrome') ||
+                document.querySelector('#properties-page-wrap .content-title') ||
+                document.querySelector('.content-title');
+            if (mount) mount.insertAdjacentElement('afterend', port);
+            else document.body.prepend(port);
+        }
+        if (settings.showOnDetail && isPropertyDetailView()) {
+            const pid = currentPropertyId();
+            if (pid) injectDetailLedger(pid);
+        }
+        if (settings.showOnList && isYourPropertiesView()) {
+            findPropertyRows().forEach(function (row) {
+                if (row.el.querySelector('.trl-ledger')) return;
+                const panel = buildLedgerPanel(row.propertyId, { startOpen: false });
+                const anchor = row.el.querySelector('.title, .property-name, .info, h5, .header') || row.el;
+                if (anchor.parentElement && anchor !== row.el) anchor.insertAdjacentElement('afterend', panel);
+                else row.el.appendChild(panel);
+            });
+        }
+    }
+
+    function injectDetailLedger(propertyId) {
+        if (document.querySelector('.trl-ledger[data-property-id="' + propertyId + '"]')) return;
+        const panel = buildLedgerPanel(propertyId, { startOpen: true });
+        const host = document.getElementById('trl-portfolio') ||
+            document.getElementById('trl-chrome') ||
+            document.querySelector('#properties-page-wrap .content-title') ||
+            document.querySelector('.content-title') ||
+            document.querySelector('.properties-page-wrap') ||
+            document.body;
+        host.insertAdjacentElement('afterend', panel);
+    }
+
+    let chromeEl = null;
+    function ensureChrome() {
+        ensureStyles();
+
+        // Hub installed: never show property-page chrome / setup UI
+        if (hubPresent()) {
+            if (chromeEl && chromeEl.parentNode) chromeEl.remove();
+            chromeEl = null;
+            const stray = document.getElementById('trl-chrome');
+            if (stray) stray.remove();
+            return null;
+        }
+
+        if (chromeEl && document.contains(chromeEl)) {
+            updateChromeStatus();
+            return chromeEl;
+        }
+        chromeEl = document.createElement('div');
+        chromeEl.id = 'trl-chrome';
+        chromeEl.className = isDarkTheme() ? 'dark' : '';
+
+        chromeEl.innerHTML =
+            '<strong>Rental Ledger</strong>' +
+            '<span class="trl-status"></span>' +
+            '<button type="button" data-act="sync">Sync</button>' +
+            '<button type="button" data-act="full">Full sync</button>' +
+            '<button type="button" data-act="csv">CSV</button>' +
+            '<button type="button" data-act="settings">Settings</button>' +
+            '<div class="trl-settings" id="trl-settings">' +
+            '<label>Custom API key <input type="password" id="trl-apikey" placeholder="16+ character Torn custom key" autocomplete="off" /></label>' +
+            '<p class="trl-meta" style="margin:4px 0 8px">' +
+            '<a class="trl-link" href="' + API_PREFS_URL + '" target="_blank" rel="noopener">Generate User / Log key</a>' +
+            ' — opens Torn pre-filled for RentalLedger (User → Log + Properties). Create, then paste below.</p>' +
+            '<label>Entries shown per property <input type="number" id="trl-entries" min="3" max="100" /></label>' +
+            '<label><input type="checkbox" id="trl-autosync" /> Auto-sync when opening properties</label>' +
+            '<label><input type="checkbox" id="trl-list" /> Show ledger on property list</label>' +
+            '<label><input type="checkbox" id="trl-detail" /> Show ledger on property detail</label>' +
+            '<label><input type="checkbox" id="trl-portfolio" /> Show portfolio summary</label>' +
+            '<label><input type="checkbox" id="trl-raw" /> Show raw log data column</label>' +
+            '<div style="margin-top:6px"><button type="button" data-act="save">Save</button></div>' +
+            '<p class="trl-meta" style="margin-top:8px">Log types 5937 (new lease) + 5943 (extension). Data stays in your browser.</p>' +
+            '</div>';
+
+        chromeEl.addEventListener('click', function (ev) {
+            const btn = ev.target.closest('[data-act]');
+            if (!btn) return;
+            const act = btn.getAttribute('data-act');
+            if (act === 'sync') syncLogs(false);
+            if (act === 'full') syncLogs(true);
+            if (act === 'csv') exportCsv();
+            if (act === 'settings') {
+                chromeEl.querySelector('.trl-settings').classList.toggle('open');
+                fillSettingsForm();
+            }
+            if (act === 'save') {
+                const key = (chromeEl.querySelector('#trl-apikey').value || '').trim();
+                if (key) settings.apiKey = key.slice(0, 64);
+                const n = Number(chromeEl.querySelector('#trl-entries').value);
+                if (Number.isFinite(n)) settings.entriesShown = Math.max(3, Math.min(100, Math.round(n)));
+                settings.autoSync = !!chromeEl.querySelector('#trl-autosync').checked;
+                settings.showOnList = !!chromeEl.querySelector('#trl-list').checked;
+                settings.showOnDetail = !!chromeEl.querySelector('#trl-detail').checked;
+                settings.showPortfolio = !!chromeEl.querySelector('#trl-portfolio').checked;
+                settings.showRawData = !!chromeEl.querySelector('#trl-raw').checked;
+                saveSettings();
+                chromeEl.querySelector('.trl-settings').classList.remove('open');
+                renderAllLedgers();
+                if (settings.autoSync && settings.apiKey) syncLogs(false);
+            }
+        });
+
+        const mount = document.querySelector('#properties-page-wrap .content-title') ||
+            document.querySelector('.content-title') ||
+            document.querySelector('.properties-page-wrap') ||
+            document.querySelector('#mainContainer');
+        if (mount) mount.insertAdjacentElement('afterend', chromeEl);
+        else document.body.prepend(chromeEl);
+        fillSettingsForm();
+        updateChromeStatus();
+        return chromeEl;
+    }
+
+    function fillSettingsForm() {
+        if (!chromeEl || hubPresent()) return;
+        const keyInput = chromeEl.querySelector('#trl-apikey');
+        if (keyInput && document.activeElement !== keyInput) keyInput.value = settings.apiKey || '';
+        const ent = chromeEl.querySelector('#trl-entries');
+        if (ent) ent.value = settings.entriesShown;
+        const map = {
+            '#trl-autosync': 'autoSync', '#trl-list': 'showOnList',
+            '#trl-detail': 'showOnDetail', '#trl-portfolio': 'showPortfolio', '#trl-raw': 'showRawData'
+        };
+        Object.keys(map).forEach(function (sel) {
+            const el = chromeEl.querySelector(sel);
+            if (el) el.checked = !!settings[map[sel]];
+        });
+    }
+
+    function updateChromeStatus() {
+        if (!chromeEl) return;
+        chromeEl.classList.toggle('dark', isDarkTheme());
+        const st = chromeEl.querySelector('.trl-status');
+        if (!st) return;
+        if (syncing) {
+            st.textContent = 'Syncing… (' + lastSyncPages + ' pages, +' + lastSyncNew + ')';
+            return;
+        }
+        if (lastError) {
+            st.innerHTML = '<span class="trl-err">' + escapeHtml(lastError) + '</span>';
+            return;
+        }
+        const port = portfolioStats();
+        const when = lastSyncTs ? fmtDate(lastSyncTs) : 'never';
+        st.textContent = port.properties + ' props · ' + port.events + ' events · ' +
+            fmtMoney(port.total) + ' · sync ' + when;
+    }
+
+    function registerWithHub() {
+        const registration = {
+            id: HUB_ID,
+            name: HUB_NAME,
+            version: VERSION,
+            order: 320,
+            open: function () {
+                if (!/properties\.php/i.test(location.pathname)) {
+                    location.href = 'https://www.torn.com/properties.php#/p=yourProperties';
+                    return;
+                }
+                ensureChrome(); // keeps page clean under Hub
+                const el = document.getElementById('trl-portfolio') || document.querySelector('.trl-ledger');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            },
+            close: function () {},
+            status: function () {
+                const port = portfolioStats();
+                if (!port.properties) return 'No rental history yet';
+                return port.properties + ' props · ' + fmtMoney(port.total);
+            },
+            prefs: {
+                fields: [
+                    {
+                        key: 'apiKey', type: 'password', label: 'Custom API key',
+                        default: '', placeholder: '16+ character Torn custom key',
+                        hint: 'User / Log (+ Properties). Use Generate below to pre-fill Torn’s key creator.'
+                    },
+                    {
+                        key: 'generateKey', type: 'button',
+                        label: 'Generate User / Log key',
+                        url: API_PREFS_URL,
+                        hint: 'Opens Torn API key page pre-filled for RentalLedger (User → Log + Properties). Create the key, then paste it above.'
+                    },
+                    {
+                        key: 'syncNow', type: 'button', label: 'Sync rental logs now',
+                        hint: 'Pull latest lease/extension events from your activity log',
+                        onClick: function () { syncLogs(false); }
+                    },
+                    {
+                        key: 'fullSync', type: 'button', label: 'Full history sync',
+                        hint: 'Walk farther back through activity log pages',
+                        onClick: function () { syncLogs(true); }
+                    },
+                    {
+                        key: 'entriesShown', type: 'number', label: 'Entries shown per property',
+                        default: 15, min: 3, max: 100
+                    },
+                    { key: 'autoSync', type: 'toggle', label: 'Auto-sync on properties page', default: true },
+                    { key: 'showOnList', type: 'toggle', label: 'Show ledger on property list', default: true },
+                    { key: 'showOnDetail', type: 'toggle', label: 'Show ledger on property detail', default: true },
+                    { key: 'showPortfolio', type: 'toggle', label: 'Show portfolio summary', default: true },
+                    { key: 'showRawData', type: 'toggle', label: 'Show raw log data column', default: false }
+                ],
+                values: {
+                    apiKey: settings.apiKey || '',
+                    entriesShown: settings.entriesShown,
+                    autoSync: settings.autoSync,
+                    showOnList: settings.showOnList,
+                    showOnDetail: settings.showOnDetail,
+                    showPortfolio: settings.showPortfolio,
+                    showRawData: settings.showRawData
+                },
+                onSave: function (values) {
+                    if (!values || typeof values !== 'object') return;
+                    if (typeof values.apiKey === 'string') {
+                        const t = values.apiKey.trim();
+                        if (t) settings.apiKey = t.slice(0, 64);
+                        else if (!settings.apiKey) settings.apiKey = '';
+                    }
+                    if (values.entriesShown != null && values.entriesShown !== '') {
+                        const n = Number(values.entriesShown);
+                        if (Number.isFinite(n)) settings.entriesShown = Math.max(3, Math.min(100, Math.round(n)));
+                    }
+                    ['autoSync', 'showOnList', 'showOnDetail', 'showPortfolio', 'showRawData'].forEach(function (k) {
+                        if (typeof values[k] === 'boolean') settings[k] = values[k];
+                    });
+                    saveSettings();
+                    try {
+                        values.apiKey = settings.apiKey || '';
+                        values.entriesShown = settings.entriesShown;
+                        values.autoSync = settings.autoSync;
+                        values.showOnList = settings.showOnList;
+                        values.showOnDetail = settings.showOnDetail;
+                        values.showPortfolio = settings.showPortfolio;
+                        values.showRawData = settings.showRawData;
+                    } catch (_) {}
+                    renderAllLedgers();
+                    if (settings.autoSync && settings.apiKey) syncLogs(false);
+                }
+            }
+        };
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail: registration }));
+        (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
+    }
+
+    let bootTimer = null;
+    function scheduleBoot() {
+        clearTimeout(bootTimer);
+        bootTimer = setTimeout(boot, 400);
+    }
+    function boot() {
+        if (!/properties\.php/i.test(location.pathname)) return;
+        ensureStyles();
+        ensureChrome(); // removes chrome when Hub is present
+        renderAllLedgers();
+        if (settings.autoSync && settings.apiKey) syncLogs(false);
+    }
+
+    window.addEventListener('hashchange', scheduleBoot);
+    const mo = new MutationObserver(function () {
+        if (hubPresent()) {
+            // Strip any chrome that slipped in
+            const stray = document.getElementById('trl-chrome');
+            if (stray) stray.remove();
+            if (settings.showOnList && isYourPropertiesView()) {
+                const rows = findPropertyRows();
+                if (rows.some(function (r) { return !r.el.querySelector('.trl-ledger'); })) renderAllLedgers();
+            }
+            return;
+        }
+        if (!document.getElementById('trl-chrome')) scheduleBoot();
+        else if (settings.showOnList && isYourPropertiesView()) {
+            const rows = findPropertyRows();
+            if (rows.some(function (r) { return !r.el.querySelector('.trl-ledger'); })) renderAllLedgers();
+        }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+
+    registerWithHub();
+    document.addEventListener('torn-script-hub:ready', registerWithHub);
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', scheduleBoot);
+    else scheduleBoot();
+
+    setInterval(function () {
+        if (!/properties\.php/i.test(location.pathname)) return;
+        updateChromeStatus();
+    }, POLL_MS);
+
+    console.log('[TRL] Torn Rental Ledger ' + VERSION + ' loaded (hub=' + hubPresent() + ')');
+})();
