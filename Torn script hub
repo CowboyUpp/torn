@@ -1,21 +1,20 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.2.3
-// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics.
+// @version      4.3.0
+// @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      greasyfork.org
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.user.js
-// @updateURL https://update.greasyfork.org/scripts/590550/Torn%20Script%20Hub.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.2.3';
+    const HUB_VERSION = '4.3.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -33,6 +32,10 @@
     const STORAGE_KEY = 'tsh-onboarded';
     const KNOWN_SCRIPTS_KEY = 'tsh-known-scripts';
     const UI_ENABLED_KEY = 'tsh-ui-enabled';
+    const WATCH_LIST_KEY = 'tsh-watch-list';
+    const WATCH_VERSIONS_KEY = 'tsh-watch-versions';
+    const WATCH_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12h throttle on auto-checks
+    const WATCH_FETCH_TIMEOUT_MS = 8000;
     const DEBUG_LOG_MAX = 40;
     const debugLog = [];
 
@@ -60,7 +63,8 @@
         { id: 585434, name: 'Item Market Portfolio', description: 'Tracks the value of your Item Market listings over time.' },
         { id: 582128, name: 'Activity Log Filter & CSV', description: 'Filters your activity log and exports it to CSV.' },
         { id: 588262, name: 'Torn: Travel Inventory', description: 'Shows your travel inventory and item info while abroad.' },
-        { id: 583629, name: 'Torn City Map Finder', description: 'Map pins and city-find list above the city map. Optional Public API values; no automated pickup.' }
+        { id: 583629, name: 'Torn City Map Finder', description: 'Map pins and city-find list above the city map. Optional Public API values; no automated pickup.' },
+        { id: 592376, name: 'Torn Rental Ledger', description: 'Per-property + portfolio rental income ledger on yourProperties. Hub settings; Generate User/Log key (user=log,properties).' }
     ];
 
     const registry = new Map();
@@ -99,6 +103,22 @@
             row.classList.add('tsh-disabled');
             row.title = 'Script Hub disabled — right-click or Shift+H to re-enable';
         }
+
+        // Watching: red dot on the icon itself when an unseen update exists
+        let dot = row.querySelector('.tsh-watch-dot');
+        if (hasUnseenWatchUpdates()) {
+            if (!dot) {
+                const iconWrap = row.querySelector('[class*="svgIconWrap"]') || row.querySelector('.tsh-svg')?.parentElement;
+                if (iconWrap) {
+                    dot = document.createElement('span');
+                    dot.className = 'tsh-watch-dot';
+                    iconWrap.style.position = iconWrap.style.position || 'relative';
+                    iconWrap.appendChild(dot);
+                }
+            }
+        } else if (dot) {
+            dot.remove();
+        }
     }
 
     // =========================================================================
@@ -131,6 +151,163 @@
         try {
             localStorage.setItem(KNOWN_SCRIPTS_KEY, JSON.stringify(known));
         } catch (e) {}
+    }
+
+    // =========================================================================
+    // WATCHLIST — third-party scripts the user adds manually by GreasyFork
+    // ID/URL. Unlike LIBRARY_SCRIPTS these never register with the Hub, so
+    // their version is checked periodically against GreasyFork's script
+    // metadata endpoint instead.
+    // =========================================================================
+    function getWatchList() {
+        try {
+            const raw = localStorage.getItem(WATCH_LIST_KEY);
+            return raw ? JSON.parse(raw) : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function saveWatchList(list) {
+        try {
+            localStorage.setItem(WATCH_LIST_KEY, JSON.stringify(list));
+        } catch (e) {}
+    }
+
+    function getWatchState() {
+        try {
+            const raw = localStorage.getItem(WATCH_VERSIONS_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function saveWatchState(state) {
+        try {
+            localStorage.setItem(WATCH_VERSIONS_KEY, JSON.stringify(state));
+        } catch (e) {}
+    }
+
+    function setWatchEntry(id, patch) {
+        const state = getWatchState();
+        state[id] = Object.assign({}, state[id], patch);
+        saveWatchState(state);
+        return state[id];
+    }
+
+    function removeWatchEntry(id) {
+        saveWatchList(getWatchList().filter(e => String(e.id) !== String(id)));
+        const state = getWatchState();
+        delete state[id];
+        saveWatchState(state);
+    }
+
+    function hasUnseenWatchUpdates() {
+        const state = getWatchState();
+        return getWatchList().some(entry => {
+            const s = state[entry.id];
+            return s && s.version && s.seenVersion && s.version !== s.seenVersion;
+        });
+    }
+
+    // Accepts a raw ID ("590550"), a full URL, or a path fragment and
+    // extracts the numeric GreasyFork script ID.
+    function parseScriptId(input) {
+        const str = String(input || '').trim();
+        if (!str) return null;
+        const inUrl = str.match(/scripts\/(\d+)/);
+        if (inUrl) return inUrl[1];
+        if (/^\d+$/.test(str)) return str;
+        const anyDigits = str.match(/(\d{3,})/);
+        return anyDigits ? anyDigits[1] : null;
+    }
+
+    // GreasyFork exposes clean JSON metadata per script, including name,
+    // version, and author — no scraping needed.
+    function fetchScriptMeta(id) {
+        return new Promise(resolve => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                resolve(null);
+                return;
+            }
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://greasyfork.org/scripts/${id}.json`,
+                timeout: WATCH_FETCH_TIMEOUT_MS,
+                onload: res => {
+                    try {
+                        const data = JSON.parse(res.responseText);
+                        if (!data) { resolve(null); return; }
+                        const authorName = typeof data.author === 'string'
+                            ? data.author
+                            : (data.author && data.author.name) ? data.author.name : '';
+                        resolve({
+                            name: data.name || `Script ${id}`,
+                            version: data.version ? String(data.version) : null,
+                            author: authorName || ''
+                        });
+                    } catch (e) {
+                        resolve(null);
+                    }
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null)
+            });
+        });
+    }
+
+    async function checkWatchEntry(entry, { force = false } = {}) {
+        const state = getWatchState();
+        const existing = state[entry.id];
+        if (!force && existing && existing.lastChecked &&
+            (Date.now() - existing.lastChecked) < WATCH_CHECK_INTERVAL_MS) {
+            return existing; // throttled, skip network call
+        }
+        const meta = await fetchScriptMeta(entry.id);
+        return setWatchEntry(entry.id, {
+            version: (meta && meta.version) || (existing && existing.version) || null,
+            seenVersion: existing ? existing.seenVersion : (meta && meta.version),
+            lastChecked: Date.now()
+        });
+    }
+
+    async function checkAllWatchEntries({ force = false } = {}) {
+        for (const entry of getWatchList()) {
+            await checkWatchEntry(entry, { force });
+        }
+    }
+
+    async function addWatchEntryFromInput(rawInput, { statusEl, inputEl, addBtn, onDone }) {
+        const id = parseScriptId(rawInput);
+        if (!id) {
+            if (statusEl) statusEl.textContent = 'Couldn\u2019t read a script ID from that — paste the GreasyFork link or just the number.';
+            return;
+        }
+        if (getWatchList().some(e => String(e.id) === String(id))) {
+            if (statusEl) statusEl.textContent = 'Already on your watchlist.';
+            return;
+        }
+        if (addBtn) addBtn.disabled = true;
+        if (statusEl) statusEl.textContent = 'Looking up script…';
+
+        const meta = await fetchScriptMeta(id);
+
+        if (addBtn) addBtn.disabled = false;
+
+        if (!meta || !meta.version) {
+            if (statusEl) statusEl.textContent = 'Couldn\u2019t find that script on GreasyFork. Double-check the ID or link.';
+            return;
+        }
+
+        const list = getWatchList();
+        list.push({ id, name: meta.name, author: meta.author, addedAt: Date.now() });
+        saveWatchList(list);
+        setWatchEntry(id, { version: meta.version, seenVersion: meta.version, lastChecked: Date.now() });
+
+        if (inputEl) inputEl.value = '';
+        if (statusEl) statusEl.textContent = '';
+        if (onDone) onDone();
     }
 
     // =========================================================================
@@ -967,6 +1144,12 @@
         const wrap = document.createElement('div');
         wrap.className = 'tsh-lib-wrap';
 
+        // ---- Hub-compatible Library section ----
+        const introTitle = document.createElement('div');
+        introTitle.className = 'tsh-lib-section-title';
+        introTitle.textContent = 'Hub-Compatible Scripts';
+        wrap.appendChild(introTitle);
+
         const intro = document.createElement('p');
         intro.className = 'tsh-lib-intro';
         intro.textContent = 'Scripts built to work with Script Hub. Install any of these and they\u2019ll register here automatically.';
@@ -1028,6 +1211,180 @@
         });
 
         wrap.appendChild(list);
+
+        // ---- Watching (third-party) section ----
+        const watchTitle = document.createElement('div');
+        watchTitle.className = 'tsh-lib-section-title';
+        watchTitle.textContent = 'Watching';
+        wrap.appendChild(watchTitle);
+
+        const watchIntroRow = document.createElement('div');
+        watchIntroRow.className = 'tsh-watch-intro-row';
+
+        const watchIntro = document.createElement('p');
+        watchIntro.className = 'tsh-lib-intro';
+        watchIntro.style.margin = '0';
+        watchIntro.textContent = 'Third-party scripts you\u2019re tracking. Checked periodically against GreasyFork.';
+        watchIntroRow.appendChild(watchIntro);
+
+        const watchList = getWatchList();
+
+        if (watchList.length) {
+            const checkAllBtn = document.createElement('button');
+            checkAllBtn.type = 'button';
+            checkAllBtn.className = 'tsh-lib-check-all';
+            checkAllBtn.textContent = 'Check all';
+            checkAllBtn.addEventListener('click', async () => {
+                checkAllBtn.disabled = true;
+                checkAllBtn.textContent = 'Checking…';
+                await checkAllWatchEntries({ force: true });
+                checkAllBtn.disabled = false;
+                checkAllBtn.textContent = 'Check all';
+                renderLibraryPanel(container);
+                updateButtonState();
+            });
+            watchIntroRow.appendChild(checkAllBtn);
+        }
+
+        wrap.appendChild(watchIntroRow);
+
+        // ---- add-by-ID form ----
+        const addForm = document.createElement('div');
+        addForm.className = 'tsh-watch-add';
+
+        const addInput = document.createElement('input');
+        addInput.type = 'text';
+        addInput.className = 'tsh-watch-add-input';
+        addInput.placeholder = 'GreasyFork script ID or link…';
+
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'tsh-watch-add-btn';
+        addBtn.textContent = 'Add';
+
+        addForm.append(addInput, addBtn);
+        wrap.appendChild(addForm);
+
+        const addStatus = document.createElement('div');
+        addStatus.className = 'tsh-watch-add-status';
+        wrap.appendChild(addStatus);
+
+        const submitAdd = () => {
+            addWatchEntryFromInput(addInput.value, {
+                statusEl: addStatus,
+                inputEl: addInput,
+                addBtn,
+                onDone: () => {
+                    renderLibraryPanel(container);
+                    updateButtonState();
+                }
+            });
+        };
+
+        addBtn.addEventListener('click', submitAdd);
+        addInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitAdd();
+            }
+        });
+
+        // ---- watched entries ----
+        if (watchList.length) {
+            const listEl = document.createElement('div');
+            listEl.className = 'tsh-lib-list';
+            listEl.style.marginTop = '6px';
+
+            const state = getWatchState();
+
+            watchList.forEach(entry => {
+                const s = state[entry.id] || {};
+                const hasUpdate = !!(s.version && s.seenVersion && s.version !== s.seenVersion);
+
+                const row = document.createElement('div');
+                row.className = 'tsh-lib-row' + (hasUpdate ? ' tsh-watch-row-updated' : '');
+
+                const info = document.createElement('div');
+                info.className = 'tsh-lib-info';
+
+                const nameRow = document.createElement('div');
+                nameRow.className = 'tsh-lib-name-row';
+
+                const name = document.createElement('span');
+                name.className = 'tsh-lib-name';
+                name.textContent = entry.name;
+                nameRow.appendChild(name);
+
+                if (s.version) {
+                    const ver = document.createElement('span');
+                    ver.className = 'tsh-lib-version';
+                    ver.textContent = 'v' + s.version;
+                    nameRow.appendChild(ver);
+                }
+
+                const badge = document.createElement('span');
+                badge.className = 'tsh-lib-badge' + (hasUpdate ? ' tsh-watch-badge-update' : '');
+                badge.textContent = hasUpdate ? 'Update' : (s.version ? 'Up to date' : 'Not checked yet');
+                nameRow.appendChild(badge);
+
+                info.appendChild(nameRow);
+
+                if (entry.author) {
+                    const desc = document.createElement('div');
+                    desc.className = 'tsh-lib-desc';
+                    desc.textContent = `by ${entry.author}`;
+                    info.appendChild(desc);
+                }
+
+                row.appendChild(info);
+
+                if (s.lastChecked) {
+                    const checked = document.createElement('span');
+                    checked.className = 'tsh-watch-checked';
+                    checked.textContent = relativeTime(s.lastChecked);
+                    row.appendChild(checked);
+                }
+
+                const view = document.createElement('a');
+                view.className = 'tsh-lib-install';
+                view.href = `https://greasyfork.org/en/scripts/${entry.id}`;
+                view.target = '_blank';
+                view.rel = 'noopener';
+                view.textContent = 'View';
+                view.addEventListener('click', () => {
+                    if (hasUpdate) {
+                        setWatchEntry(entry.id, { seenVersion: s.version });
+                        updateButtonState();
+                    }
+                });
+                row.appendChild(view);
+
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.className = 'tsh-watch-remove';
+                remove.title = `Remove ${entry.name} from watchlist`;
+                remove.textContent = '×';
+                remove.addEventListener('click', () => {
+                    removeWatchEntry(entry.id);
+                    renderLibraryPanel(container);
+                    updateButtonState();
+                });
+                row.appendChild(remove);
+
+                listEl.appendChild(row);
+            });
+
+            wrap.appendChild(listEl);
+
+            // background throttled refresh whenever this tab renders
+            checkAllWatchEntries().then(() => updateButtonState());
+        } else {
+            const empty = document.createElement('div');
+            empty.className = 'tsh-dash-empty';
+            empty.style.padding = '14px 0';
+            empty.innerHTML = 'Nothing on your watchlist yet.<br><span>Paste a GreasyFork link or script ID above to start tracking one.</span>';
+            wrap.appendChild(empty);
+        }
 
         const contact = document.createElement('div');
         contact.className = 'tsh-lib-contact';
@@ -1091,6 +1448,8 @@
             knownCount: known.length,
             registered: live,
             known,
+            watchList: getWatchList(),
+            watchState: getWatchState(),
             recentEvents: debugLog.slice()
         };
     }
@@ -1122,7 +1481,7 @@
 
         const meta = document.createElement('div');
         meta.className = 'tsh-debug-meta';
-        meta.textContent = `Hub v${HUB_VERSION} · ${registry.size} registered · ${getKnownScripts().length} known · UI ${isUIEnabled() ? 'on' : 'off'}`;
+        meta.textContent = `Hub v${HUB_VERSION} · ${registry.size} registered · ${getKnownScripts().length} known · ${getWatchList().length} watched · UI ${isUIEnabled() ? 'on' : 'off'}`;
         wrap.appendChild(meta);
 
         const actions = document.createElement('div');
@@ -1365,6 +1724,17 @@
         return div.innerHTML;
     }
 
+    function relativeTime(ts) {
+        const diffMs = Date.now() - ts;
+        const mins = Math.round(diffMs / 60000);
+        if (mins < 1) return 'checked just now';
+        if (mins < 60) return `checked ${mins}m ago`;
+        const hrs = Math.round(mins / 60);
+        if (hrs < 24) return `checked ${hrs}h ago`;
+        const days = Math.round(hrs / 24);
+        return `checked ${days}d ago`;
+    }
+
     // =========================================================================
     // STYLES
     // =========================================================================
@@ -1378,6 +1748,12 @@
             #tsh-sidebar-row { cursor:pointer; position:relative; }
             #tsh-sidebar-row.tsh-disabled { cursor:default; opacity:0.45; filter:grayscale(0.6); }
             #tsh-sidebar-row.tsh-disabled .tsh-svg { opacity:0.5; }
+            .tsh-watch-dot {
+                position:absolute; top:-2px; right:-2px;
+                width:8px; height:8px; border-radius:50%;
+                background:#e0554f; box-shadow:0 0 0 2px var(--tsh-bg,#f5f5f5);
+                pointer-events:none;
+            }
 
             .tsh-menu {
                 position:fixed; z-index:2147483647;
@@ -1535,6 +1911,11 @@
             }
 
             .tsh-lib-wrap { display:flex; flex-direction:column; gap:10px; }
+            .tsh-lib-section-title {
+                font-size:10px; font-weight:700; text-transform:uppercase;
+                letter-spacing:.04em; opacity:.55; margin:2px 0 -4px;
+            }
+            .tsh-lib-section-title:first-child { margin-top:0; }
             .tsh-lib-intro { margin:0; font-size:12px; opacity:.7; line-height:1.5; }
             .tsh-lib-list { display:flex; flex-direction:column; gap:6px; }
             .tsh-lib-row {
@@ -1567,6 +1948,39 @@
             }
             .tsh-lib-contact a { color:#4e8ac7; text-decoration:none; font-weight:600; }
             .tsh-lib-contact a:hover { text-decoration:underline; }
+
+            .tsh-watch-intro-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+            .tsh-lib-check-all {
+                flex-shrink:0; padding:4px 10px; border:1px solid var(--tsh-border,#bbb);
+                border-radius:3px; background:transparent; color:inherit; font-size:11px;
+                font-weight:600; cursor:pointer;
+            }
+            .tsh-lib-check-all:hover { background:var(--tsh-hover,rgba(0,0,0,.06)); }
+            .tsh-lib-check-all:disabled { opacity:.6; cursor:default; }
+
+            .tsh-watch-add { display:flex; gap:6px; }
+            .tsh-watch-add-input {
+                flex:1; min-width:0; box-sizing:border-box; padding:6px 8px;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-input-bg,#fff); color:var(--tsh-text,#222); font-size:12px;
+            }
+            .tsh-watch-add-btn {
+                flex-shrink:0; padding:6px 14px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:12px; font-weight:600; cursor:pointer;
+            }
+            .tsh-watch-add-btn:hover { background:#355e94; }
+            .tsh-watch-add-btn:disabled { opacity:.6; cursor:default; }
+            .tsh-watch-add-status { font-size:11px; opacity:.7; min-height:14px; }
+
+            .tsh-watch-row-updated { border-color:rgba(224,85,79,.55) !important; }
+            .tsh-watch-badge-update { background:#e0554f; color:#fff; opacity:1; }
+            .tsh-watch-checked { font-size:10px; opacity:.5; white-space:nowrap; flex-shrink:0; }
+            .tsh-watch-remove {
+                flex-shrink:0; width:24px; height:24px; border:1px solid var(--tsh-border,#bbb);
+                border-radius:3px; background:transparent; color:inherit; font-size:14px;
+                line-height:1; cursor:pointer;
+            }
+            .tsh-watch-remove:hover { background:rgba(224,85,79,.15); border-color:rgba(224,85,79,.55); }
 
             .tsh-debug-wrap { display:flex; flex-direction:column; gap:10px; }
             .tsh-debug-intro { margin:0; font-size:12px; opacity:.7; line-height:1.5; }
