@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.0
+// @version      1.3.1
 // @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -16,7 +16,7 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.3.0';
+    const SCRIPT_VERSION = '1.3.1';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TYPES = ['mobster', 'cyclist'];
@@ -442,16 +442,17 @@
     function watchForHub() {
         if (hubPresent) return;
 
-        let attempts = 0;
+        // No cutoff — Hub's own mount routine can legitimately take up to
+        // ~24s on a heavily-loaded page (it's waiting on Torn's header DOM,
+        // competing with every other userscript also loading). This is a
+        // cheap, purely cosmetic check, so there's no real cost to just
+        // continuing to look rather than giving up early.
         const poll = setInterval(() => {
-            attempts++;
             if (isHubPresent()) {
                 clearInterval(poll);
                 adoptHubMode();
-            } else if (attempts > 100) { // ~20s at 200ms
-                clearInterval(poll);
             }
-        }, 200);
+        }, 500);
 
         // Belt-and-suspenders: the Hub also announces itself once it mounts.
         document.addEventListener('torn-script-hub:ready', () => {
