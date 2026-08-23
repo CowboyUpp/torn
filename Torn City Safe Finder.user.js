@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
-// @version      1.4.2
+// @version      1.4.3
 // @description  Safety-first city item helper: native map-top status bar, map pins, centered list panel, local history, optional Public API values, no automated pickup, Torn Script Hub support.
 // @author       CowboyUp
 // @match        https://www.torn.com/city.php*
@@ -19,12 +19,8 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.4.2';
-    // v1.4.2 — Restore missing anchorPanel (bar click opened panel then threw).
-    // v1.4.1 — Fix Hub/PDA settings persistence (dual-write GM + localStorage),
-    // never wipe API key on empty password blur, raise panel z-index above map,
-    // harden bar click → open centered stats panel on desktop and PDA.
-    // v1.4.0 — Native map-top status bar (no floating bullseye FAB).
+    const VERSION = '1.4.3';
+    
     const STORE_PREFIX = 'tcfs_';
     const POLL_MS = 1800;
     const REVEAL_MS = 10000;
@@ -43,13 +39,23 @@
     // present, synchronously patches window.__tornScriptHubQueue (marking it
     // __tshPatched) before this document-idle script runs. That flag is a
     // reliable signal the Hub is installed and already initialized.
+    // NOTE: window.__tornScriptHubQueue is NOT a reliable signal on its own.
+    // The Hub uses @grant GM_xmlhttpRequest (for its Watching feature), which
+    // forces Tampermonkey to run it in an isolated JS world separate from
+    // this @grant-none script's real page window — so a window-property
+    // check can permanently see nothing even though the Hub is genuinely
+    // mounted and working. The Hub's actual DOM element is shared across
+    // both worlds regardless, so check that first.
     function isHubPresent() {
+        if (document.getElementById('tsh-sidebar-row')) return true;
         const q = window[QUEUE_PROPERTY];
         return !!(q && q.__tshPatched);
     }
 
-    const hubPresent = isHubPresent();
-    console.log('[TCMF debug] hubPresent =', hubPresent, '| queue:', window[QUEUE_PROPERTY], '| readyState:', document.readyState);
+    // Detected once synchronously at load as a fast path, then re-confirmed
+    // asynchronously — see watchForHub()/adoptHubMode(). A single check here
+    // is not a final answer: the Hub may mount a beat after this script runs.
+    let hubPresent = isHubPresent();
 
     const DEFAULT_SETTINGS = {
         fabX: null,
@@ -329,6 +335,20 @@
         if (!timestamp) return '-';
         try {
             return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } catch (_) {
+            return '-';
+        }
+    }
+
+    function formatShortDateTime(timestamp) {
+        if (!timestamp) return '-';
+        try {
+            return new Date(timestamp).toLocaleString([], {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
         } catch (_) {
             return '-';
         }
@@ -1551,13 +1571,7 @@
             #tcfs-fab.tcfs-new-find-pulse {
                 animation: tcfs-new-find-pulse 1.25s ease-out 2;
             }
-
-            /* v1.3.0 — the compact icon-only button (v1.2.1+) no longer expands
-               on hover, but an old translateX(-86px) rule for .tcfs-expand-left
-               (left over from the earlier wide-label design) was never removed.
-               It only ever fires once placeFab() actually runs, which is now
-               true since dragging is wired up — neutralize it so the button
-               no longer jumps sideways on hover/drag. */
+            
             #tcfs-fab.tcfs-expand-left:hover,
             #tcfs-fab.tcfs-expand-left:focus-visible,
             #tcfs-fab.tcfs-expand-left.tcfs-open {
@@ -2269,7 +2283,7 @@
             if (settings.tab === 'history') {
                 const statusText = r.status === 'picked' ? 'Collected' : 'Vanished';
                 const statusTime = r.status === 'picked' ? r.pickedAt : r.goneAt;
-                subText += ` &middot; ${statusText}: ${formatShortTime(statusTime)}`;
+                subText += ` &middot; ${statusText}: ${formatShortDateTime(statusTime)}`;
             }
 
             return `
@@ -2639,10 +2653,54 @@
         (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
     }
 
+    // Called either immediately (fast path, hub already present at load) or
+    // later once watchForHub() confirms the Hub actually initialized.
+    // Registration itself doesn't depend on this — registerWithHub() runs
+    // unconditionally — this only removes the now-redundant in-panel
+    // settings/theme buttons and re-registers for good measure.
+    function adoptHubMode() {
+        hubPresent = true;
+        if (panel) {
+            const settingsBtn = panel.querySelector('[data-action="settings"]');
+            if (settingsBtn) settingsBtn.remove();
+            const themeBtn = panel.querySelector('[data-action="theme"]');
+            if (themeBtn) themeBtn.remove();
+        }
+        if (settingsEl) {
+            settingsEl.innerHTML = '';
+            settingsEl.classList.remove('tcfs-open');
+        }
+        if (panel) panel.classList.remove('tcfs-settings-mode');
+        registerWithHub();
+    }
+
+    function watchForHub() {
+        if (hubPresent) return;
+
+        // No cutoff — Hub's own mount routine can legitimately take up to
+        // ~24s on a heavily-loaded page (it's waiting on Torn's header DOM,
+        // competing with every other userscript also loading). This is a
+        // cheap, purely cosmetic check, so there's no real cost to just
+        // continuing to look rather than giving up early.
+        const poll = setInterval(() => {
+            if (isHubPresent()) {
+                clearInterval(poll);
+                adoptHubMode();
+            }
+        }, 500);
+
+        // Belt-and-suspenders: the Hub also announces itself once it mounts.
+        document.addEventListener('torn-script-hub:ready', () => {
+            clearInterval(poll);
+            if (!hubPresent) adoptHubMode();
+        }, { once: true });
+    }
+
     function initLoop() {
         buildUI();
         registerWithHub();
         document.addEventListener('torn-script-hub:ready', registerWithHub);
+        if (!hubPresent) watchForHub();
         if (settings.apiEnabled && (!itemMetaFetchedAt || Date.now() - itemMetaFetchedAt > METADATA_CACHE_MAX_AGE_MS)) {
             fetchItemMetadata(false);
         }
