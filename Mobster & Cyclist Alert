@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.2
+// @version      1.3.0
 // @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -9,8 +9,6 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/591579/Mobster%20%20Cyclist%20Alert.user.js
-// @updateURL https://update.greasyfork.org/scripts/591579/Mobster%20%20Cyclist%20Alert.meta.js
 // ==/UserScript==
 
 (function() {
@@ -18,7 +16,7 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.2.2';
+    const SCRIPT_VERSION = '1.3.0';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TYPES = ['mobster', 'cyclist'];
@@ -44,7 +42,13 @@
         return !!(q && q.__tshPatched);
     }
 
-    const hubPresent = isHubPresent();
+    // Detected once synchronously at load as a fast path, then re-confirmed
+    // asynchronously — see watchForHub()/adoptHubMode(). The Hub may not have
+    // initialized yet at this exact point even on a fully-loaded page, so this
+    // initial value is a best guess, not a final answer. settings.enabled's
+    // hub-mode default below uses this same initial guess, which is fine —
+    // that only affects the very first run before any preference is saved.
+    let hubPresent = isHubPresent();
 
     const DEFAULT_WAVEFORM = 'sine';
     const DEFAULT_VOLUME = 75;
@@ -274,8 +278,8 @@
     // STANDALONE UI
     // -------------------------------------------------------------------------
     function initStandaloneUI() {
-        startWatching();
         waitForElementToExist('.pickpocketing-root').then(() => {
+            if (hubPresent) return; // Hub was confirmed while we were waiting on the DOM
             const $ = window.jQuery || window.$;
             if (!$) return;
             if (document.getElementById('crime-alert-div')) return;
@@ -290,6 +294,11 @@
             $('#mobster-toggle-btn').on('click', () => toggleAlert('mobster'));
             $('#cyclist-toggle-btn').on('click', () => toggleAlert('cyclist'));
         });
+    }
+
+    function removeStandaloneUI() {
+        const div = document.getElementById('crime-alert-div');
+        if (div) div.remove();
     }
 
     function toggleAlert(type) {
@@ -430,10 +439,36 @@
         document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail: registration }));
     }
 
-    function initHubMode() {
-        registerWithHub();
-        document.addEventListener('torn-script-hub:ready', registerWithHub);
-        startWatching();
+    function watchForHub() {
+        if (hubPresent) return;
+
+        let attempts = 0;
+        const poll = setInterval(() => {
+            attempts++;
+            if (isHubPresent()) {
+                clearInterval(poll);
+                adoptHubMode();
+            } else if (attempts > 100) { // ~20s at 200ms
+                clearInterval(poll);
+            }
+        }, 200);
+
+        // Belt-and-suspenders: the Hub also announces itself once it mounts.
+        document.addEventListener('torn-script-hub:ready', () => {
+            clearInterval(poll);
+            if (!hubPresent) adoptHubMode();
+        }, { once: true });
+    }
+
+    // Called either immediately (fast path, hub already present at load) or
+    // later once watchForHub() confirms the Hub actually initialized.
+    // Registration itself doesn't depend on this — see registerWithHub(),
+    // called unconditionally at boot — this only removes the now-redundant
+    // standalone buttons.
+    function adoptHubMode() {
+        hubPresent = true;
+        removeStandaloneUI();
+        registerWithHub(); // re-register in case the Hub reloaded/reset its registry
     }
 
     function waitForElementToExist(selector) {
@@ -478,11 +513,17 @@
         };
     }
 
-    // Boot
+    // Boot — always start watching for crimes and register with the Hub
+    // unconditionally (the queue tolerates any arrival order). The standalone
+    // buttons are the safe default and are only removed once the Hub is
+    // actually confirmed present, either immediately or via watchForHub().
+    startWatching();
+    initStandaloneUI();
+    registerWithHub();
     if (hubPresent) {
-        initHubMode();
+        adoptHubMode();
     } else {
-        initStandaloneUI();
+        watchForHub();
     }
 
     console.log('[MobsterCyclistAlert] v' + SCRIPT_VERSION + ' started · hub=' + hubPresent +
