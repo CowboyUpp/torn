@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.1
+// @version      1.3.2
 // @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -16,7 +16,7 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.3.1';
+    const SCRIPT_VERSION = '1.3.2';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TYPES = ['mobster', 'cyclist'];
@@ -37,7 +37,15 @@
     const STORAGE_KEY = (type, suffix) => `mca-${type}-${suffix}`;
     const lastAvailable = { mobster: false, cyclist: false };
 
+    // NOTE: window.__tornScriptHubQueue is NOT a reliable signal on its own.
+    // The Hub now uses @grant GM_xmlhttpRequest (added for its Watching
+    // feature), which forces Tampermonkey to run it in an isolated JS world
+    // separate from this @grant-none script's real page window — so a
+    // window-property check can permanently see nothing even though the Hub
+    // is genuinely mounted and working. The Hub's actual DOM element is
+    // shared across both worlds regardless, so check that first.
     function isHubPresent() {
+        if (document.getElementById('tsh-sidebar-row')) return true;
         const q = window[QUEUE_PROPERTY];
         return !!(q && q.__tshPatched);
     }
