@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Torn City Map Finder
+// @name         City Map Finder
 // @namespace    https://github.com/CowboyUpp/torn
 // @version      1.4.3
 // @description  Safety-first city item helper: native map-top status bar, map pins, centered list panel, local history, optional Public API values, no automated pickup, Torn Script Hub support.
