@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.7
+// @version      4.9.8
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,16 +18,10 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.7';
-    // TODO after deploying cct-sync-worker.js: replace both this URL and the
-    // @connect host above with your real *.workers.dev address (or custom
-    // domain). Cross-device sync stays fully inert — no requests fired, no
-    // permission prompt shown — until the person opts in AND a token is set,
-    // regardless of what this is set to.
+    const VERSION = '4.9.8';
+
     const SYNC_WORKER_URL = 'https://cct-sync.selbaer.workers.dev';
-    // Installed immediately, before anything else, so a crime attempt fired in
-    // the brief window before waitForApp() resolves is never missed. Function
-    // declaration is hoisted, so this call can sit ahead of its definition.
+    
     installCrimeAttemptInterceptor();
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
@@ -46,28 +40,15 @@
     const OUTCOME_DEDUPE_MS = 3500;
     const MAX_REASONABLE_COUNTER_DELTA = 10;
     const ITEM_PRICE_CACHE_MS = 24 * 60 * 60 * 1000;
-    // Push (write) is the scarce resource on the Worker's free KV tier (1,000
-    // writes/day shared across every opted-in user), so it's batched on a slow
-    // 10-min cycle. Pull (read) is cheap (100k/day) so it runs far more often,
-    // which is what actually makes cross-device stats feel close to live.
+    
     const SYNC_PUSH_INTERVAL_MS = 10 * 60 * 1000;
     const SYNC_PULL_INTERVAL_MS = 150 * 1000;
     const SYNC_PUSH_BATCH_MAX = 300;
-    // Mirrors the Worker's own TOKEN_RE exactly — catching a malformed token
-    // here means "why is sync failing?" gets answered immediately in the UI
-    // instead of surfacing later as an opaque HTTP 400 from the server.
+    
     const SYNC_TOKEN_RE = /^[a-zA-Z0-9_-]{16,64}$/;
-    // Shared with gmRequest's own GM_xmlhttpRequest timeout so every network
-    // call this script makes — Torn's own API included — fails the same way
-    // after the same wait, instead of some paths hanging indefinitely.
+    
     const FETCH_TIMEOUT_MS = 15000;
 
-    // Verified against real API responses, not assumed. See torn/logtypes:
-    // 9010 = Crime success, 9150 = Crime fail (new). Critical fails fragment across
-    // several IDs depending on side effect — a jail-outcome crit logs ONLY as 9155,
-    // NOT the generic 9154, confirmed by cross-checking a real critical fail against
-    // Torn's own in-game log page down to the exact second. Querying just 9154 alone
-    // silently misses these and produces a chain that reads too high.
     const LOG_ID_SUCCESS = 9010;
     const LOG_ID_FAIL = 9150;
     const LOG_IDS_CRITICAL = [9154, 9155, 9158, 9160, 9163, 9165, 9190, 9191];
@@ -82,20 +63,13 @@
     let pendingResultCountReseed = null;
     let cachedNativeChainValueEl = null;
     let lastCrimesRoute = null;
-    // Set the cycle a critical-fail delta is first spotted by the counts fallback.
-    // Not applied to the chain until a second consecutive reading confirms it —
-    // see applyResultCountDeltaFallback().
+    
     let pendingCriticalConfirm = null;
-    // The criticalFails count already "priced in" to the current chain value.
-    // Tracked separately from lastResultCounts so that merely seeing a suspicious
-    // reading doesn't itself shift the baseline used to detect it.
+    
     let confirmedCriticalFails = null;
     let profitRecords = readProfitRecords();
     let itemPriceCache = readItemPriceCache();
 
-    // Cross-device Crime Profit sync (opt-in, off by default — see wireSyncUI()).
-    // Named distinctly from the pre-existing `syncTimer` above, which is the
-    // unrelated SPA-navigation debounce timer.
     let syncEnabled = safeGet(STORAGE_KEY_SYNC_ENABLED, '0') === '1';
     let syncToken = safeGet(STORAGE_KEY_SYNC_TOKEN, '');
     let syncPushCursor = Number(safeGet(STORAGE_KEY_SYNC_PUSH_CURSOR, '0')) || 0;
@@ -103,31 +77,12 @@
     let crossSyncPullTimer = null;
     let crossSyncInFlight = false;
     let crossSyncLastStatus = '';
-
-    // Nerve capture: there is no confirmed, documented "Nerve outgoing" log
-    // type in Torn's API (torn/logtypes has no such entry, and nerve cost is
-    // set per crime/subcrime rather than logged as its own event) — so unlike
-    // LOG_ID_SUCCESS/LOG_ID_FAIL above, nerve is intentionally NOT sourced from
-    // the log API. Guessing a log ID here would silently produce wrong ratios
-    // with no way to detect it, which breaks this script's "verified against
-    // real responses, not assumed" rule.
-    //
-    // Instead this reads the nerve bar that's actually rendered on the page —
-    // still DOM-based (unlike reward/cash capture, which as of v4.8.0 comes
-    // from intercepting Torn's own crime-attempt response — see
-    // installCrimeAttemptInterceptor) since there's no nerve figure in that
-    // JSON either. If the bar element can't be found, nerve simply stays
-    // unknown for that record (rendered as "—"), it never guesses.
+    
     let nerveTracker = { last: null, pendingSpend: null, pendingAt: 0, warnedMissing: false };
     const NERVE_PENDING_WINDOW_MS = 15000;
-    // Session-only guard so an item with no resolvable price (no key set, or
-    // Torn genuinely has no listed price for it) isn't re-fetched on every
-    // capture. Cleared on page reload, matching itemPriceCache's own TTL model.
+    
     const itemPriceFetchAttempted = new Set();
-    // Reason the most recent attempt for a given item id failed, so the UI can
-    // tell a fixable permissions gap (wrong key selections) apart from a
-    // transient network/API error or a genuinely unpriced item, instead of
-    // lumping everything into one vague "pending" state.
+    
     const itemPriceFetchFailureReason = new Map();
 
     const THEME = {
@@ -796,11 +751,28 @@
                 try {
                     const resource = args[0];
                     const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
-                    if (url.includes('sid=crimesData') && url.includes('step=attempt')) {
-                        response.clone().text().then(handleCrimeAttemptResponseBody).catch(() => {});
+                    // Broaden match slightly: any crimesData step that looks like
+                    // an attempt/collect still gets inspected. The handler itself
+                    // decides whether the body is capturable.
+                    if (url.includes('sid=crimesData') && (url.includes('step=attempt') || url.includes('step=collect') || url.includes('step=claim'))) {
+                        response.clone().text()
+                            .then((body) => handleCrimeAttemptResponseBody(body, url))
+                            .catch((err) => {
+                                // Previously swallowed — this was a real blind
+                                // spot under rapid back-to-back actions. Log it
+                                // so a future silent miss leaves evidence.
+                                logDiagnostic('crime-attempt-clone-failed', {
+                                    url: String(url).slice(0, 300),
+                                    error: String(err && err.message || err),
+                                });
+                            });
                     }
-                } catch (_) {
-                    // Never let interception interfere with the page's real request.
+                } catch (err) {
+                    // Never let interception interfere with the page's real request,
+                    // but do leave a diagnostic breadcrumb.
+                    try {
+                        logDiagnostic('crime-attempt-intercept-error', String(err && err.message || err));
+                    } catch (_) { /* diagnostics themselves must never throw */ }
                 }
                 return response;
             });
@@ -814,28 +786,118 @@
     let lastCrimeOutcomeTime = 0;
     const CRIME_OUTCOME_DEDUPE_MS = 2000;
 
-    function handleCrimeAttemptResponseBody(body) {
-        if (!body || /<!doctype|<html[\s>]|<head[\s>]|<body[\s>]/i.test(body)) return; // Cloudflare/error page, not JSON
+    // Extract every success-shaped outcome object we can find in a response.
+    // Normal path: data.DB.outcome (singular). Bulk/collect-all paths may put
+    // an array under data.DB.outcomes, data.DB.results, or nest outcomes one
+    // level deeper. We never invent structure — only walk known keys and keep
+    // objects that look like real outcomes (have a `result` field).
+    function extractOutcomesFromResponse(data) {
+        const found = [];
+        if (!data || typeof data !== 'object') return found;
+
+        const db = data.DB;
+        if (db && typeof db === 'object') {
+            if (db.outcome && typeof db.outcome === 'object' && db.outcome.result !== undefined) {
+                found.push(db.outcome);
+            }
+            for (const key of ['outcomes', 'results', 'claims', 'rewards']) {
+                const arr = db[key];
+                if (Array.isArray(arr)) {
+                    for (const item of arr) {
+                        if (item && typeof item === 'object' && item.result !== undefined) {
+                            found.push(item);
+                        } else if (item && typeof item === 'object' && item.outcome && item.outcome.result !== undefined) {
+                            found.push(item.outcome);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Rare alternate top-level shapes seen in some Torn endpoints.
+        if (data.outcome && typeof data.outcome === 'object' && data.outcome.result !== undefined) {
+            found.push(data.outcome);
+        }
+        if (Array.isArray(data.outcomes)) {
+            for (const item of data.outcomes) {
+                if (item && typeof item === 'object' && item.result !== undefined) found.push(item);
+            }
+        }
+
+        return found;
+    }
+
+    function handleCrimeAttemptResponseBody(body, requestUrl) {
+        if (!body || /<!doctype|<html[\s>]|<head[\s>]|<body[\s>]/i.test(body)) {
+            logDiagnostic('crime-attempt-non-json', {
+                url: String(requestUrl || '').slice(0, 300),
+                bodyPreview: String(body || '').slice(0, 120),
+            });
+            return;
+        }
         let data;
         try {
             data = JSON.parse(body);
-        } catch (_) {
+        } catch (err) {
+            logDiagnostic('crime-attempt-parse-failed', {
+                url: String(requestUrl || '').slice(0, 300),
+                error: String(err && err.message || err),
+                bodyPreview: String(body).slice(0, 200),
+            });
             return;
         }
-        const outcome = data && data.DB && data.DB.outcome;
+
+        const outcomes = extractOutcomesFromResponse(data);
         // Only the confirmed literal value seen in real responses is treated as
         // capturable. Anything else (fail/critical/unknown) is left alone here —
         // chain success/fail/critical detection is handled entirely separately
         // (native badge / result counters / log verification) and is untouched
         // by this change.
-        if (!outcome || outcome.result !== 'success') return;
+        const successOutcomes = outcomes.filter((o) => o && o.result === 'success');
 
-        const signature = hashText(JSON.stringify(outcome));
-        if (signature === lastCrimeOutcomeSignature && Date.now() - lastCrimeOutcomeTime < CRIME_OUTCOME_DEDUPE_MS) return;
-        lastCrimeOutcomeSignature = signature;
-        lastCrimeOutcomeTime = Date.now();
+        if (!successOutcomes.length) {
+            // Visibility for the "silent miss" case: we saw a crimesData
+            // attempt/collect response but found nothing capturable. If the
+            // shape is unexpected, this is the only place that will tell us.
+            const dbKeys = (data && data.DB && typeof data.DB === 'object')
+                ? Object.keys(data.DB).slice(0, 20)
+                : [];
+            const topKeys = data && typeof data === 'object' ? Object.keys(data).slice(0, 15) : [];
+            // Only log when the response looked like it might have been a
+            // success path (has DB, or has any outcome-like keys) — pure fail
+            // responses are expected and would just spam the log.
+            const looksInteresting = dbKeys.length > 0
+                || topKeys.includes('outcome')
+                || topKeys.includes('outcomes')
+                || outcomes.length > 0;
+            if (looksInteresting) {
+                logDiagnostic('crime-attempt-no-success-outcome', {
+                    url: String(requestUrl || '').slice(0, 300),
+                    topKeys,
+                    dbKeys,
+                    outcomeCount: outcomes.length,
+                    outcomeResults: outcomes.map((o) => o && o.result).slice(0, 5),
+                    // Tiny structural sample so we can reverse-engineer a bulk
+                    // shape if one appears — never full rewards (could be large).
+                    sample: outcomes[0]
+                        ? { result: outcomes[0].result, hasRewards: Array.isArray(outcomes[0].rewards) }
+                        : (data.DB && data.DB.outcome
+                            ? { result: data.DB.outcome.result, hasRewards: Array.isArray(data.DB.outcome.rewards) }
+                            : null),
+                });
+            }
+            return;
+        }
 
-        recordProfitFromOutcomeJSON(outcome);
+        for (const outcome of successOutcomes) {
+            const signature = hashText(JSON.stringify(outcome));
+            if (signature === lastCrimeOutcomeSignature && Date.now() - lastCrimeOutcomeTime < CRIME_OUTCOME_DEDUPE_MS) {
+                continue;
+            }
+            lastCrimeOutcomeSignature = signature;
+            lastCrimeOutcomeTime = Date.now();
+            recordProfitFromOutcomeJSON(outcome);
+        }
     }
 
     function recomputeRecordTotals(record) {
@@ -2770,7 +2832,7 @@
         // AND saved a token — stays fully inert otherwise (see SYNC_WORKER_URL
         // comment near the top).
         startCrossDeviceSync();
-        console.log(`[CCT v${VERSION}] Hardened crime chain tracker loaded.`);
+        console.log(`[CCT v${VERSION}] Hardened crime chain tracker loaded (profit interceptor now logs silent misses).`);
     }
 
     init();
