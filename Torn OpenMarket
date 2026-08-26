@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         OpenMarket
+// @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.4.2
+// @version      1.4.3
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,6 +15,19 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
+// CHANGELOG 1.4.3:
+// - Fixed inventory quality/bonus text visually overlapping adjacent row columns
+//   (price, accuracy) on rows with several bonuses, most visibly on the highlighted
+//   "currently equipped" row. .openmarket-inventory-meta/.openmarket-inventory-bonuses
+//   previously allowed wrapping onto a second line, which on some row layouts doesn't
+//   push the row taller and instead overlaps content beside it. Both are now
+//   single-line with ellipsis truncation, so they can never grow taller than expected.
+// - Since truncation hides the full bonus text, a tap/click handler on the bonus span
+//   now shows it via alert(). A hover title attribute alone would only work on
+//   desktop — Torn PDA and other touch devices have no hover state, so relying on
+//   hover would make truncated info completely unreachable there. The title attribute
+//   is kept too, as a harmless bonus for desktop mouse users.
+//
 // CHANGELOG 1.4.2:
 // - processItem() now calls markProcessed(el, key) on every exit path, including
 //   when calcQuality() returns null (item ID not in BASE_STATS_MAP) or when the
@@ -1334,12 +1347,35 @@
                     }
 
                     if (bonuses.length > 0) {
+                        // FIX (1.4.3): the container is truncated to one line via CSS
+                        // (see insertStyles) to stop long bonus lists from wrapping and
+                        // colliding with adjacent row columns. A hover title attribute
+                        // would reveal the full text on desktop, but does nothing on
+                        // Torn PDA / touch devices, which have no hover state at all —
+                        // that would silently make truncated info unreachable there. A
+                        // tap/click listener showing the full text via alert() works
+                        // identically on both desktop and touch.
+                        const fullBonusText = bonuses
+                            .map(b => {
+                                if (FIXED_BONUSES.includes(b.title)) return b.title;
+                                const unit = getUnitFromDescription(b.description, b.value);
+                                return b.value != null ? `${b.title}: ${b.value}${unit}` : b.title;
+                            })
+                            .join(' · ');
+
                         const bonusContainer = create('span', {
                             className: 'openmarket-bonuses openmarket-inventory-bonuses',
+                            title: fullBonusText, // harmless extra on desktop hover
                             style: {
                                 display: 'inline',
-                                color: getBonusColour()
+                                color: getBonusColour(),
+                                cursor: 'pointer'
                             }
+                        });
+                        bonusContainer.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            alert(fullBonusText);
                         });
                         bonuses.forEach((bonus, i) => {
                             if (i > 0) {
@@ -1524,7 +1560,17 @@
         }
         .openmarket-inventory-bonuses {
             max-width: 280px;
-            white-space: normal;
+            /* FIX (1.4.3): was "white-space: normal", which let long bonus lists wrap
+               onto a second line. On rows with extra inline columns (price, accuracy,
+               the "currently equipped" highlighted row), that second line overlapped
+               those columns instead of pushing the row taller. Truncating to one line
+               with an ellipsis (see JS: title attribute added for full text on hover)
+               avoids the collision entirely. */
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: inline-block;
+            vertical-align: middle;
         }
         .openmarket-inventory-bonuses div {
             display: inline;
@@ -1535,6 +1581,10 @@
         }
         .openmarket-inventory-meta {
             max-width: 320px;
+            /* FIX (1.4.3): keep the whole meta block (quality badge + bonuses) on one
+               line too, for the same reason as .openmarket-inventory-bonuses above. */
+            flex-wrap: nowrap !important;
+            overflow: hidden;
         }
     `;
         const style = document.createElement('style');
