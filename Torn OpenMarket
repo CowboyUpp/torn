@@ -27,18 +27,6 @@
 //   desktop — Torn PDA and other touch devices have no hover state, so relying on
 //   hover would make truncated info completely unreachable there. The title attribute
 //   is kept too, as a harmless bonus for desktop mouse users.
-//
-// CHANGELOG 1.4.2:
-// - processItem() now calls markProcessed(el, key) on every exit path, including
-//   when calcQuality() returns null (item ID not in BASE_STATS_MAP) or when the
-//   computed quality is implausible. Previously only the success path marked the
-//   element as processed, so an unrecognised item's tile was silently re-evaluated
-//   (recomputing computeItemKey/calcQuality) on every DOM mutation indefinitely
-//   instead of being recognised as already handled.
-// - Extracted the duplicated icon-indicator-sniffing block (className/aria-label/
-//   title/data-title, lowercased and joined) out of displayCase.extractVisibleStats
-//   and inventory.extractInventoryStats into a single shared getIconIndicators()
-//   helper. No behavior change, removes copy-pasted logic.
 
 (function () {
     'use strict';
