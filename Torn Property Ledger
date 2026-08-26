@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Rental Ledger
-// @namespace    https://github.com/CowboyUpp/torn
-// @version      1.2.2
+// @name         Rental Ledger
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      1.3.4
 // @description  Rich per-property rental income ledger on yourProperties. Hub users: all settings in Script Hub. Custom User/Log API key (pre-filled Generate). Desktop, PDA, Hub.
 // @author       CowboyUp
 // @match        https://www.torn.com/properties.php*
@@ -13,16 +13,29 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.torn.com
-// @downloadURL  https://update.greasyfork.org/scripts/0/Torn%20Rental%20Ledger.user.js
-// @updateURL    https://update.greasyfork.org/scripts/0/Torn%20Rental%20Ledger.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/592376/Torn%20Rental%20Ledger.user.js
+// @updateURL    https://update.greasyfork.org/scripts/592376/Torn%20Rental%20Ledger.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.2.2';
+    const VERSION = '1.3.4';
+    // v1.3.4 — Detail panel starts closed; no duplicate #id in header; "Owned by you" label.
+    // v1.3.3 — GreasyFork 592376 download/update URLs.
+    // v1.3.2 — findPropertyRows: never treat tenant profile XID as property ID.
+    // v1.3.1 — Fix Rent $/day: read nested rented.cost_per_day; fallback to last lease rate.
+    // v1.3.0 — Portfolio: drop Events + Lease left; lower min-width to reduce horizontal scroll.
+    // v1.2.9 — Hover tooltips on all ledger + portfolio column headers.
+    // v1.2.8 — Portfolio: drop Last rental; lease days left / rent $/day show — when not rented.
+    // v1.2.7 — Portfolio: hide spouse props, drop Status + redundant ID, spacing + right-align numbers.
+    // v1.2.6 — Persist API key on Test/Save (dedicated store key); never lose working key on reload.
+    // v1.2.5 — Show/hide API key, Test key (shows Torn code), key length badge, clearer errors.
+    // v1.2.4 — Fix Generate key URL: user=log,properties (comma-separated, Torn docs).
+    // v1.2.3 — Hub detect via tsh-sidebar-row (Bustr-style); date-only When;
+    // drop Tenant ID / property name / log ID; column spacing; clear stale key errors.
     // v1.2.2 — Pre-filled custom API key URL like other Hub scripts
-    // (preferences.php#tab=api?step=addNewKey&title=RentalLedger&user=log&user=properties).
+    // (preferences.php#tab=api?step=addNewKey&title=RentalLedger&user=log,properties).
     // v1.2.1 — When Hub is present: hide ALL property-page chrome (no Sync/Settings bar).
     // Dynamic hub detection; Hub prefs only for key + sync. Clearer API key setup link.
     // v1.2.0 — Hub-first settings: when Script Hub is present, all prefs live in Hub only
@@ -38,22 +51,29 @@
     const HUB_ID = 'torn-rental-ledger';
     const HUB_NAME = 'Torn Rental Ledger';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
-    const API_PREFS_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=RentalLedger&user=log&user=properties';
+    const API_PREFS_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=RentalLedger&user=log,properties';
     // Same pattern as Bustr+ / Crime Chain / Travel Inventory — opens Torn key creator pre-filled.
 
 
     function isHubPresent() {
+        // Primary: Hub injects #tsh-sidebar-row on every page (same as Bustr+)
+        try {
+            if (document.getElementById('tsh-sidebar-row')) return true;
+            if (document.getElementById('tsh-dashboard')) return true;
+            if (document.getElementById('tsh-menu')) return true;
+        } catch (_) {}
+        // Queue patched at document-start on window and <html>
         try {
             const q = window[QUEUE_PROPERTY];
             if (q && q.__tshPatched) return true;
         } catch (_) {}
-        // Fallback: registry event already fired / Hub dashboard exists
         try {
-            if (document.getElementById('tsh-sidebar-row') || document.getElementById('tsh-dashboard')) return true;
+            const q2 = document.documentElement && document.documentElement[QUEUE_PROPERTY];
+            if (q2 && q2.__tshPatched) return true;
         } catch (_) {}
         return false;
     }
-    // Live check — never cache at load (Hub may patch before or after this script)
+    // Live check — never cache at load (Hub may appear after this script)
     function hubPresent() { return isHubPresent(); }
 
     const DEFAULT_SETTINGS = {
@@ -92,6 +112,15 @@
     };
 
     let settings = Object.assign({}, DEFAULT_SETTINGS, STORE.get('settings', {}));
+    // Dedicated apiKey slot (survives partial settings writes / PDA quirks)
+    (function () {
+        const dedicated = STORE.get('apiKey', null);
+        if (typeof dedicated === 'string' && dedicated.trim().length >= 14) {
+            settings.apiKey = dedicated.trim();
+        } else if (settings.apiKey) {
+            STORE.set('apiKey', String(settings.apiKey).trim());
+        }
+    })();
     let ledger = STORE.get('ledger', {}) || {};
     let lastSyncTs = STORE.get('lastSyncTs', 0) || 0;
     let propertyMeta = STORE.get('propertyMeta', {}) || {};
@@ -100,7 +129,26 @@
     let lastSyncPages = 0;
     let lastSyncNew = 0;
 
-    function saveSettings() { STORE.set('settings', settings); }
+    function saveSettings() {
+        STORE.set('settings', settings);
+        // Always mirror key to dedicated slot
+        if (settings.apiKey) STORE.set('apiKey', String(settings.apiKey).trim());
+    }
+    function persistApiKey(key) {
+        const k = String(key || '').trim().replace(/\s+/g, '').slice(0, 64);
+        if (!k || k.length < 14) return false;
+        settings.apiKey = k;
+        STORE.set('apiKey', k);
+        // merge into settings blob too
+        try {
+            const s = Object.assign({}, STORE.get('settings', {}), { apiKey: k });
+            STORE.set('settings', s);
+            settings = Object.assign(settings, s);
+        } catch (_) {
+            STORE.set('settings', settings);
+        }
+        return true;
+    }
     function saveLedger() {
         STORE.set('ledger', ledger);
         STORE.set('lastSyncTs', lastSyncTs);
@@ -116,11 +164,11 @@
         return Number(n).toLocaleString('en-US');
     }
     function fmtDate(ts) {
+        // Date only (no time) per user request
         if (!ts) return '—';
         const d = new Date(ts * 1000);
-        return d.toLocaleString(undefined, {
-            year: 'numeric', month: 'short', day: 'numeric',
-            hour: '2-digit', minute: '2-digit'
+        return d.toLocaleDateString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric'
         });
     }
     function fmtDateShort(ts) {
@@ -132,6 +180,22 @@
         if (Number(logType) === 5943) return 'Extension';
         if (Number(logType) === 5937) return 'New lease';
         return 'Rental';
+    }
+    function formatStatusLabel(status) {
+        const s = String(status || '').toLowerCase().trim();
+        if (!s || s === 'unknown') return 'Unknown';
+        // Torn API / UI phrasing for properties you occupy
+        if (s.includes('owned by them') || s === 'in_use' || s.includes('you and your spouse are living')) {
+            return 'Owned by you';
+        }
+        if (s.includes('owned by their spouse') || (s.includes('spouse') && s.includes('owned'))) {
+            return 'Owned by spouse';
+        }
+        if (s === 'rented' || s.includes('leased to')) return 'Rented';
+        if (s === 'for_rent' || s.includes('for rent')) return 'For rent';
+        if (s === 'none' || s === 'vacant') return 'Vacant';
+        // Title-case simple tokens
+        return String(status).replace(/_/g, ' ');
     }
     function escapeHtml(s) {
         return String(s ?? '')
@@ -179,8 +243,20 @@
         };
     }
 
+    function isSpouseProperty(live) {
+        const s = String((live && (live.status || live.rawStatus)) || '').toLowerCase();
+        return s.includes('spouse');
+    }
+
+    function ownPropertyIds() {
+        return Object.keys(ledger).filter(function (id) {
+            const live = (ledger[id] && ledger[id].live) || propertyMeta[id] || {};
+            return !isSpouseProperty(live);
+        });
+    }
+
     function portfolioStats() {
-        const ids = Object.keys(ledger);
+        const ids = ownPropertyIds();
         let total = 0, events = 0, totalDays = 0;
         const tenants = new Set();
         ids.forEach((id) => {
@@ -197,8 +273,8 @@
 
     function apiGet(path) {
         return new Promise((resolve, reject) => {
-            const key = (settings.apiKey || '').trim();
-            if (!key || key.length < 16) {
+            const key = String(settings.apiKey || '').trim().replace(/\s+/g, '');
+            if (!key || key.length < 14) {
                 reject(new Error(hubPresent()
                     ? 'Custom API key required — set it in Script Hub → Settings → Torn Rental Ledger (Generate User / Log key).'
                     : 'Custom API key required (Settings → Generate User / Log key).'));
@@ -301,7 +377,16 @@
             saveLedger();
             await enrichFromProperties();
         } catch (e) {
-            lastError = (e && e.message) ? e.message : String(e);
+            let msg = (e && e.message) ? e.message : String(e);
+            // Keep Torn's wording; add short hint
+            if (/incorrect key/i.test(msg)) {
+                msg = 'Incorrect key (Torn code 2) — key string not recognized. Re-copy from Torn popup, paste, Save, then Test key';
+            } else if (/access level|not high enough|code 16/i.test(msg)) {
+                msg = 'Access too low (Torn code 16) — need user=log on the key. Use Generate User / Log key';
+            } else if (/paused/i.test(msg)) {
+                msg = 'API key paused in Torn preferences — unpause it and retry';
+            }
+            lastError = msg;
             console.warn('[TRL]', lastError);
         } finally {
             syncing = false;
@@ -332,14 +417,25 @@
                 const name = (propertyObj && propertyObj.name) || p.name ||
                     (propertyObj && propertyObj.property && propertyObj.property.name) || '';
                 const status = p.status || propertyObj.status || '';
-                const costPerDay = Number(p.cost_per_day ?? propertyObj.cost_per_day ?? p.costPerDay ?? 0) || 0;
-                const period = Number(p.rental_period ?? propertyObj.rental_period ?? 0) || 0;
-                const remaining = Number(p.rental_period_remaining ?? propertyObj.rental_period_remaining ?? 0) || 0;
+                const rented = p.rented || p.rented_by || propertyObj.rented || propertyObj.rented_by || null;
+                // cost_per_day: top-level (v2) or nested under rented (v1)
+                const costPerDay = Number(
+                    p.cost_per_day ?? propertyObj.cost_per_day ?? p.costPerDay ??
+                    (rented && typeof rented === 'object' ? (rented.cost_per_day ?? rented.costPerDay) : null) ??
+                    0
+                ) || 0;
+                const period = Number(
+                    p.rental_period ?? propertyObj.rental_period ??
+                    (rented && typeof rented === 'object' ? rented.rental_period : null) ?? 0
+                ) || 0;
+                const remaining = Number(
+                    p.rental_period_remaining ?? propertyObj.rental_period_remaining ??
+                    (rented && typeof rented === 'object' ? (rented.days_left ?? rented.daysLeft ?? rented.rental_period_remaining) : null) ?? 0
+                ) || 0;
                 const happy = Number(p.happy ?? propertyObj.happy ?? (propertyObj.upgrades && propertyObj.upgrades.happy) ?? 0) || 0;
                 const upkeep = Number(p.upkeep ?? propertyObj.upkeep ?? p.cost ?? 0) || 0;
                 const typeName = (propertyObj && propertyObj.name) || (p.property && p.property.name) || name || '';
                 let renterId = '', renterName = '';
-                const rented = p.rented || p.rented_by || propertyObj.rented_by;
                 if (rented) {
                     if (typeof rented === 'object') {
                         renterId = String(rented.id || rented.user_id || rented.player_id || '');
@@ -388,44 +484,60 @@
         return p.ID || p.id || null;
     }
 
+    function extractPropertyIdFromHref(href) {
+        if (!href) return null;
+        const h = String(href);
+        // Never treat profile links as properties
+        if (/profiles\.php/i.test(h) || /[?&#]XID=/i.test(h)) return null;
+        // Property option / detail links
+        let m = h.match(/properties\.php[^#]*#?[^"]*[?&]ID=(\d+)/i);
+        if (m) return m[1];
+        m = h.match(/[?&#]ID=(\d+)/i);
+        if (m && /properties|p=options|p=image|p=yourProperties|p=property/i.test(h)) return m[1];
+        // Hash-only: #/p=options&ID=123
+        m = h.match(/#.*[?&]ID=(\d+)/i);
+        if (m) return m[1];
+        return null;
+    }
+
     function findPropertyRows() {
         const results = [];
         const seen = new Set();
         const candidates = document.querySelectorAll([
             'ul.properties-list > li', 'ul.your-properties > li', '.properties-list > li',
-            '[class*="property"][data-id]', '.property-info-wrap',
-            '.properties-page-wrap li[id]', 'li[id^="property"]', '.cont-gray[id]'
+            '[class*="property"][data-id]', '[class*="property"][data-property-id]',
+            '.property-info-wrap', '.properties-page-wrap li[id]',
+            'li[id^="property"]', '.cont-gray[id^="property"]'
         ].join(','));
         candidates.forEach((el) => {
             if (el.closest('.trl-ledger') || el.closest('#trl-chrome') || el.closest('#trl-portfolio')) return;
-            let id = el.getAttribute('data-id') || el.getAttribute('data-property-id') ||
-                (el.id && el.id.replace(/\D/g, '')) || null;
-            if (!id) {
-                const a = el.querySelector('a[href*="ID="], a[href*="p=options"]');
-                if (a) {
-                    const m = (a.getAttribute('href') || '').match(/ID=(\d+)/i);
-                    if (m) id = m[1];
-                }
+            let id = el.getAttribute('data-property-id') || el.getAttribute('data-id') || null;
+            // Element id like property5833499 — only if it clearly says property
+            if (!id && el.id && /property/i.test(el.id)) {
+                const m = el.id.match(/(\d{4,})/);
+                if (m) id = m[1];
             }
             if (!id) {
-                const a = el.querySelector('a[href*="#"]');
-                if (a) {
-                    const m = (a.getAttribute('href') || '').match(/ID=(\d+)/i);
-                    if (m) id = m[1];
+                // Prefer property links; skip profile/tenant links
+                const anchors = el.querySelectorAll('a[href]');
+                for (let i = 0; i < anchors.length; i++) {
+                    const href = anchors[i].getAttribute('href') || '';
+                    const pid = extractPropertyIdFromHref(href);
+                    if (pid) { id = pid; break; }
                 }
             }
             if (!id || seen.has(id)) return;
+            // Prefer IDs we already know from ledger/meta when ambiguous
             seen.add(id);
             results.push({ el, propertyId: String(id) });
         });
         if (!results.length) {
-            document.querySelectorAll('a[href*="ID="]').forEach((a) => {
-                const m = (a.getAttribute('href') || '').match(/ID=(\d+)/i);
-                if (!m) return;
-                const id = m[1];
-                if (seen.has(id)) return;
-                const row = a.closest('li, .property, .cont-gray, tr, .info-cont') || a.parentElement;
-                if (!row || row.closest('.trl-ledger') || row.closest('#trl-chrome')) return;
+            document.querySelectorAll('a[href*="properties.php"], a[href*="p=options"], a[href*="ID="]').forEach((a) => {
+                const href = a.getAttribute('href') || '';
+                const id = extractPropertyIdFromHref(href);
+                if (!id || seen.has(id)) return;
+                const row = a.closest('li, .property, .cont-gray, tr, .info-cont, [class*="property"]') || a.parentElement;
+                if (!row || row.closest('.trl-ledger') || row.closest('#trl-chrome') || row.closest('#trl-portfolio')) return;
                 seen.add(id);
                 results.push({ el: row, propertyId: String(id) });
             });
@@ -474,17 +586,30 @@
 .trl-ledger.dark .trl-badge.vacant, .trl-ledger.dark .trl-badge.for_rent, .trl-ledger.dark .trl-badge.none { background: #3a3218; color: #ffe08a; }
 .trl-badge.in_use { background: #cce5ff; color: #004085; }
 .trl-ledger.dark .trl-badge.in_use { background: #1a2a40; color: #9ec9ff; }
-.trl-table { width: 100%; border-collapse: collapse; min-width: 720px; }
+.trl-table { width: 100%; border-collapse: separate; border-spacing: 0; min-width: 0; }
+.trl-ledger .trl-table { min-width: 480px; }
 .trl-table th, .trl-table td {
-  padding: 4px 6px; text-align: left; border-bottom: 1px solid rgba(0,0,0,.06);
-  vertical-align: top; white-space: nowrap;
+  padding: 8px 12px; text-align: left;
+  border-bottom: 1px solid rgba(0,0,0,.06);
+  border-right: 1px solid rgba(0,0,0,.08);
+  vertical-align: middle; white-space: nowrap;
 }
-.trl-ledger.dark .trl-table th, .trl-ledger.dark .trl-table td { border-bottom-color: rgba(255,255,255,.06); }
+.trl-table th:last-child, .trl-table td:last-child { border-right: none; }
+.trl-ledger.dark .trl-table th, .trl-ledger.dark .trl-table td {
+  border-bottom-color: rgba(255,255,255,.08);
+  border-right-color: rgba(255,255,255,.08);
+}
 .trl-table th {
   font-size: 10px; text-transform: uppercase; opacity: .7; font-weight: 600;
   position: sticky; top: 0; background: var(--trl-bg, #f7f7f7);
+  cursor: help;
 }
 .trl-rent, .trl-run { font-weight: 600; }
+.trl-num { text-align: right !important; font-variant-numeric: tabular-nums; }
+.trl-table th.trl-num { text-align: right !important; }
+.trl-port-table { min-width: 0; width: 100%; table-layout: auto; }
+.trl-port-table th, .trl-port-table td { padding: 8px 10px; }
+#trl-portfolio .trl-body { overflow-x: auto; }
 .trl-empty { padding: 8px; opacity: .7; font-style: italic; }
 #trl-chrome {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; background: #f0f4f8;
@@ -507,10 +632,16 @@
 .trl-settings input[type="text"], .trl-settings input[type="password"], .trl-settings input[type="number"] {
   width: min(280px, 100%); padding: 4px 6px; margin-left: 6px;
 }
+.trl-key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0; }
+.trl-key-row input { flex: 1 1 180px; margin-left: 0 !important; min-width: 140px; }
+.trl-key-meta { font-size: 11px; opacity: .75; }
+.trl-key-ok { color: #1a7f37; font-weight: 600; }
+.trl-key-bad { color: #b00020; font-weight: 600; }
+.trl-ledger.dark .trl-key-ok, #trl-chrome.dark .trl-key-ok { color: #3dd68c; }
+.trl-ledger.dark .trl-key-bad, #trl-chrome.dark .trl-key-bad { color: #ff8a80; }
 .trl-chevron::before { content: '▸ '; }
 .trl-ledger.open .trl-chevron::before, #trl-portfolio.open .trl-chevron::before { content: '▾ '; }
 .trl-raw { font-family: monospace; font-size: 10px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; opacity: .65; }
-.trl-port-table { min-width: 640px; }
 .trl-hub-note { opacity: .8; font-size: 11px; }
 @media (max-width: 700px) {
   .trl-table { min-width: 560px; }
@@ -539,7 +670,13 @@
         const entries = (data.entries || []).slice(0, limit);
         const dark = isDarkTheme() ? ' dark' : '';
         const openClass = opts.startOpen ? ' open' : '';
-        const displayName = data.name || (live && live.name) || ('Property #' + propertyId);
+        // Prefer real name/type; avoid "Property #id" + "#id" double
+        let displayName = (data.name || (live && (live.name || live.typeName)) || '').trim();
+        const idStr = String(propertyId);
+        if (!displayName || displayName === '#' + idStr || displayName === idStr || displayName === 'Property #' + idStr) {
+            displayName = 'Property #' + idStr;
+        }
+        const showIdSuffix = displayName.indexOf(idStr) === -1;
 
         const wrap = document.createElement('div');
         wrap.className = 'trl-ledger' + dark + openClass;
@@ -550,7 +687,8 @@
         head.className = 'trl-head';
         head.innerHTML =
             '<span class="trl-title"><span class="trl-chevron"></span>' + escapeHtml(displayName) +
-            ' <span class="trl-meta">#' + escapeHtml(propertyId) + '</span></span>' +
+            (showIdSuffix ? ' <span class="trl-meta">#' + escapeHtml(idStr) + '</span>' : '') +
+            '</span>' +
             '<span class="trl-total" title="Accumulated rental income">' + fmtMoney(st.total) + '</span>' +
             '<span class="trl-meta">' + st.count + ' event' + (st.count === 1 ? '' : 's') +
             (st.uniqueTenants ? ' · ' + st.uniqueTenants + ' tenant' + (st.uniqueTenants === 1 ? '' : 's') : '') +
@@ -563,8 +701,9 @@
         let liveHtml = '';
         if (live) {
             const badgeClass = (live.status || 'none').replace(/\s+/g, '_');
+            const statusLabel = formatStatusLabel(live.status || live.rawStatus || '');
             liveHtml = '<div class="trl-live">' +
-                '<span class="trl-badge ' + escapeHtml(badgeClass) + '">' + escapeHtml(live.status || 'unknown') + '</span>' +
+                '<span class="trl-badge ' + escapeHtml(badgeClass) + '">' + escapeHtml(statusLabel) + '</span>' +
                 (live.remaining ? '<span>Days left: <b>' + fmtNum(live.remaining) + '</b></span>' : '') +
                 (live.costPerDay ? '<span>Current $/day: <b>' + fmtMoney(live.costPerDay) + '</b></span>' : '') +
                 (live.period ? '<span>Lease period: <b>' + fmtNum(live.period) + 'd</b></span>' : '') +
@@ -600,28 +739,31 @@
                 const perDay = e.costPerDay != null
                     ? fmtMoney(Math.round(e.costPerDay))
                     : (e.days > 0 ? fmtMoney(Math.round(e.rent / e.days)) : '—');
+                // Tenant column: linked profile (ID if no name)
                 return '<tr>' +
                     '<td>' + fmtDate(e.ts) + '</td>' +
                     '<td class="trl-rent">' + fmtMoney(e.rent) + '</td>' +
                     '<td>' + (e.days ? e.days + 'd' : '—') + '</td>' +
                     '<td>' + perDay + '</td>' +
                     '<td>' + tenantLink(e.renter, e.renterName) + '</td>' +
-                    '<td class="trl-hide-sm">' + (e.renter ? escapeHtml(e.renter) : '—') + '</td>' +
                     '<td>' + escapeHtml(typeLabel(e.type)) + '</td>' +
                     '<td class="trl-hide-sm">' + escapeHtml(e.title || '') + '</td>' +
                     '<td class="trl-run">' + fmtMoney(e.runningTotal) + '</td>' +
-                    '<td class="trl-hide-sm">' + escapeHtml(e.propertyName || data.name || '') + '</td>' +
-                    '<td class="trl-hide-sm">' + escapeHtml(String(e.id)) + '</td>' +
                     (showRaw ? '<td class="trl-raw trl-hide-sm" title="' + escapeHtml(JSON.stringify(e.raw || {})) + '">' +
                         escapeHtml(JSON.stringify(e.raw || {})) + '</td>' : '') +
                     '</tr>';
             }).join('');
             body.innerHTML = liveHtml + statsHtml +
                 '<table class="trl-table"><thead><tr>' +
-                '<th>When</th><th>Income</th><th>Days</th><th>$/day</th><th>Tenant</th>' +
-                '<th class="trl-hide-sm">Tenant ID</th><th>Type</th><th class="trl-hide-sm">Log title</th>' +
-                '<th>Running total</th><th class="trl-hide-sm">Property name</th><th class="trl-hide-sm">Log ID</th>' +
-                (showRaw ? '<th class="trl-hide-sm">Raw data</th>' : '') +
+                '<th title="Date the lease or extension was accepted">When</th>' +
+                '<th title="Money received for this lease or extension">Income</th>' +
+                '<th title="Length of this lease period in days">Days</th>' +
+                '<th title="Income ÷ days for this lease">$/day</th>' +
+                '<th title="Tenant who rented the property">Tenant</th>' +
+                '<th title="New lease vs extension of an existing lease">Type</th>' +
+                '<th class="trl-hide-sm" title="Torn activity log title for this event">Log title</th>' +
+                '<th title="Cumulative rental income for this property up to this event">Running total</th>' +
+                (showRaw ? '<th class="trl-hide-sm" title="Raw log payload from the Torn API">Raw data</th>' : '') +
                 '</tr></thead><tbody>' + rows + '</tbody></table>' +
                 (st.count > limit
                     ? '<div class="trl-meta" style="margin-top:6px">Showing ' + limit + ' of ' + st.count +
@@ -650,11 +792,14 @@
         head.addEventListener('click', function () { wrap.classList.toggle('open'); });
         const body = document.createElement('div');
         body.className = 'trl-body';
-        const rows = Object.keys(ledger).map(function (id) {
+        const rows = ownPropertyIds().map(function (id) {
             const b = ledger[id];
             const st = computeStats(b);
             const live = b.live || propertyMeta[id] || {};
-            return { id: id, name: b.name || live.name || live.typeName || ('#' + id), st: st, live: live };
+            let name = b.name || live.name || live.typeName || '';
+            // Avoid "Property #id" + separate ID when name is missing/redundant
+            if (!name || name === '#' + id || name === id) name = '#' + id;
+            return { id: id, name: name, st: st, live: live };
         }).sort(function (a, b) { return b.st.total - a.st.total; });
 
         if (!rows.length) {
@@ -669,23 +814,44 @@
                 '<span>Unique tenants: <b>' + port.uniqueTenants + '</b></span>' +
                 '<span>Total days leased: <b>' + fmtNum(port.totalDays) + '</b></span></div>' +
                 '<table class="trl-table trl-port-table"><thead><tr>' +
-                '<th>Property</th><th>ID</th><th>Lifetime</th><th>Events</th><th>New / Ext</th>' +
-                '<th>Avg lease</th><th>Avg $/day</th><th>Days leased</th><th>Tenants</th>' +
-                '<th>Status</th><th>Days left</th><th>Current $/day</th><th>Happy</th><th>Last rental</th>' +
+                '<th title="Property name or ID">Property</th>' +
+                '<th class="trl-num" title="Total rental income ever received for this property">Lifetime</th>' +
+                '<th class="trl-num" title="Count of new leases / extensions">New / Ext</th>' +
+                '<th class="trl-num" title="Average income per lease or extension">Avg lease</th>' +
+                '<th class="trl-num" title="Average of (income ÷ days) across past leases">Avg $/day</th>' +
+                '<th class="trl-num" title="Sum of all lease days from history (not current lease)">Days leased</th>' +
+                '<th class="trl-num" title="Unique tenants who have rented this property">Tenants</th>' +
+                '<th class="trl-num" title="Current listed $/day if rented; otherwise average/last lease rate from history">Rent $/day</th>' +
+                '<th class="trl-num" title="Property happiness from Torn">Happy</th>' +
                 '</tr></thead><tbody>' +
                 rows.map(function (r) {
-                    return '<tr><td>' + escapeHtml(r.name) + '</td><td>' + escapeHtml(r.id) + '</td>' +
-                        '<td class="trl-rent">' + fmtMoney(r.st.total) + '</td><td>' + r.st.count + '</td>' +
-                        '<td>' + r.st.newLeases + ' / ' + r.st.extensions + '</td>' +
-                        '<td>' + fmtMoney(Math.round(r.st.avgRent)) + '</td>' +
-                        '<td>' + (r.st.avgPerDay ? fmtMoney(Math.round(r.st.avgPerDay)) : '—') + '</td>' +
-                        '<td>' + fmtNum(r.st.totalDays) + '</td><td>' + r.st.uniqueTenants + '</td>' +
-                        '<td><span class="trl-badge ' + (r.live.status || '').replace(/\s+/g, '_') + '">' +
-                        escapeHtml(r.live.status || '—') + '</span></td>' +
-                        '<td>' + (r.live.remaining != null && r.live.remaining !== '' ? fmtNum(r.live.remaining) : '—') + '</td>' +
-                        '<td>' + (r.live.costPerDay ? fmtMoney(r.live.costPerDay) : '—') + '</td>' +
-                        '<td>' + (r.live.happy ? fmtNum(r.live.happy) : '—') + '</td>' +
-                        '<td>' + fmtDateShort(r.st.lastTs) + '</td></tr>';
+                    let cpd = Number(r.live.costPerDay);
+                    // Fallback: most recent lease rate from ledger history
+                    if (!(Number.isFinite(cpd) && cpd > 0) && r.st.avgPerDay) {
+                        cpd = r.st.avgPerDay;
+                    }
+                    if (!(Number.isFinite(cpd) && cpd > 0) && r.st.count) {
+                        const ents = (ledger[r.id] && ledger[r.id].entries) || [];
+                        for (let i = 0; i < ents.length; i++) {
+                            const e = ents[i];
+                            if (e.costPerDay > 0) { cpd = e.costPerDay; break; }
+                            if (e.days > 0 && e.rent > 0) { cpd = e.rent / e.days; break; }
+                        }
+                    }
+                    const rentDay = (Number.isFinite(cpd) && cpd > 0) ? fmtMoney(Math.round(cpd)) : '—';
+                    return '<tr>' +
+                        '<td>' + escapeHtml(r.name) +
+                        (r.name.indexOf('#') === 0 ? '' : ' <span class="trl-meta">#' + escapeHtml(r.id) + '</span>') +
+                        '</td>' +
+                        '<td class="trl-rent trl-num">' + fmtMoney(r.st.total) + '</td>' +
+                        '<td class="trl-num">' + r.st.newLeases + ' / ' + r.st.extensions + '</td>' +
+                        '<td class="trl-num">' + fmtMoney(Math.round(r.st.avgRent)) + '</td>' +
+                        '<td class="trl-num">' + (r.st.avgPerDay ? fmtMoney(Math.round(r.st.avgPerDay)) : '—') + '</td>' +
+                        '<td class="trl-num">' + fmtNum(r.st.totalDays) + '</td>' +
+                        '<td class="trl-num">' + r.st.uniqueTenants + '</td>' +
+                        '<td class="trl-num">' + rentDay + '</td>' +
+                        '<td class="trl-num">' + (r.live.happy ? fmtNum(r.live.happy) : '—') + '</td>' +
+                        '</tr>';
                 }).join('') +
                 '</tbody></table>';
         }
@@ -757,7 +923,7 @@
 
     function injectDetailLedger(propertyId) {
         if (document.querySelector('.trl-ledger[data-property-id="' + propertyId + '"]')) return;
-        const panel = buildLedgerPanel(propertyId, { startOpen: true });
+        const panel = buildLedgerPanel(propertyId, { startOpen: false });
         const host = document.getElementById('trl-portfolio') ||
             document.getElementById('trl-chrome') ||
             document.querySelector('#properties-page-wrap .content-title') ||
@@ -796,10 +962,15 @@
             '<button type="button" data-act="csv">CSV</button>' +
             '<button type="button" data-act="settings">Settings</button>' +
             '<div class="trl-settings" id="trl-settings">' +
-            '<label>Custom API key <input type="password" id="trl-apikey" placeholder="16+ character Torn custom key" autocomplete="off" /></label>' +
+            '<div class="trl-key-row">' +
+            '<input type="password" id="trl-apikey" placeholder="Paste 16-char Torn custom key" autocomplete="off" spellcheck="false" />' +
+            '<button type="button" data-act="toggle-key" title="Show / hide key">👁</button>' +
+            '<button type="button" data-act="test-key">Test key</button>' +
+            '<span class="trl-key-meta" id="trl-key-meta"></span>' +
+            '</div>' +
             '<p class="trl-meta" style="margin:4px 0 8px">' +
             '<a class="trl-link" href="' + API_PREFS_URL + '" target="_blank" rel="noopener">Generate User / Log key</a>' +
-            ' — opens Torn pre-filled for RentalLedger (User → Log + Properties). Create, then paste below.</p>' +
+            ' — Torn pre-fills <code>user=log,properties</code>. Confirm popup → copy full key → paste → <b>Save</b> → Sync.</p>' +
             '<label>Entries shown per property <input type="number" id="trl-entries" min="3" max="100" /></label>' +
             '<label><input type="checkbox" id="trl-autosync" /> Auto-sync when opening properties</label>' +
             '<label><input type="checkbox" id="trl-list" /> Show ledger on property list</label>' +
@@ -817,13 +988,26 @@
             if (act === 'sync') syncLogs(false);
             if (act === 'full') syncLogs(true);
             if (act === 'csv') exportCsv();
+            if (act === 'toggle-key') {
+                const inp = chromeEl.querySelector('#trl-apikey');
+                if (!inp) return;
+                inp.type = inp.type === 'password' ? 'text' : 'password';
+                btn.textContent = inp.type === 'password' ? '👁' : '🙈';
+                return;
+            }
+            if (act === 'test-key') {
+                testApiKey();
+                return;
+            }
             if (act === 'settings') {
                 chromeEl.querySelector('.trl-settings').classList.toggle('open');
                 fillSettingsForm();
             }
             if (act === 'save') {
-                const key = (chromeEl.querySelector('#trl-apikey').value || '').trim();
-                if (key) settings.apiKey = key.slice(0, 64);
+                const raw = (chromeEl.querySelector('#trl-apikey').value || '');
+                const key = raw.trim().replace(/\s+/g, '');
+                if (key) persistApiKey(key);
+                // empty field = keep existing key (browser may clear password fields)
                 const n = Number(chromeEl.querySelector('#trl-entries').value);
                 if (Number.isFinite(n)) settings.entriesShown = Math.max(3, Math.min(100, Math.round(n)));
                 settings.autoSync = !!chromeEl.querySelector('#trl-autosync').checked;
@@ -832,9 +1016,14 @@
                 settings.showPortfolio = !!chromeEl.querySelector('#trl-portfolio').checked;
                 settings.showRawData = !!chromeEl.querySelector('#trl-raw').checked;
                 saveSettings();
-                chromeEl.querySelector('.trl-settings').classList.remove('open');
+                updateKeyMeta();
+                lastError = '';
+                updateChromeStatus();
+                // Keep settings open so user can confirm Test
                 renderAllLedgers();
-                if (settings.autoSync && settings.apiKey) syncLogs(false);
+                testApiKey().then(function (ok) {
+                    if (ok && settings.autoSync) syncLogs(false);
+                });
             }
         });
 
@@ -863,6 +1052,77 @@
             const el = chromeEl.querySelector(sel);
             if (el) el.checked = !!settings[map[sel]];
         });
+        updateKeyMeta();
+    }
+
+    function updateKeyMeta() {
+        if (!chromeEl) return;
+        const meta = chromeEl.querySelector('#trl-key-meta');
+        if (!meta) return;
+        const k = String(settings.apiKey || '').trim();
+        if (!k) {
+            meta.className = 'trl-key-meta trl-key-bad';
+            meta.textContent = 'No key saved';
+            return;
+        }
+        meta.className = 'trl-key-meta';
+        meta.textContent = 'Saved: ' + k.length + ' chars · ends …' + k.slice(-4);
+    }
+
+    async function testApiKey() {
+        const meta = chromeEl && chromeEl.querySelector('#trl-key-meta');
+        // Prefer value currently in the input (may not be saved yet)
+        const inp = chromeEl && chromeEl.querySelector('#trl-apikey');
+        if (inp) {
+            const typed = (inp.value || '').trim().replace(/\s+/g, '');
+            if (typed) persistApiKey(typed);
+        }
+        const k = String(settings.apiKey || '').trim();
+        if (!k) {
+            lastError = 'No key to test — paste a key first';
+            if (meta) { meta.className = 'trl-key-meta trl-key-bad'; meta.textContent = 'No key'; }
+            updateChromeStatus();
+            return false;
+        }
+        if (meta) { meta.className = 'trl-key-meta'; meta.textContent = 'Testing…'; }
+        lastError = '';
+        updateChromeStatus();
+        try {
+            // Lightweight call — timestamp is public; proves key is recognized by Torn
+            const data = await apiGet('/user/?selections=timestamp');
+            if (data && data.error) throw new Error(data.error.error || JSON.stringify(data.error));
+            // Second check: log permission (what we actually need)
+            try {
+                await apiGet('/user/?selections=log&log=5937&limit=1');
+                // Persist immediately so reload keeps the working key
+                persistApiKey(k);
+                if (meta) {
+                    meta.className = 'trl-key-meta trl-key-ok';
+                    meta.textContent = 'OK · ' + k.length + ' chars · log access works · saved';
+                }
+                lastError = '';
+                updateChromeStatus();
+                return true;
+            } catch (logErr) {
+                const m = (logErr && logErr.message) ? logErr.message : String(logErr);
+                if (meta) {
+                    meta.className = 'trl-key-meta trl-key-bad';
+                    meta.textContent = 'Key accepted, but log access failed: ' + m;
+                }
+                lastError = 'Key OK but no log access — regenerate with user=log,properties. ' + m;
+                updateChromeStatus();
+                return false;
+            }
+        } catch (e) {
+            const m = (e && e.message) ? e.message : String(e);
+            if (meta) {
+                meta.className = 'trl-key-meta trl-key-bad';
+                meta.textContent = m;
+            }
+            lastError = m;
+            updateChromeStatus();
+            return false;
+        }
     }
 
     function updateChromeStatus() {
@@ -916,7 +1176,7 @@
                         key: 'generateKey', type: 'button',
                         label: 'Generate User / Log key',
                         url: API_PREFS_URL,
-                        hint: 'Opens Torn API key page pre-filled for RentalLedger (User → Log + Properties). Create the key, then paste it above.'
+                        hint: 'Opens Torn pre-filled: title RentalLedger, selections user=log,properties. Confirm the key popup, copy the full key, paste above, Sync.'
                     },
                     {
                         key: 'syncNow', type: 'button', label: 'Sync rental logs now',
@@ -950,8 +1210,8 @@
                 onSave: function (values) {
                     if (!values || typeof values !== 'object') return;
                     if (typeof values.apiKey === 'string') {
-                        const t = values.apiKey.trim();
-                        if (t) settings.apiKey = t.slice(0, 64);
+                        const t = values.apiKey.trim().replace(/\s+/g, '');
+                        if (t) persistApiKey(t);
                         else if (!settings.apiKey) settings.apiKey = '';
                     }
                     if (values.entriesShown != null && values.entriesShown !== '') {
@@ -1021,7 +1281,14 @@
 
     setInterval(function () {
         if (!/properties\.php/i.test(location.pathname)) return;
-        updateChromeStatus();
+        // Hub may inject sidebar after first boot — strip setup chrome when it appears
+        if (hubPresent()) {
+            const stray = document.getElementById('trl-chrome');
+            if (stray) stray.remove();
+            chromeEl = null;
+        } else {
+            updateChromeStatus();
+        }
     }, POLL_MS);
 
     console.log('[TRL] Torn Rental Ledger ' + VERSION + ' loaded (hub=' + hubPresent() + ')');
