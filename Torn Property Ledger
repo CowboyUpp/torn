@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Rental Ledger
+// @name         Torn Rental Ledger
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.4
+// @version      1.3.5
 // @description  Rich per-property rental income ledger on yourProperties. Hub users: all settings in Script Hub. Custom User/Log API key (pre-filled Generate). Desktop, PDA, Hub.
 // @author       CowboyUp
 // @match        https://www.torn.com/properties.php*
@@ -20,7 +20,12 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.3.4';
+    const VERSION = '1.3.5';
+    // v1.3.5 — Fix v1 properties parsing (property is a string, not an object) so live
+    // status/cost/happy/upkeep actually populate; badge class now uses a normalized
+    // status token instead of the raw Torn string; explicit &limit=100 on log sync;
+    // enrichFromProperties failures now surface in the status bar instead of failing
+    // silently; Test key now also checks properties access, not just log access.
     // v1.3.4 — Detail panel starts closed; no duplicate #id in header; "Owned by you" label.
     // v1.3.3 — GreasyFork 592376 download/update URLs.
     // v1.3.2 — findPropertyRows: never treat tenant profile XID as property ID.
@@ -197,6 +202,19 @@
         // Title-case simple tokens
         return String(status).replace(/_/g, ' ');
     }
+    // Normalized token used for both the badge CSS class and status branching —
+    // keeps the visual class in sync with formatStatusLabel's own logic instead
+    // of building the class from the raw, unnormalized Torn string.
+    function statusToken(status) {
+        const s = String(status || '').toLowerCase().trim();
+        if (!s || s === 'unknown') return 'none';
+        if (s.includes('owned by them') || s === 'in_use' || s.includes('you and your spouse are living')) return 'in_use';
+        if (s.includes('owned by their spouse') || (s.includes('spouse') && s.includes('owned'))) return 'in_use';
+        if (s === 'rented' || s.includes('leased to')) return 'rented';
+        if (s === 'for_rent' || s.includes('for rent')) return 'for_rent';
+        if (s === 'none' || s === 'vacant' || !s) return 'none';
+        return s.replace(/\s+/g, '_');
+    }
     function escapeHtml(s) {
         return String(s ?? '')
             .replace(/&/g, '&amp;')
@@ -323,7 +341,8 @@
             let newestTs = lastSyncTs;
             let toParam = null;
             while (pages < MAX_PAGES_PER_SYNC) {
-                let path = '/user/?selections=log&log=' + LOG_TYPES;
+                // Explicit limit — never rely on Torn's undocumented default page size.
+                let path = '/user/?selections=log&log=' + LOG_TYPES + '&limit=' + LOG_PAGE_SIZE;
                 if (toParam) path += '&to=' + toParam;
                 const data = await apiGet(path);
                 const logs = data.log || {};
@@ -395,70 +414,108 @@
         }
     }
 
+    // Normalizes a single v1/v2 property record into our internal meta shape.
+    // v1's `user?selections=properties` returns `property` as a STRING (the
+    // property type name, e.g. "Mansion") sitting alongside the real fields on
+    // the record itself — it is NOT a nested details object. Treating
+    // `p.property` as an object (the old `propertyObj = p.property || p`
+    // logic) silently produced `undefined` for every field read off it.
+    function normalizePropertyRecord(id, p, apiVersion) {
+        const propertyObj = (p && typeof p.property === 'object' && p.property) ? p.property : p;
+        const typeName = (typeof p.property === 'string' ? p.property : '') ||
+            (propertyObj && (propertyObj.property_type_name || propertyObj.name)) || '';
+        const name = (propertyObj && propertyObj.name) || p.name || typeName || '';
+        // v1 uses current_status; v2 tends to use status. Check both, plus a
+        // couple of older/alternate spellings seen in the wild.
+        const status = pickFirst(p, ['current_status', 'status']) ||
+            pickFirst(propertyObj || {}, ['current_status', 'status']) || '';
+        const rented = p.rented || p.rented_by || (propertyObj && (propertyObj.rented || propertyObj.rented_by)) || null;
+        const costPerDay = Number(
+            pickFirst(p, ['cost_per_day', 'costPerDay']) ??
+            pickFirst(propertyObj || {}, ['cost_per_day', 'costPerDay']) ??
+            (rented && typeof rented === 'object' ? pickFirst(rented, ['cost_per_day', 'costPerDay']) : null) ?? 0
+        ) || 0;
+        const period = Number(
+            pickFirst(p, ['rental_period']) ??
+            pickFirst(propertyObj || {}, ['rental_period']) ??
+            (rented && typeof rented === 'object' ? rented.rental_period : null) ?? 0
+        ) || 0;
+        const remaining = Number(
+            pickFirst(p, ['rental_period_remaining', 'days_left']) ??
+            pickFirst(propertyObj || {}, ['rental_period_remaining', 'days_left']) ??
+            (rented && typeof rented === 'object' ? pickFirst(rented, ['days_left', 'daysLeft', 'rental_period_remaining']) : null) ?? 0
+        ) || 0;
+        const happy = Number(
+            pickFirst(p, ['happy']) ??
+            (propertyObj && propertyObj.upgrades && propertyObj.upgrades.happy) ?? 0
+        ) || 0;
+        const upkeep = Number(pickFirst(p, ['upkeep', 'cost']) ?? 0) || 0;
+        let renterId = '', renterName = '';
+        if (rented) {
+            if (typeof rented === 'object') {
+                renterId = String(rented.id || rented.user_id || rented.player_id || '');
+                renterName = rented.name || rented.playername || '';
+            } else {
+                renterId = String(rented);
+            }
+        }
+        const usedBy = p.used_by || (propertyObj && propertyObj.used_by);
+        if (!renterId && Array.isArray(usedBy) && usedBy.length) {
+            const u = usedBy[0];
+            renterId = String(u.id || u.user_id || '');
+            renterName = u.name || '';
+        }
+        return {
+            status, costPerDay, period, remaining, renterId, renterName,
+            happy, upkeep, typeName: typeName || name, name: name || typeName,
+            rawStatus: status, apiVersion
+        };
+    }
+
     async function enrichFromProperties() {
+        let props = {};
+        let apiVersion = null;
+        let v1Err = null, v2Err = null;
         try {
-            let props = {};
-            try {
-                const data = await apiGet('/user/?selections=properties');
-                props = data.properties || {};
-            } catch (_) {
-                try {
-                    const data = await apiGet('/v2/user/properties?filters=ownedByUser');
-                    if (Array.isArray(data.properties)) {
-                        data.properties.forEach((p) => { if (p && p.id != null) props[p.id] = p; });
-                    } else {
-                        props = data.properties || data || {};
-                    }
-                } catch (__) {}
-            }
-            for (const [id, p] of Object.entries(props)) {
-                const pid = String(id);
-                const propertyObj = p.property || p;
-                const name = (propertyObj && propertyObj.name) || p.name ||
-                    (propertyObj && propertyObj.property && propertyObj.property.name) || '';
-                const status = p.status || propertyObj.status || '';
-                const rented = p.rented || p.rented_by || propertyObj.rented || propertyObj.rented_by || null;
-                // cost_per_day: top-level (v2) or nested under rented (v1)
-                const costPerDay = Number(
-                    p.cost_per_day ?? propertyObj.cost_per_day ?? p.costPerDay ??
-                    (rented && typeof rented === 'object' ? (rented.cost_per_day ?? rented.costPerDay) : null) ??
-                    0
-                ) || 0;
-                const period = Number(
-                    p.rental_period ?? propertyObj.rental_period ??
-                    (rented && typeof rented === 'object' ? rented.rental_period : null) ?? 0
-                ) || 0;
-                const remaining = Number(
-                    p.rental_period_remaining ?? propertyObj.rental_period_remaining ??
-                    (rented && typeof rented === 'object' ? (rented.days_left ?? rented.daysLeft ?? rented.rental_period_remaining) : null) ?? 0
-                ) || 0;
-                const happy = Number(p.happy ?? propertyObj.happy ?? (propertyObj.upgrades && propertyObj.upgrades.happy) ?? 0) || 0;
-                const upkeep = Number(p.upkeep ?? propertyObj.upkeep ?? p.cost ?? 0) || 0;
-                const typeName = (propertyObj && propertyObj.name) || (p.property && p.property.name) || name || '';
-                let renterId = '', renterName = '';
-                if (rented) {
-                    if (typeof rented === 'object') {
-                        renterId = String(rented.id || rented.user_id || rented.player_id || '');
-                        renterName = rented.name || rented.playername || '';
-                    } else renterId = String(rented);
-                }
-                const usedBy = p.used_by || propertyObj.used_by;
-                if (!renterId && Array.isArray(usedBy) && usedBy.length) {
-                    const u = usedBy[0];
-                    renterId = String(u.id || u.user_id || '');
-                    renterName = u.name || '';
-                }
-                propertyMeta[pid] = {
-                    status, costPerDay, period, remaining, renterId, renterName,
-                    happy, upkeep, typeName, name: name || typeName, rawStatus: status
-                };
-                if (!ledger[pid]) ledger[pid] = { total: 0, entries: [], name: name || typeName };
-                else if (name || typeName) ledger[pid].name = name || typeName || ledger[pid].name;
-                ledger[pid].live = propertyMeta[pid];
-            }
-            saveLedger();
+            const data = await apiGet('/user/?selections=properties');
+            props = data.properties || {};
+            apiVersion = 'v1';
         } catch (e) {
-            console.warn('[TRL] enrichFromProperties', e);
+            v1Err = e;
+            try {
+                const data = await apiGet('/v2/user/properties?filters=ownedByUser');
+                if (Array.isArray(data.properties)) {
+                    data.properties.forEach((p) => { if (p && p.id != null) props[p.id] = p; });
+                } else {
+                    props = data.properties || data || {};
+                }
+                apiVersion = 'v2';
+            } catch (e2) {
+                v2Err = e2;
+            }
+        }
+        if (apiVersion) {
+            try {
+                for (const [id, p] of Object.entries(props)) {
+                    const pid = String(id);
+                    propertyMeta[pid] = normalizePropertyRecord(pid, p, apiVersion);
+                    if (!ledger[pid]) ledger[pid] = { total: 0, entries: [], name: propertyMeta[pid].name };
+                    else if (propertyMeta[pid].name) ledger[pid].name = propertyMeta[pid].name || ledger[pid].name;
+                    ledger[pid].live = propertyMeta[pid];
+                }
+                saveLedger();
+            } catch (e) {
+                console.warn('[TRL] enrichFromProperties: failed to apply property data', e);
+            }
+        } else {
+            // Both v1 and v2 failed — surface it instead of failing silently,
+            // so a broken/insufficient-scope key doesn't look like "no data yet".
+            const msg = 'Live property data unavailable — ' +
+                ((v1Err && v1Err.message) || (v2Err && v2Err.message) || 'properties selection failed') +
+                '. Check the key has "properties" access.';
+            console.warn('[TRL] enrichFromProperties failed (v1 & v2):', v1Err, v2Err);
+            if (!lastError) lastError = msg;
+            updateChromeStatus();
         }
     }
 
@@ -700,7 +757,7 @@
 
         let liveHtml = '';
         if (live) {
-            const badgeClass = (live.status || 'none').replace(/\s+/g, '_');
+            const badgeClass = statusToken(live.status || live.rawStatus || '');
             const statusLabel = formatStatusLabel(live.status || live.rawStatus || '');
             liveHtml = '<div class="trl-live">' +
                 '<span class="trl-badge ' + escapeHtml(badgeClass) + '">' + escapeHtml(statusLabel) + '</span>' +
@@ -1091,28 +1148,46 @@
             // Lightweight call — timestamp is public; proves key is recognized by Torn
             const data = await apiGet('/user/?selections=timestamp');
             if (data && data.error) throw new Error(data.error.error || JSON.stringify(data.error));
-            // Second check: log permission (what we actually need)
+            // Second check: log permission (what we actually need for the ledger)
+            let logOk = false, logMsg = '';
             try {
                 await apiGet('/user/?selections=log&log=5937&limit=1');
-                // Persist immediately so reload keeps the working key
-                persistApiKey(k);
+                logOk = true;
+            } catch (logErr) {
+                logMsg = (logErr && logErr.message) ? logErr.message : String(logErr);
+            }
+            // Third check: properties permission (what we need for live status/happy/upkeep) —
+            // testing this too so a log-only key doesn't come back looking fully green.
+            let propsOk = false, propsMsg = '';
+            try {
+                await apiGet('/user/?selections=properties');
+                propsOk = true;
+            } catch (propErr) {
+                propsMsg = (propErr && propErr.message) ? propErr.message : String(propErr);
+            }
+
+            persistApiKey(k);
+            if (logOk && propsOk) {
                 if (meta) {
                     meta.className = 'trl-key-meta trl-key-ok';
-                    meta.textContent = 'OK · ' + k.length + ' chars · log access works · saved';
+                    meta.textContent = 'OK · ' + k.length + ' chars · log + properties access work · saved';
                 }
                 lastError = '';
                 updateChromeStatus();
                 return true;
-            } catch (logErr) {
-                const m = (logErr && logErr.message) ? logErr.message : String(logErr);
-                if (meta) {
-                    meta.className = 'trl-key-meta trl-key-bad';
-                    meta.textContent = 'Key accepted, but log access failed: ' + m;
-                }
-                lastError = 'Key OK but no log access — regenerate with user=log,properties. ' + m;
-                updateChromeStatus();
-                return false;
             }
+            const missing = [];
+            if (!logOk) missing.push('log (' + logMsg + ')');
+            if (!propsOk) missing.push('properties (' + propsMsg + ')');
+            const summary = 'Key accepted but missing access: ' + missing.join('; ') +
+                '. Regenerate with user=log,properties.';
+            if (meta) {
+                meta.className = 'trl-key-meta trl-key-bad';
+                meta.textContent = summary;
+            }
+            lastError = summary;
+            updateChromeStatus();
+            return false;
         } catch (e) {
             const m = (e && e.message) ? e.message : String(e);
             if (meta) {
