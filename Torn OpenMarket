@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.4.2
+// @version      1.4.5
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,6 +15,39 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
+// CHANGELOG 1.4.5:
+// - Root cause of the inventory quality/bonus text overlapping the price/accuracy
+//   columns (1.4.3/1.4.4 tried and failed to fix this) confirmed via a real DOM dump:
+//   the inventory row is Torn's fixed-height (30px) single-line compact layout, with
+//   title-wrap and cont-wrap (price/accuracy/etc.) as fixed-width columns sharing
+//   that one line — there is no vertical wrapping involved. The injected bonus text
+//   was simply wider than the available column space, so it visually overlapped the
+//   next column regardless of any max-width/ellipsis truncation applied to the text,
+//   since even truncated text can still be wider than the room actually available.
+//   The full bonus text is no longer inserted into the row at all — only the short
+//   "Q XX.X%" quality badge (reliably narrow) plus a small "ⓘ" icon are added; tapping
+//   the icon shows the full bonus list via alert(), same as 1.4.4's approach, minus
+//   the wide text that was causing the collision.
+// - The click-to-reveal handler on inventory bonus text (added in 1.4.3) was
+//   intercepting the same click used to open/expand the equipped item row, since it
+//   sat directly on that click target and called stopPropagation()/preventDefault().
+//   The bonus text is now non-interactive again; a separate small "ⓘ" icon appended
+//   after it carries the tap-to-reveal alert() instead, so normal row clicks pass
+//   through untouched.
+//
+// CHANGELOG 1.4.3:
+// - Fixed inventory quality/bonus text visually overlapping adjacent row columns
+//   (price, accuracy) on rows with several bonuses, most visibly on the highlighted
+//   "currently equipped" row. .openmarket-inventory-meta/.openmarket-inventory-bonuses
+//   previously allowed wrapping onto a second line, which on some row layouts doesn't
+//   push the row taller and instead overlaps content beside it. Both are now
+//   single-line with ellipsis truncation, so they can never grow taller than expected.
+// - Since truncation hides the full bonus text, a tap/click handler on the bonus span
+//   now shows it via alert(). A hover title attribute alone would only work on
+//   desktop — Torn PDA and other touch devices have no hover state, so relying on
+//   hover would make truncated info completely unreachable there. The title attribute
+//   is kept too, as a harmless bonus for desktop mouse users.
+//
 // CHANGELOG 1.4.2:
 // - processItem() now calls markProcessed(el, key) on every exit path, including
 //   when calcQuality() returns null (item ID not in BASE_STATS_MAP) or when the
@@ -1334,20 +1367,48 @@
                     }
 
                     if (bonuses.length > 0) {
-                        const bonusContainer = create('span', {
-                            className: 'openmarket-bonuses openmarket-inventory-bonuses',
+                        // FIX (1.4.5): earlier attempts (1.4.3/1.4.4) tried to fit the
+                        // full bonus text inline next to the item name, truncated or
+                        // not. Confirmed via a real DOM dump that this row is Torn's
+                        // fixed-height (30px) single-line compact inventory row —
+                        // title-wrap and cont-wrap (price/accuracy/etc.) are laid out
+                        // as fixed-width columns sharing that one line, not stacked.
+                        // There is no vertical wrapping happening; the bonus text was
+                        // simply wider than the sliver of column space actually
+                        // available before the price/accuracy column starts, so it
+                        // visually overlapped that column regardless of any max-width/
+                        // ellipsis truncation applied to the text itself — truncating
+                        // the text doesn't help if even the truncated width is still
+                        // wider than the available room. Only the short "Q XX.X%"
+                        // badge is reliably narrow enough to coexist safely; the full
+                        // bonus text is no longer inserted into the row at all. A
+                        // small "ⓘ" icon (same tap-to-reveal approach as 1.4.4) is the
+                        // only addition, since its width is negligible regardless of
+                        // column layout.
+                        const fullBonusText = bonuses
+                            .map(b => {
+                                if (FIXED_BONUSES.includes(b.title)) return b.title;
+                                const unit = getUnitFromDescription(b.description, b.value);
+                                return b.value != null ? `${b.title}: ${b.value}${unit}` : b.title;
+                            })
+                            .join(' · ');
+
+                        const infoIcon = create('span', {
+                            textContent: 'ⓘ',
+                            title: fullBonusText,
                             style: {
-                                display: 'inline',
-                                color: getBonusColour()
+                                marginLeft: '3px',
+                                cursor: 'pointer',
+                                opacity: '0.75',
+                                fontSize: '11px'
                             }
                         });
-                        bonuses.forEach((bonus, i) => {
-                            if (i > 0) {
-                                bonusContainer.appendChild(document.createTextNode(' · '));
-                            }
-                            bonusContainer.appendChild(createBonusEl(bonus));
+                        infoIcon.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            alert(fullBonusText);
                         });
-                        meta.appendChild(bonusContainer);
+                        meta.appendChild(infoIcon);
                     }
 
                     if (meta.childNodes.length > 0) {
@@ -1522,19 +1583,17 @@
         .openmarket-bonuses div {
             font-size: 11px !important;
         }
-        .openmarket-inventory-bonuses {
-            max-width: 280px;
-            white-space: normal;
-        }
-        .openmarket-inventory-bonuses div {
-            display: inline;
-            font-size: 11px !important;
-        }
         .openmarket-inventory-quality {
             white-space: nowrap;
         }
         .openmarket-inventory-meta {
-            max-width: 320px;
+            /* FIX (1.4.5): .openmarket-inventory-bonuses truncation rules removed —
+               the full bonus text is no longer inserted inline on the compact
+               single-line inventory row at all (see processAll() comment), only the
+               short quality badge and a small icon, so no width constraint is needed
+               here anymore either. */
+            display: inline-flex;
+            align-items: center;
         }
     `;
         const style = document.createElement('style');
