@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.6
+// @version      1.2.7
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display.
 // @author       cowboyup
 // @license      MIT
@@ -21,14 +21,14 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.6';
+  const VERSION = '1.2.7';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
   const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlusLogs&user=log';
   const BUST_LOG_ID = 5360;
   const HUB_ID = 'bustr-plus';
-  const CACHE_TTL_HOF = 60 * 60 * 1000; // 1 hour
+  const CACHE_TTL_TOTAL = 60 * 60 * 1000; // 1 hour
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -54,8 +54,8 @@
     penaltyScore: 0,
     penaltyThreshold: 0,
     availableBusts: null,
-    totalBusts: null, // Renamed from hofRank
-    isScrapingHof: false,
+    totalBusts: null,
+    isScrapingTotal: false,
     lastFetchMs: 0,
     lastLocalBustMs: 0,
     lastLocalBustSignature: '',
@@ -138,12 +138,12 @@
   }
 
   // =========================================================================
-  // TOTAL BUSTS INTEGRATION (Formerly HOF Rank)
+  // TOTAL BUSTS FROM PERSONAL STATS
   // =========================================================================
   function getCachedTotalBusts() {
     const raw = store.get('totalBusts', null);
-    if (!raw || typeof raw !== 'object' || !raw.count || !raw.ts) return null;
-    if (Date.now() - raw.ts < CACHE_TTL_HOF) {
+    if (!raw || typeof raw !== 'object' || raw.count === null || !raw.ts) return null;
+    if (Date.now() - raw.ts < CACHE_TTL_TOTAL) {
       return raw.count;
     }
     return null;
@@ -154,19 +154,17 @@
     state.totalBusts = count;
   }
 
-  function extractTotalBustsFromDOM(root) {
-    const boxes = root.querySelectorAll('[class*="infoBox"]');
-    for (const box of boxes) {
-      // Specifically look for the "Busts" category
-      if (!/busts/i.test(box.textContent)) continue;
-      
-      // Find all numbers in the box (e.g., "#1,234" and "7,500")
-      const numbers = box.textContent.match(/#?\d[\d,]*/g);
-      if (numbers) {
-        // The total count is the number that DOES NOT start with a '#'
-        const total = numbers.find(n => !n.startsWith('#'));
-        if (total) {
-          return parseInt(total.replace(/,/g, ''), 10);
+  function extractTotalBustsFromPersonalStats(root) {
+    // Look for the "People busted" stat on the personal stats page
+    // It's usually in a table row like: <tr><td>People busted</td><td>8,857</td></tr>
+    const rows = root.querySelectorAll('tr, [class*="row"]');
+    for (const row of rows) {
+      const text = row.textContent || '';
+      if (/people\s+busted/i.test(text)) {
+        // Extract the number from the row
+        const match = text.match(/(\d[\d,]+)/);
+        if (match) {
+          return parseInt(match[1].replace(/,/g, ''), 10);
         }
       }
     }
@@ -174,13 +172,13 @@
   }
 
   function scrapeTotalBusts() {
-    if (state.isScrapingHof || !state.settings.enabled) return;
-    state.isScrapingHof = true;
+    if (state.isScrapingTotal || !state.settings.enabled) return;
+    state.isScrapingTotal = true;
     
-    document.querySelector('#bustr-hof-iframe')?.remove();
+    document.querySelector('#bustr-stats-iframe')?.remove();
     const iframe = document.createElement('iframe');
-    iframe.id = 'bustr-hof-iframe';
-    iframe.src = 'https://www.torn.com/page.php?sid=hof';
+    iframe.id = 'bustr-stats-iframe';
+    iframe.src = 'https://www.torn.com/personalstats.php?stats=peoplebusted&from=All';
     iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
     document.body.appendChild(iframe);
 
@@ -191,13 +189,13 @@
       try {
         const doc = iframe.contentDocument || iframe.contentWindow?.document;
         if (!doc || doc.readyState !== 'complete') return;
-        const count = extractTotalBustsFromDOM(doc);
+        const count = extractTotalBustsFromPersonalStats(doc);
         if (count !== null) {
           saveTotalBusts(count);
-          console.log('[Bustr+] Auto-scraped total busts via iframe:', count);
+          console.log('[Bustr+] Auto-scraped total busts from personal stats:', count);
           clearInterval(iv);
           iframe.remove();
-          state.isScrapingHof = false;
+          state.isScrapingTotal = false;
           renderAll();
           return;
         }
@@ -207,8 +205,8 @@
       if (attempts > maxAttempts) {
         clearInterval(iv);
         iframe.remove();
-        state.isScrapingHof = false;
-        console.warn('[Bustr+] HoF iframe scrape timed out');
+        state.isScrapingTotal = false;
+        console.warn('[Bustr+] Personal stats scrape timed out');
       }
     }, 350);
   }
@@ -591,7 +589,7 @@
       <header>
         <span>${SCRIPT}</span>
         <span class="header-actions">
-          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '☀' : '☾'}</button>
+          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '☀' : ''}</button>
           <button type="button" data-action="close">Close</button>
         </span>
       </header>
@@ -641,7 +639,7 @@
       greenLimit: 'When the jail menu counter turns green. This is just a comfort color threshold, not a Torn rule.',
     }[name];
     const info = help
-      ? `<span class="help-dot" tabindex="0" role="note" aria-label="${escapeAttr(help)}" data-tip="${escapeAttr(help)}">ⓘ</span>`
+      ? `<span class="help-dot" tabindex="0" role="note" aria-label="${escapeAttr(help)}" data-tip="${escapeAttr(help)}"></span>`
       : '';
     return `<label><span class="label-line"><span>${label}</span>${info}</span><input id="bustr-plus-${name}" type="number" step="1" min="0" value="${escapeAttr(value)}"></label>`;
   }
@@ -1102,12 +1100,10 @@
           stats.className = 'bustr-plus-nav';
           anchor.appendChild(stats);
         }
-        // Desktop gets the new Available / Total format
         stats.textContent = formatAvailableWithTotal();
         const totalText = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
         stats.title = `BUSTR+ ${state.penaltyScore}/${state.penaltyThreshold || '?'} | Total Busts: ${totalText} | Avail: ${formatAvailable()}`;
       } else {
-        // Mobile keeps the simple available count
         let pill = jailNav.querySelector('.bustr-plus-pill');
         if (!pill) {
           pill = document.createElement('span');
@@ -1406,7 +1402,7 @@
   }
 
   // =========================================================================
-  // INITIALIZATION (Cleaned & Consolidated)
+  // INITIALIZATION
   // =========================================================================
   async function init() {
     loadState();
@@ -1424,7 +1420,7 @@
       return;
     }
     
-    // Scrape Total Busts if not cached
+    // Scrape Total Busts from personal stats if not cached
     if (getCachedTotalBusts() !== null) {
       state.totalBusts = getCachedTotalBusts();
     } else {
