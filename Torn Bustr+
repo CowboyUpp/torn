@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.5
-// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and HOF Busts rank display.
+// @version      1.2.6
+// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display.
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.5';
+  const VERSION = '1.2.6';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -54,7 +54,7 @@
     penaltyScore: 0,
     penaltyThreshold: 0,
     availableBusts: null,
-    hofRank: null,
+    totalBusts: null, // Renamed from hofRank
     isScrapingHof: false,
     lastFetchMs: 0,
     lastLocalBustMs: 0,
@@ -138,35 +138,42 @@
   }
 
   // =========================================================================
-  // HOF BUSTS RANK INTEGRATION
+  // TOTAL BUSTS INTEGRATION (Formerly HOF Rank)
   // =========================================================================
-  function getCachedHofRank() {
-    const raw = store.get('hofRank', null);
-    if (!raw || typeof raw !== 'object' || !raw.rank || !raw.ts) return null;
+  function getCachedTotalBusts() {
+    const raw = store.get('totalBusts', null);
+    if (!raw || typeof raw !== 'object' || !raw.count || !raw.ts) return null;
     if (Date.now() - raw.ts < CACHE_TTL_HOF) {
-      return raw.rank;
+      return raw.count;
     }
     return null;
   }
 
-  function saveHofRank(rank) {
-    store.set('hofRank', { rank, ts: Date.now() });
-    state.hofRank = rank;
+  function saveTotalBusts(count) {
+    store.set('totalBusts', { count, ts: Date.now() });
+    state.totalBusts = count;
   }
 
-  function extractHofRankFromDOM(root) {
+  function extractTotalBustsFromDOM(root) {
     const boxes = root.querySelectorAll('[class*="infoBox"]');
     for (const box of boxes) {
-      // Specifically look for the "Busts" category rank (e.g., "Busts #1,234")
-      const match = box.textContent.match(/Busts\s*#(\d[\d,]*)/i);
-      if (match) {
-        return parseInt(match[1].replace(/,/g, ''), 10);
+      // Specifically look for the "Busts" category
+      if (!/busts/i.test(box.textContent)) continue;
+      
+      // Find all numbers in the box (e.g., "#1,234" and "7,500")
+      const numbers = box.textContent.match(/#?\d[\d,]*/g);
+      if (numbers) {
+        // The total count is the number that DOES NOT start with a '#'
+        const total = numbers.find(n => !n.startsWith('#'));
+        if (total) {
+          return parseInt(total.replace(/,/g, ''), 10);
+        }
       }
     }
     return null;
   }
 
-  function scrapeHofRank() {
+  function scrapeTotalBusts() {
     if (state.isScrapingHof || !state.settings.enabled) return;
     state.isScrapingHof = true;
     
@@ -184,10 +191,10 @@
       try {
         const doc = iframe.contentDocument || iframe.contentWindow?.document;
         if (!doc || doc.readyState !== 'complete') return;
-        const rank = extractHofRankFromDOM(doc);
-        if (rank !== null) {
-          saveHofRank(rank);
-          console.log('[Bustr+] Auto-scraped HOF Busts rank via iframe:', rank);
+        const count = extractTotalBustsFromDOM(doc);
+        if (count !== null) {
+          saveTotalBusts(count);
+          console.log('[Bustr+] Auto-scraped total busts via iframe:', count);
           clearInterval(iv);
           iframe.remove();
           state.isScrapingHof = false;
@@ -201,7 +208,7 @@
         clearInterval(iv);
         iframe.remove();
         state.isScrapingHof = false;
-        console.warn('[Bustr+] HOF iframe scrape timed out');
+        console.warn('[Bustr+] HoF iframe scrape timed out');
       }
     }, 350);
   }
@@ -218,8 +225,8 @@
       return 'No API key set — paste a User / Log key below';
     }
     const avail = state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
-    const hof = state.hofRank != null ? `#${state.hofRank.toLocaleString()}` : '?';
-    return `Busts: ${avail} | HOF Busts: ${hof} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
+    const total = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
+    return `Busts: ${avail} | Total: ${total} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
   }
 
   function registerWithHub() {
@@ -584,12 +591,12 @@
       <header>
         <span>${SCRIPT}</span>
         <span class="header-actions">
-          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '' : '☾'}</button>
+          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '☀' : '☾'}</button>
           <button type="button" data-action="close">Close</button>
         </span>
       </header>
       <div class="body">
-        <div class="status">Estimated busts: ${formatAvailableWithHof()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
+        <div class="status">Estimated busts: ${formatAvailableWithTotal()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
         <div class="hint">Custom key: ${API_KEY_PERMISSION} only. Uses user/log ${BUST_LOG_ID}.</div>
         <label>
           <span>Custom API key</span>
@@ -867,10 +874,10 @@
     return state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
   }
 
-  function formatAvailableWithHof() {
+  function formatAvailableWithTotal() {
     const avail = formatAvailable();
-    const hof = state.hofRank != null ? state.hofRank.toLocaleString() : '?';
-    return `${avail} / ${hof}`;
+    const total = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
+    return `${avail} / ${total}`;
   }
 
   async function loadBustData(force) {
@@ -1095,10 +1102,10 @@
           stats.className = 'bustr-plus-nav';
           anchor.appendChild(stats);
         }
-        // Desktop gets the new Available / HOF Busts format
-        stats.textContent = formatAvailableWithHof();
-        const hofText = state.hofRank != null ? `#${state.hofRank.toLocaleString()}` : '?';
-        stats.title = `BUSTR+ ${state.penaltyScore}/${state.penaltyThreshold || '?'} | HOF Busts: ${hofText} | Avail: ${formatAvailable()}`;
+        // Desktop gets the new Available / Total format
+        stats.textContent = formatAvailableWithTotal();
+        const totalText = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
+        stats.title = `BUSTR+ ${state.penaltyScore}/${state.penaltyThreshold || '?'} | Total Busts: ${totalText} | Avail: ${formatAvailable()}`;
       } else {
         // Mobile keeps the simple available count
         let pill = jailNav.querySelector('.bustr-plus-pill');
@@ -1417,11 +1424,11 @@
       return;
     }
     
-    // Scrape HOF Busts rank if not cached
-    if (getCachedHofRank() !== null) {
-      state.hofRank = getCachedHofRank();
+    // Scrape Total Busts if not cached
+    if (getCachedTotalBusts() !== null) {
+      state.totalBusts = getCachedTotalBusts();
     } else {
-      scrapeHofRank();
+      scrapeTotalBusts();
     }
 
     await loadBustData(false);
