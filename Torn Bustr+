@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.2
+// @version      1.3.3
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display fetched from Torn personalstats.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -162,25 +162,171 @@
   async function fetchTotalBustsViaAPI() {
     if (!state.apiKey) return null;
 
-    const url = `https://api.torn.com/user/?selections=personalstats&stat=peoplebusted&key=${encodeURIComponent(state.apiKey)}`;
-
     try {
-      const data = await requestJson(url);
-      if (data?.error) throw new Error(data.error.error || 'Torn personalstats API error');
+      // Since Dec 2024 Torn personalstats is category based.
+      // Jail is the category containing peoplebusted.
+      const url = `https://api.torn.com/user/?selections=personalstats&cat=jail&key=${encodeURIComponent(state.apiKey)}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'omit',
+        cache: 'no-store',
+      });
 
-      const value = Number(data?.personalstats?.peoplebusted);
-      if (!Number.isFinite(value) || value < 0) {
-        throw new Error('Torn personalstats response did not contain peoplebusted');
+      const data = await response.json();
+
+      if (data?.error) {
+        const code = Number(data.error.code);
+        if (code === 16) {
+          console.info('[Bustr+] API key has no personalstats access; using authenticated Personal Stats fallback.');
+        } else {
+          console.warn('[Bustr+] Could not fetch total busts from personalstats API:', data.error.error || data.error);
+        }
+        return null;
       }
 
-      const count = Math.floor(value);
-      console.debug(`[${SCRIPT}] Total busts from API:`, count);
-      saveTotalBusts(count);
-      return count;
-    } catch (err) {
-      console.warn(`[${SCRIPT}] Could not fetch total busts from personalstats:`, err.message || err);
-      return null;
+      const stats = data?.personalstats;
+      const count = Number(
+        stats?.peoplebusted ??
+        stats?.people_busted ??
+        stats?.peopleBusted
+      );
+
+      if (Number.isFinite(count) && count >= 0) {
+        console.info('[Bustr+] Total busts from API:', count);
+        return Math.floor(count);
+      }
+
+      console.warn('[Bustr+] Personalstats API returned no peoplebusted value.');
+    } catch (error) {
+      console.warn('[Bustr+] Personalstats API request failed:', error);
     }
+
+    return null;
+  }
+
+  function fetchTotalBustsViaPersonalStatsPage() {
+    return new Promise((resolve) => {
+      const gmRequest =
+        typeof GM_xmlhttpRequest === 'function'
+          ? GM_xmlhttpRequest
+          : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function'
+              ? GM.xmlHttpRequest
+              : null);
+
+      if (!gmRequest) {
+        console.warn('[Bustr+] No GM XHR available for authenticated Personal Stats fallback.');
+        resolve(null);
+        return;
+      }
+
+      const url = 'https://www.torn.com/personalstats.php?stats=useractivity&from=1%20month';
+
+      try {
+        gmRequest({
+          method: 'GET',
+          url,
+          anonymous: false,
+          credentials: true,
+          timeout: 15000,
+
+          onload: (response) => {
+            try {
+              if (response.status && response.status >= 400) {
+                console.warn('[Bustr+] Personal Stats fallback HTTP status:', response.status);
+                resolve(null);
+                return;
+              }
+
+              const html = String(response.responseText || '');
+
+              // Torn's Personal Stats page contains the statistic as visible
+              // text/HTML. Keep parsing deliberately broad enough to survive
+              // minor markup changes, but require the exact statistic label.
+              const patterns = [
+                /People\s*busted[\s\S]{0,1200}?(?:data-value|value|title)?[^0-9]{0,80}([\d,]+)/i,
+                /People\s*busted[^0-9]{0,250}([\d,]+)/i,
+                /peoplebusted[^0-9]{0,250}([\d,]+)/i,
+              ];
+
+              let count = null;
+
+              for (const pattern of patterns) {
+                const match = html.match(pattern);
+                if (!match) continue;
+
+                const candidate = Number(String(match[1]).replace(/,/g, ''));
+                if (Number.isFinite(candidate) && candidate >= 0) {
+                  count = Math.floor(candidate);
+                  break;
+                }
+              }
+
+              if (count != null) {
+                console.info('[Bustr+] Total busts from authenticated Personal Stats:', count);
+                resolve(count);
+                return;
+              }
+
+              // Some Torn markup stores the stat in JSON embedded in the page.
+              const jsonPatterns = [
+                /"peoplebusted"\s*:\s*(\d+)/i,
+                /"people_busted"\s*:\s*(\d+)/i,
+              ];
+
+              for (const pattern of jsonPatterns) {
+                const match = html.match(pattern);
+                if (!match) continue;
+
+                const candidate = Number(match[1]);
+                if (Number.isFinite(candidate) && candidate >= 0) {
+                  console.info('[Bustr+] Total busts from embedded Personal Stats data:', candidate);
+                  resolve(Math.floor(candidate));
+                  return;
+                }
+              }
+
+              console.warn('[Bustr+] Could not find People busted in authenticated Personal Stats page.');
+              resolve(null);
+            } catch (error) {
+              console.warn('[Bustr+] Error parsing authenticated Personal Stats:', error);
+              resolve(null);
+            }
+          },
+
+          onerror: (error) => {
+            console.warn('[Bustr+] Authenticated Personal Stats request failed:', error);
+            resolve(null);
+          },
+
+          ontimeout: () => {
+            console.warn('[Bustr+] Authenticated Personal Stats request timed out.');
+            resolve(null);
+          },
+        });
+      } catch (error) {
+        console.warn('[Bustr+] Could not start authenticated Personal Stats request:', error);
+        resolve(null);
+      }
+    });
+  }
+
+  async function fetchTotalBusts() {
+    // 1. Preferred: API personalstats/Jail category.
+    const apiCount = await fetchTotalBustsViaAPI();
+    if (apiCount != null) {
+      saveTotalBusts(apiCount);
+      return apiCount;
+    }
+
+    // 2. Fallback: authenticated Torn Personal Stats page.
+    const pageCount = await fetchTotalBustsViaPersonalStatsPage();
+    if (pageCount != null) {
+      saveTotalBusts(pageCount);
+      return pageCount;
+    }
+
+    // 3. Existing cache/manual fallback remains handled by caller.
+    return getCachedTotalBusts();
   }
 
   async function loadTotalBusts(force = false) {
@@ -592,7 +738,7 @@
       </header>
       <div class="body">
         <div class="status">Estimated busts: ${formatAvailableWithTotal()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
-        <div class="hint">Custom key: ${API_KEY_PERMISSION} only. Uses user/log ${BUST_LOG_ID}.</div>
+        <div class="hint">Total busts: API personalstats when permitted; otherwise authenticated Torn Personal Stats fallback. Custom key: ${API_KEY_PERMISSION} only. Uses user/log ${BUST_LOG_ID}.</div>
         <label>
           <span>Custom API key</span>
           <input id="bustr-plus-key" type="password" autocomplete="off" value="${escapeAttr(state.apiKey)}" placeholder="Paste 16 character Torn custom key">
