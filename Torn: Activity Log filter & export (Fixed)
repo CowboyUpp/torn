@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn: Activity Log Filter & CSV
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.0
-// @description  Search, date filters, reverse view, and CSV export for currently loaded Torn activity logs. Desktop + PDA. Script Hub integration.
+// @version      2.0.0
+// @description  Search, date filters, reverse view, category filter, presets, highlighting, and smart CSV export for currently loaded Torn activity logs. Desktop + PDA. Script Hub integration.
 // @author       cowboyup [1496324]
 // @license      MIT
 // @match        https://www.torn.com/page.php?sid=log*
@@ -21,17 +21,21 @@
     const UI_ID = 'cowboyup-activity-log-ui';
     const SEARCH_ID = 'cowboyup-log-search';
     const STYLE_ID = 'cowboyup-activity-log-styles';
-    const STORAGE_KEY = 'cowboyup.activityLogFilter.lite.v1';
-    const SETTINGS_KEY = 'cowboyup.activityLogFilter.settings.v1';
+    const STORAGE_KEY = 'cowboyup.activityLogFilter.lite.v2';
+    const SETTINGS_KEY = 'cowboyup.activityLogFilter.settings.v2';
+    const PRESETS_KEY = 'cowboyup.activityLogFilter.presets.v1';
     const HUB_ID = 'activity-log-filter-csv';
     const DESKTOP_QUERY = '(min-width: 1100px)';
-    const SCRIPT_VERSION = '1.3.0';
+    const SCRIPT_VERSION = '2.0.0';
+
+    const CATEGORIES = ['All', 'Money', 'Items', 'Attacks', 'Travel', 'Faction', 'Education', 'Other'];
 
     const state = {
         query: '',
         from: '',
         to: '',
         dateLabel: 'All time',
+        category: 'All',
         sort: 'newest',
         theme: '',
         enabled: true
@@ -42,6 +46,7 @@
     let pageObserver = null;
     let interactionsBound = false;
     let uiMounted = false;
+    let presets = [];
     const desktopMedia = matchMedia(DESKTOP_QUERY);
 
     function isLogPage() {
@@ -178,6 +183,7 @@
             state.from = typeof saved.from === 'string' ? saved.from : '';
             state.to = typeof saved.to === 'string' ? saved.to : '';
             state.dateLabel = typeof saved.dateLabel === 'string' ? saved.dateLabel : 'All time';
+            state.category = CATEGORIES.includes(saved.category) ? saved.category : 'All';
             state.sort = saved.sort === 'oldest' ? 'oldest' : 'newest';
             state.theme = saved.theme === 'light' || saved.theme === 'dark' ? saved.theme : '';
         } catch (error) {
@@ -186,7 +192,13 @@
         try {
             const settings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
             if (typeof settings.enabled === 'boolean') state.enabled = settings.enabled;
+            presets = JSON.parse(localStorage.getItem(PRESETS_KEY) || '[]');
         } catch (_) {}
+
+        // URL State Sync
+        const hash = new URLSearchParams(location.hash.substring(1));
+        if (hash.has('q')) state.query = hash.get('q');
+        if (hash.has('cat') && CATEGORIES.includes(hash.get('cat'))) state.category = hash.get('cat');
     }
 
     function saveState() {
@@ -196,18 +208,38 @@
                 from: state.from,
                 to: state.to,
                 dateLabel: state.dateLabel,
+                category: state.category,
                 sort: state.sort,
                 theme: state.theme
             }));
         } catch (error) {
             console.warn('[Activity Log Filter] Could not save filters.', error);
         }
+        updateURLHash();
     }
 
     function saveSettings() {
         try {
             localStorage.setItem(SETTINGS_KEY, JSON.stringify({ enabled: state.enabled }));
         } catch (_) {}
+    }
+
+    function savePresets() {
+        try {
+            localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+        } catch (_) {}
+    }
+
+    function updateURLHash() {
+        const params = new URLSearchParams();
+        if (state.query) params.set('q', state.query);
+        if (state.category !== 'All') params.set('cat', state.category);
+        if (state.from) params.set('from', state.from);
+        if (state.to) params.set('to', state.to);
+        const hash = params.toString();
+        if (location.hash.substring(1) !== hash) {
+            history.replaceState(null, '', location.pathname + location.search + (hash ? '#' + hash : ''));
+        }
     }
 
     function detectedTornTheme(startNode) {
@@ -330,10 +362,10 @@
                 --alf-native-bg-image:linear-gradient(180deg,var(--alf-control-hover),var(--alf-control));
                 --alf-native-control-border:1px solid var(--alf-border);--alf-native-control-shadow:inset 0 1px rgba(255,255,255,.04);
                 --alf-native-control-color:var(--alf-text);
-                position:relative;box-sizing:border-box;margin:14px 0 16px;padding:15px;
-                color:var(--alf-text);background:linear-gradient(180deg,var(--alf-raised),var(--alf-bg));
-                border:1px solid var(--alf-border);border-radius:6px;
-                box-shadow:var(--alf-shadow);font:13px Arial,sans-serif;z-index:20
+                position:sticky;top:0;z-index:50;box-sizing:border-box;margin:0;padding:15px;
+                color:var(--alf-text);background:var(--alf-bg);
+                border-bottom:1px solid var(--alf-border);
+                box-shadow:0 4px 12px rgba(0,0,0,.15);font:13px Arial,sans-serif;
             }
             #${UI_ID}.alf-light{
                 --alf-bg:#e7e7e7;--alf-raised:#fafafa;--alf-panel:#f3f3f3;
@@ -345,8 +377,8 @@
                 --alf-field:#fff;--alf-shadow:0 2px 6px rgba(0,0,0,.18)
             }
             #${UI_ID} *,#${UI_ID} *::before,#${UI_ID} *::after{box-sizing:border-box}
-            #${UI_ID} .alf-toolbar{width:100%;display:grid;grid-template-columns:minmax(220px,1fr) minmax(160px,240px) auto auto;gap:8px;align-items:center}
-            #${UI_ID} button,#${UI_ID} input{font-family:var(--alf-native-font-family);font-size:var(--alf-native-font-size);font-weight:var(--alf-native-font-weight)}
+            #${UI_ID} .alf-toolbar{width:100%;display:grid;grid-template-columns:minmax(220px,1fr) minmax(120px,160px) minmax(160px,240px) auto auto auto;gap:8px;align-items:center}
+            #${UI_ID} button,#${UI_ID} input,#${UI_ID} select{font-family:var(--alf-native-font-family);font-size:var(--alf-native-font-size);font-weight:var(--alf-native-font-weight)}
             #${UI_ID} .alf-search-wrap{position:relative;min-width:0}
             #${UI_ID} .alf-search-icon{position:absolute;left:12px;top:50%;translate:0 -50%;color:var(--alf-muted);font-size:17px;pointer-events:none}
             #${SEARCH_ID}{width:100%;height:var(--alf-native-height);padding:0 38px;color:var(--alf-native-control-color);background-color:var(--alf-native-bg-color);background-image:var(--alf-native-bg-image);border:var(--alf-native-control-border);border-radius:var(--alf-native-radius);outline:0;box-shadow:var(--alf-native-control-shadow)}
@@ -358,6 +390,7 @@
             #${UI_ID} .alf-date-button{width:100%;overflow:hidden}
             #${UI_ID} .alf-date-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             #${UI_ID} .alf-reverse-button{min-width:132px}
+            #${UI_ID} .alf-category-select{width:100%;height:var(--alf-native-height);padding:0 12px;color:var(--alf-native-control-color);background-color:var(--alf-native-bg-color);background-image:var(--alf-native-bg-image);border:var(--alf-native-control-border);border-radius:var(--alf-native-radius);cursor:pointer;box-shadow:var(--alf-native-control-shadow);appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23969b9f%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E");background-repeat:no-repeat;background-position:right 12px top 50%;background-size:10px auto;padding-right:30px}
             #${UI_ID} .alf-secondary{min-height:28px;margin-top:9px;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
             #${UI_ID} .alf-chips{min-width:0;display:flex;flex-wrap:wrap;gap:6px}
             #${UI_ID} .alf-chip{max-width:320px;height:26px;padding:0 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--alf-chip-text);background:var(--alf-chip-bg);border:1px solid var(--alf-chip-border);border-radius:4px;cursor:pointer}
@@ -397,6 +430,11 @@
             #${UI_ID} code{color:var(--alf-red)}
             .alf-hidden{display:none!important}
             .alf-native-search-hidden{display:none!important}
+            .alf-highlight{background:rgba(255, 255, 0, 0.3);color:inherit;border-radius:2px;padding:0 2px}
+            #${UI_ID}.alf-light .alf-highlight{background:rgba(255, 200, 0, 0.4)}
+            .alf-copy-btn{opacity:0;transition:opacity 0.2s;margin-left:8px;cursor:pointer;font-size:14px;padding:2px 6px;border-radius:4px;background:var(--alf-control);border:1px solid var(--alf-border)}
+            tr:hover .alf-copy-btn, [class*="row___"]:hover .alf-copy-btn{opacity:1}
+            .alf-copy-btn:hover{background:var(--alf-control-hover)}
 
             /* Tablet / intermediate */
             @media (max-width: 1099px) {
@@ -405,7 +443,7 @@
                     --alf-native-height:36px;--alf-native-font-size:12px;
                 }
                 #${UI_ID} .alf-toolbar{
-                    grid-template-columns:1fr 1fr;
+                    grid-template-columns:1fr 1fr 1fr;
                     gap:6px;
                 }
                 #${UI_ID} .alf-search-wrap{grid-column:1 / -1}
@@ -464,16 +502,19 @@
     }
 
     function markup() {
+        const categoryOptions = CATEGORIES.map(c => `<option value="${c}" ${state.category === c ? 'selected' : ''}>${c}</option>`).join('');
         return `
             <div class="alf-toolbar">
                 <div class="alf-search-wrap">
-                    <span class="alf-search-icon">⌕</span>
+                    <span class="alf-search-icon"></span>
                     <input id="${SEARCH_ID}" type="search" autocomplete="off" placeholder="Search currently loaded logs…">
                     <button class="alf-clear-search" type="button" title="Clear search">×</button>
                 </div>
+                <select class="alf-control alf-category-select">${categoryOptions}</select>
                 <button class="alf-control alf-date-button" type="button" aria-expanded="false">▣ <span class="alf-date-label">All time</span>⌄</button>
                 <button class="alf-control alf-reverse-button" type="button">↕ Reverse View</button>
-                <button class="alf-control alf-export-button" type="button">⇩ Export CSV</button>
+                <button class="alf-control alf-export-button" type="button" title="Ctrl+E">⇩ Export CSV</button>
+                <button class="alf-control alf-presets-button" type="button">★ Presets</button>
             </div>
             <div class="alf-secondary">
                 <div class="alf-chips"></div>
@@ -526,6 +567,13 @@
                     </div>
                 </div>
             </div>
+            <div class="alf-popover alf-presets-popover" style="width:250px;right:15px;">
+                <div style="padding:10px;border-bottom:1px solid var(--alf-soft);display:flex;gap:6px;">
+                    <input type="text" class="alf-preset-name" placeholder="Preset name..." style="flex:1;height:30px;padding:0 8px;border:1px solid var(--alf-border);border-radius:4px;background:var(--alf-field);color:var(--alf-text);">
+                    <button class="alf-btn alf-primary alf-save-preset" style="height:30px;padding:0 10px;">Save</button>
+                </div>
+                <div class="alf-presets-list" style="max-height:300px;overflow-y:auto;"></div>
+            </div>
         `;
     }
 
@@ -560,6 +608,7 @@
         const categoryText = categoryElement?.textContent?.trim() || '';
         return {
             row,
+            textElement,
             text,
             timeText,
             date: findSemanticDate(row, timeElement) || parseDisplayedDate(timeText),
@@ -602,6 +651,7 @@
 
     function rowMatches(info, query) {
         const haystack = (info.text + ' ' + info.category + ' ' + info.timeText).toLowerCase();
+        if (state.category !== 'All' && !info.category.toLowerCase().includes(state.category.toLowerCase())) return false;
         if (query.includes.some((term) => !haystack.includes(term))) return false;
         if (query.excludes.some((term) => haystack.includes(term))) return false;
         if (query.has.some((filter) => !matchesHas(info, filter))) return false;
@@ -639,10 +689,76 @@
         }
     }
 
+    function highlightText(element, query) {
+        if (!element || !query) {
+            element?.querySelectorAll('.alf-highlight').forEach(m => {
+                m.parentNode.replaceChild(document.createTextNode(m.textContent), m);
+            });
+            return;
+        }
+        element.querySelectorAll('.alf-highlight').forEach(m => {
+            m.parentNode.replaceChild(document.createTextNode(m.textContent), m);
+        });
+        element.normalize();
+
+        const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2 && !t.startsWith('-') && !t.includes(':'));
+        if (terms.length === 0) return;
+
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+        const regex = new RegExp(`(${terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
+
+        textNodes.forEach(node => {
+            if (!regex.test(node.textContent)) return;
+            regex.lastIndex = 0;
+            const span = document.createElement('span');
+            const parts = node.textContent.split(regex);
+            parts.forEach(part => {
+                if (terms.includes(part.toLowerCase())) {
+                    const mark = document.createElement('mark');
+                    mark.className = 'alf-highlight';
+                    mark.textContent = part;
+                    span.appendChild(mark);
+                } else {
+                    span.appendChild(document.createTextNode(part));
+                }
+            });
+            node.parentNode.replaceChild(span, node);
+        });
+    }
+
+    function injectCopyButtons(infos) {
+        infos.forEach(info => {
+            let btn = info.row.querySelector('.alf-copy-btn');
+            if (!btn) {
+                btn = document.createElement('button');
+                btn.className = 'alf-copy-btn';
+                btn.textContent = '📋';
+                btn.title = 'Copy to clipboard';
+                btn.type = 'button';
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(info.text).then(() => {
+                        btn.textContent = '✓';
+                        setTimeout(() => btn.textContent = '📋', 1500);
+                    });
+                });
+                // Append to the end of the row or a suitable container
+                const lastCell = info.row.lastElementChild;
+                if (lastCell) lastCell.appendChild(btn);
+                else info.row.appendChild(btn);
+            }
+            btn.style.display = info.row.classList.contains('alf-hidden') ? 'none' : '';
+        });
+    }
+
     function renderChips(ui) {
         const chips = ui.querySelector('.alf-chips');
         const entries = [];
         if (state.query) entries.push({ type: 'query', value: '', label: 'Search: ' + state.query });
+        if (state.category !== 'All') entries.push({ type: 'category', value: '', label: 'Category: ' + state.category });
         if (state.dateLabel !== 'All time') entries.push({ type: 'date', value: '', label: state.dateLabel });
         const signature = JSON.stringify(entries);
         if (chips.dataset.signature === signature) {
@@ -675,6 +791,7 @@
         concealNativeSearch(root);
         const search = ui.querySelector('#' + SEARCH_ID);
         if (search.value !== state.query) search.value = state.query;
+        ui.querySelector('.alf-category-select').value = state.category;
         ui.querySelector('.alf-date-label').textContent = state.dateLabel;
         const datePopover = ui.querySelector('.alf-date-popover');
         const editingRange = datePopover.classList.contains('alf-open')
@@ -698,10 +815,16 @@
         for (const info of infos) {
             const matches = rowMatches(info, query);
             info.row.classList.toggle('alf-hidden', !matches);
-            if (matches) visible += 1;
+            if (matches) {
+                visible += 1;
+                highlightText(info.textElement, state.query);
+            } else {
+                highlightText(info.textElement, '');
+            }
         }
         sortRows(infos);
         renderChips(ui);
+        injectCopyButtons(infos);
         ui.querySelector('.alf-meta').textContent = visible + ' of ' + infos.length + ' currently loaded';
     }
 
@@ -722,6 +845,7 @@
         state.from = '';
         state.to = '';
         state.dateLabel = 'All time';
+        state.category = 'All';
         commitFilters();
     }
 
@@ -741,6 +865,65 @@
         closePopovers(opening ? popover : null);
         popover.classList.toggle('alf-open', opening);
         button.setAttribute('aria-expanded', String(opening));
+        if (opening && popover.classList.contains('alf-presets-popover')) {
+            renderPresetsList(popover);
+        }
+    }
+
+    function renderPresetsList(popover) {
+        const list = popover.querySelector('.alf-presets-list');
+        list.innerHTML = '';
+        if (presets.length === 0) {
+            list.innerHTML = '<div style="padding:10px;color:var(--alf-muted);font-size:12px;">No saved presets.</div>';
+            return;
+        }
+        presets.forEach((preset, index) => {
+            const item = document.createElement('div');
+            item.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid var(--alf-soft);cursor:pointer;';
+            item.innerHTML = `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${preset.name}</span>
+                              <button class="alf-btn" style="height:24px;padding:0 8px;font-size:11px;margin-left:8px;">Load</button>
+                              <button class="alf-btn" style="height:24px;padding:0 8px;font-size:11px;margin-left:4px;color:var(--alf-red);">Del</button>`;
+            item.querySelector('button:nth-child(2)').addEventListener('click', (e) => {
+                e.stopPropagation();
+                loadPreset(index);
+            });
+            item.querySelector('button:nth-child(3)').addEventListener('click', (e) => {
+                e.stopPropagation();
+                deletePreset(index);
+                renderPresetsList(popover);
+            });
+            item.addEventListener('click', () => loadPreset(index));
+            list.appendChild(item);
+        });
+    }
+
+    function savePreset(name) {
+        if (!name) return;
+        presets.push({
+            name,
+            query: state.query,
+            from: state.from,
+            to: state.to,
+            dateLabel: state.dateLabel,
+            category: state.category
+        });
+        savePresets();
+    }
+
+    function loadPreset(index) {
+        const preset = presets[index];
+        if (!preset) return;
+        state.query = preset.query;
+        state.from = preset.from;
+        state.to = preset.to;
+        state.dateLabel = preset.dateLabel;
+        state.category = preset.category;
+        commitFilters();
+    }
+
+    function deletePreset(index) {
+        presets.splice(index, 1);
+        savePresets();
     }
 
     function setQuickRange(range) {
@@ -824,6 +1007,20 @@
         return '"' + text.replace(/"/g, '""') + '"';
     }
 
+    function extractCsvData(info) {
+        let player = '', item = '', amount = '';
+        const profileLink = info.row.querySelector('a[href*="XID="]');
+        if (profileLink) player = profileLink.textContent.trim();
+
+        const itemLinks = info.row.querySelectorAll('a[href*="item.php"], a[href*="page.php?sid=itemMarket"]');
+        if (itemLinks.length > 0) item = itemLinks[0].textContent.trim();
+
+        const moneyMatch = info.text.match(/[\$£€]\s*([\d,]+)/);
+        if (moneyMatch) amount = moneyMatch[1];
+
+        return [info.timeText || 'N/A', info.category, info.text, player, item, amount];
+    }
+
     function exportCsv() {
         const root = document.querySelector(ROOT_SELECTOR);
         if (!root) return;
@@ -835,8 +1032,8 @@
             return;
         }
         const csv = '\uFEFF' + [
-            ['time', 'category', 'text'],
-            ...rows.map((row) => [row.timeText || 'N/A', row.category, row.text])
+            ['time', 'category', 'text', 'player', 'item', 'amount'],
+            ...rows.map((row) => extractCsvData(row))
         ].map((line) => line.map(csvCell).join(',')).join('\r\n') + '\r\n';
         const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
         const url = URL.createObjectURL(blob);
@@ -863,6 +1060,13 @@
             commitFilters();
             search.focus();
         });
+        
+        const categorySelect = ui.querySelector('.alf-category-select');
+        categorySelect.addEventListener('change', (e) => {
+            state.category = e.target.value;
+            commitFilters();
+        });
+
         ui.querySelector('.alf-clear-all').addEventListener('click', clearAll);
         ui.querySelector('.alf-reverse-button').addEventListener('click', () => {
             state.sort = state.sort === 'oldest' ? 'newest' : 'oldest';
@@ -881,6 +1085,19 @@
         const dateButton = ui.querySelector('.alf-date-button');
         const datePopover = ui.querySelector('.alf-date-popover');
         dateButton.addEventListener('click', () => togglePopover(dateButton, datePopover));
+
+        const presetsButton = ui.querySelector('.alf-presets-button');
+        const presetsPopover = ui.querySelector('.alf-presets-popover');
+        presetsButton.addEventListener('click', () => togglePopover(presetsButton, presetsPopover));
+
+        ui.querySelector('.alf-save-preset').addEventListener('click', () => {
+            const name = ui.querySelector('.alf-preset-name').value.trim();
+            if (name) {
+                savePreset(name);
+                ui.querySelector('.alf-preset-name').value = '';
+                renderPresetsList(presetsPopover);
+            }
+        });
 
         ui.querySelectorAll('.alf-tab').forEach((tab) => {
             tab.addEventListener('click', () => {
@@ -912,6 +1129,7 @@
             const chip = event.target.closest('[data-chip-type]');
             if (!chip) return;
             if (chip.dataset.chipType === 'query') state.query = '';
+            else if (chip.dataset.chipType === 'category') state.category = 'All';
             else if (chip.dataset.chipType === 'date') {
                 state.from = '';
                 state.to = '';
@@ -959,6 +1177,10 @@
                 search.focus();
             }
         }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'e') {
+            event.preventDefault();
+            exportCsv();
+        }
     }
 
     function bindInteractions() {
@@ -980,7 +1202,11 @@
         const root = document.querySelector(ROOT_SELECTOR);
         if (root) {
             const infos = findRows(root).map(rowInfo);
-            infos.forEach((info) => info.row.classList.remove('alf-hidden'));
+            infos.forEach((info) => {
+                info.row.classList.remove('alf-hidden');
+                highlightText(info.textElement, '');
+                info.row.querySelector('.alf-copy-btn')?.remove();
+            });
             sortRows(infos, 'newest');
         }
         document.querySelectorAll('.alf-native-search-hidden').forEach((element) => {
@@ -997,6 +1223,7 @@
         if (!isLogPage() || !state.enabled) {
             teardownUi();
             unbindInteractions();
+            if (pageObserver) pageObserver.disconnect(); // FIX: Observer leak
             return;
         }
         bindInteractions();
@@ -1010,6 +1237,7 @@
         if (meta && meta.textContent) return meta.textContent;
         const parts = [];
         if (state.query) parts.push('search: ' + state.query);
+        if (state.category !== 'All') parts.push('cat: ' + state.category);
         if (state.dateLabel && state.dateLabel !== 'All time') parts.push(state.dateLabel);
         if (state.sort === 'oldest') parts.push('oldest first');
         return parts.length ? parts.join(' · ') : 'Ready on Activity Log';
