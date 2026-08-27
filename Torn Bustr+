@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.7
+// @version      1.2.8
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display.
 // @author       cowboyup
 // @license      MIT
@@ -21,7 +21,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.7';
+  const VERSION = '1.2.8';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -155,19 +155,28 @@
   }
 
   function extractTotalBustsFromPersonalStats(root) {
-    // Look for the "People busted" stat on the personal stats page
-    // It's usually in a table row like: <tr><td>People busted</td><td>8,857</td></tr>
-    const rows = root.querySelectorAll('tr, [class*="row"]');
-    for (const row of rows) {
-      const text = row.textContent || '';
-      if (/people\s+busted/i.test(text)) {
-        // Extract the number from the row
-        const match = text.match(/(\d[\d,]+)/);
-        if (match) {
-          return parseInt(match[1].replace(/,/g, ''), 10);
+    // Method 1: Look for "People busted" label and get the number next to it
+    const labels = root.querySelectorAll('td, div, span, th, p');
+    for (const label of labels) {
+      if (/people\s+busted/i.test(label.textContent)) {
+        const parent = label.closest('tr') || label.closest('div') || label.parentElement;
+        if (parent) {
+          const match = parent.textContent.match(/(\d[\d,]+)/);
+          if (match) {
+            return parseInt(match[1].replace(/,/g, ''), 10);
+          }
         }
       }
     }
+    
+    // Method 2: Fallback to finding the largest number on the page (often the main stat)
+    const allText = root.body?.textContent || root.textContent;
+    const numbers = allText.match(/\b(\d{1,3}(?:,\d{3})+)\b/g);
+    if (numbers && numbers.length > 0) {
+      const sorted = numbers.map(n => parseInt(n.replace(/,/g, ''), 10)).sort((a, b) => b - a);
+      if (sorted[0] > 100) return sorted[0]; // Sanity check
+    }
+    
     return null;
   }
 
@@ -175,22 +184,37 @@
     if (state.isScrapingTotal || !state.settings.enabled) return;
     state.isScrapingTotal = true;
     
+    // Get user ID from current page nav profile link if possible
+    let userId = null;
+    const userLink = document.querySelector('#nav-profile a[href*="XID="]');
+    if (userLink) {
+      const match = userLink.href.match(/XID=(\d+)/);
+      if (match) userId = match[1];
+    }
+    
     document.querySelector('#bustr-stats-iframe')?.remove();
     const iframe = document.createElement('iframe');
     iframe.id = 'bustr-stats-iframe';
-    iframe.src = 'https://www.torn.com/personalstats.php?stats=peoplebusted&from=All';
+    
+    // Try to load personal stats page with user ID for direct access
+    const statsUrl = userId 
+      ? `https://www.torn.com/personalstats.php?ID=${userId}&stats=peoplebusted&from=All`
+      : 'https://www.torn.com/personalstats.php?stats=peoplebusted&from=All';
+    
+    iframe.src = statsUrl;
     iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
     document.body.appendChild(iframe);
 
     let attempts = 0;
-    const maxAttempts = 45;
+    const maxAttempts = 60;
     const iv = setInterval(() => {
       attempts++;
       try {
         const doc = iframe.contentDocument || iframe.contentWindow?.document;
         if (!doc || doc.readyState !== 'complete') return;
+        
         const count = extractTotalBustsFromPersonalStats(doc);
-        if (count !== null) {
+        if (count !== null && count > 0) {
           saveTotalBusts(count);
           console.log('[Bustr+] Auto-scraped total busts from personal stats:', count);
           clearInterval(iv);
@@ -202,13 +226,14 @@
       } catch (e) {
         // cross-origin / still loading
       }
+      
       if (attempts > maxAttempts) {
         clearInterval(iv);
         iframe.remove();
         state.isScrapingTotal = false;
-        console.warn('[Bustr+] Personal stats scrape timed out');
+        console.warn('[Bustr+] Personal stats scrape timed out. Please ensure you are logged in.');
       }
-    }, 350);
+    }, 500);
   }
 
   // =========================================================================
@@ -589,7 +614,7 @@
       <header>
         <span>${SCRIPT}</span>
         <span class="header-actions">
-          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '☀' : ''}</button>
+          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '☀' : '☾'}</button>
           <button type="button" data-action="close">Close</button>
         </span>
       </header>
@@ -639,7 +664,7 @@
       greenLimit: 'When the jail menu counter turns green. This is just a comfort color threshold, not a Torn rule.',
     }[name];
     const info = help
-      ? `<span class="help-dot" tabindex="0" role="note" aria-label="${escapeAttr(help)}" data-tip="${escapeAttr(help)}"></span>`
+      ? `<span class="help-dot" tabindex="0" role="note" aria-label="${escapeAttr(help)}" data-tip="${escapeAttr(help)}">ⓘ</span>`
       : '';
     return `<label><span class="label-line"><span>${label}</span>${info}</span><input id="bustr-plus-${name}" type="number" step="1" min="0" value="${escapeAttr(value)}"></label>`;
   }
