@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.2
-// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration.
+// @version      1.2.5
+// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and HOF Busts rank display.
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -13,21 +13,22 @@
 // @grant        GM_openInTab
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
-// @downloadURL https://update.greasyfork.org/scripts/586532/Bustr%2B.user.js
-// @updateURL https://update.greasyfork.org/scripts/586532/Bustr%2B.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/586532/Bustr%2B.user.js
+// @updateURL    https://update.greasyfork.org/scripts/586532/Bustr%2B.meta.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.2';
+  const VERSION = '1.2.5';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
   const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlusLogs&user=log';
   const BUST_LOG_ID = 5360;
   const HUB_ID = 'bustr-plus';
+  const CACHE_TTL_HOF = 60 * 60 * 1000; // 1 hour
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -53,6 +54,8 @@
     penaltyScore: 0,
     penaltyThreshold: 0,
     availableBusts: null,
+    hofRank: null,
+    isScrapingHof: false,
     lastFetchMs: 0,
     lastLocalBustMs: 0,
     lastLocalBustSignature: '',
@@ -135,6 +138,75 @@
   }
 
   // =========================================================================
+  // HOF BUSTS RANK INTEGRATION
+  // =========================================================================
+  function getCachedHofRank() {
+    const raw = store.get('hofRank', null);
+    if (!raw || typeof raw !== 'object' || !raw.rank || !raw.ts) return null;
+    if (Date.now() - raw.ts < CACHE_TTL_HOF) {
+      return raw.rank;
+    }
+    return null;
+  }
+
+  function saveHofRank(rank) {
+    store.set('hofRank', { rank, ts: Date.now() });
+    state.hofRank = rank;
+  }
+
+  function extractHofRankFromDOM(root) {
+    const boxes = root.querySelectorAll('[class*="infoBox"]');
+    for (const box of boxes) {
+      // Specifically look for the "Busts" category rank (e.g., "Busts #1,234")
+      const match = box.textContent.match(/Busts\s*#(\d[\d,]*)/i);
+      if (match) {
+        return parseInt(match[1].replace(/,/g, ''), 10);
+      }
+    }
+    return null;
+  }
+
+  function scrapeHofRank() {
+    if (state.isScrapingHof || !state.settings.enabled) return;
+    state.isScrapingHof = true;
+    
+    document.querySelector('#bustr-hof-iframe')?.remove();
+    const iframe = document.createElement('iframe');
+    iframe.id = 'bustr-hof-iframe';
+    iframe.src = 'https://www.torn.com/page.php?sid=hof';
+    iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
+    document.body.appendChild(iframe);
+
+    let attempts = 0;
+    const maxAttempts = 45;
+    const iv = setInterval(() => {
+      attempts++;
+      try {
+        const doc = iframe.contentDocument || iframe.contentWindow?.document;
+        if (!doc || doc.readyState !== 'complete') return;
+        const rank = extractHofRankFromDOM(doc);
+        if (rank !== null) {
+          saveHofRank(rank);
+          console.log('[Bustr+] Auto-scraped HOF Busts rank via iframe:', rank);
+          clearInterval(iv);
+          iframe.remove();
+          state.isScrapingHof = false;
+          renderAll();
+          return;
+        }
+      } catch (e) {
+        // cross-origin / still loading
+      }
+      if (attempts > maxAttempts) {
+        clearInterval(iv);
+        iframe.remove();
+        state.isScrapingHof = false;
+        console.warn('[Bustr+] HOF iframe scrape timed out');
+      }
+    }, 350);
+  }
+
+  // =========================================================================
   // HUB INTEGRATION
   // =========================================================================
   function isHubPresent() {
@@ -146,7 +218,8 @@
       return 'No API key set — paste a User / Log key below';
     }
     const avail = state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
-    return `Estimated busts left: ${avail}  |  score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
+    const hof = state.hofRank != null ? `#${state.hofRank.toLocaleString()}` : '?';
+    return `Busts: ${avail} | HOF Busts: ${hof} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
   }
 
   function registerWithHub() {
@@ -159,18 +232,14 @@
         version: VERSION,
         order: 200,
         open: () => {
-          // Prefer opening the Hub dashboard directly to Bustr+ settings.
-          // Fallback: go to jail page and refresh data.
           document.dispatchEvent(new CustomEvent('torn-script-hub:open', {
             detail: { scriptId: HUB_ID }
           }));
-          // Also refresh data if we are (or end up) on the jail page
           if (isJailPage()) {
             loadBustData(false).then(() => renderAll());
           }
         },
         close: () => {
-          // Called when user disables the script from Hub dashboard
           state.settings.enabled = false;
           saveSettings();
           cleanupModifications();
@@ -229,10 +298,6 @@
             state.settings.greenLimit = Math.max(0, Number(values.greenLimit) || 0);
             state.settings.redLimit = Math.max(0, Number(values.redLimit) || 0);
 
-            // API key: only APPLY a new valid key. Never treat a blank Hub snapshot
-            // as "user cleared the key" — password fields often stay empty in
-            // the prefs.values copy (registration race / security blanking),
-            // and every other setting change would otherwise wipe the key.
             if (typeof values.apiKey === 'string') {
               const key = values.apiKey.trim();
               if (key && /^[A-Za-z0-9]{16}$/.test(key) && key !== state.apiKey) {
@@ -284,7 +349,7 @@
   }
 
   // =========================================================================
-  // STYLES (unchanged core, still used for hardness + nav when no Hub)
+  // STYLES
   // =========================================================================
   function injectStyles() {
     if (document.getElementById('bustr-plus-style')) return;
@@ -295,50 +360,23 @@
       body.bustr-plus-orange { --bustr-plus-color: #d08000; }
       body.bustr-plus-red { --bustr-plus-color: #e64d1a; }
       #nav-jail .bustr-plus-nav {
-        display: inline-flex;
-        position: relative;
-        top: 3px;
-        align-items: center;
-        justify-content: center;
-        min-width: 16px;
-        margin-left: 4px;
-        color: var(--bustr-plus-color, inherit);
-        font-weight: 700;
-        line-height: 1;
-        text-align: center;
-        vertical-align: middle;
+        display: inline-flex; position: relative; top: 3px; align-items: center; justify-content: center;
+        min-width: 16px; margin-left: 4px; color: var(--bustr-plus-color, inherit); font-weight: 700;
+        line-height: 1; text-align: center; vertical-align: middle;
       }
       #nav-jail .bustr-plus-pill { position: absolute; top: 2px; right: 4px; min-width: 14px; text-align: center; color: var(--bustr-plus-color, #85b200); font-size: 11px; font-weight: 700; pointer-events: none; }
       #bustr-plus-panel {
-        --bustr-bg: #202020;
-        --bustr-fg: #ddd;
-        --bustr-border: #444;
-        --bustr-header-border: #3a3a3a;
-        --bustr-input-bg: #111;
-        --bustr-button-bg: #303030;
-        --bustr-toggle-off: #555;
-        --bustr-danger-bg: #5b2520;
-        --bustr-danger-border: #a94b3f;
-        --bustr-danger-fg: #fff;
-        --bustr-muted: #aaa;
+        --bustr-bg: #202020; --bustr-fg: #ddd; --bustr-border: #444; --bustr-header-border: #3a3a3a;
+        --bustr-input-bg: #111; --bustr-button-bg: #303030; --bustr-toggle-off: #555;
+        --bustr-danger-bg: #5b2520; --bustr-danger-border: #a94b3f; --bustr-danger-fg: #fff; --bustr-muted: #aaa;
         position: fixed; z-index: 99999; right: 14px; top: 62px; width: min(470px, calc(100vw - 28px));
-        max-height: min(680px, calc(100vh - 92px));
-        overflow: hidden;
-        background: var(--bustr-bg); color: var(--bustr-fg); border: 1px solid var(--bustr-border); border-radius: 8px;
-        box-shadow: 0 10px 30px rgba(0,0,0,.55); font: 12px/1.4 Arial, sans-serif;
+        max-height: min(680px, calc(100vh - 92px)); overflow: hidden; background: var(--bustr-bg); color: var(--bustr-fg);
+        border: 1px solid var(--bustr-border); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.55); font: 12px/1.4 Arial, sans-serif;
       }
       #bustr-plus-panel.bustr-plus-light {
-        --bustr-bg: #f7f7f7;
-        --bustr-fg: #242424;
-        --bustr-border: #c9c9c9;
-        --bustr-header-border: #d8d8d8;
-        --bustr-input-bg: #fff;
-        --bustr-button-bg: #ececec;
-        --bustr-toggle-off: #d0d0d0;
-        --bustr-danger-bg: #fff1f0;
-        --bustr-danger-border: #c75146;
-        --bustr-danger-fg: #8d1f17;
-        --bustr-muted: #666;
+        --bustr-bg: #f7f7f7; --bustr-fg: #242424; --bustr-border: #c9c9c9; --bustr-header-border: #d8d8d8;
+        --bustr-input-bg: #fff; --bustr-button-bg: #ececec; --bustr-toggle-off: #d0d0d0;
+        --bustr-danger-bg: #fff1f0; --bustr-danger-border: #c75146; --bustr-danger-fg: #8d1f17; --bustr-muted: #666;
       }
       #bustr-plus-panel[hidden] { display: none; }
       #bustr-plus-panel header { display: flex; align-items: center; justify-content: space-between; padding: 9px 11px; border-bottom: 1px solid var(--bustr-header-border); font-weight: 700; }
@@ -358,179 +396,66 @@
       #bustr-plus-panel .toggles label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
       #bustr-plus-panel .toggles span { margin: 0; line-height: 1.15; }
       #bustr-plus-panel .toggles input[type="checkbox"] {
-        appearance: none;
-        -webkit-appearance: none;
-        position: relative;
-        width: 34px;
-        min-width: 34px;
-        height: 18px;
-        min-height: 18px;
-        margin: 0;
-        border: 1px solid var(--bustr-border);
-        border-radius: 999px;
-        background: var(--bustr-toggle-off);
-        cursor: pointer;
-        transition: background .16s ease, border-color .16s ease;
+        appearance: none; -webkit-appearance: none; position: relative; width: 34px; min-width: 34px; height: 18px;
+        min-height: 18px; margin: 0; border: 1px solid var(--bustr-border); border-radius: 999px;
+        background: var(--bustr-toggle-off); cursor: pointer; transition: background .16s ease, border-color .16s ease;
       }
       #bustr-plus-panel .toggles input[type="checkbox"]::after {
-        content: "";
-        position: absolute;
-        width: 14px;
-        height: 14px;
-        left: 1px;
-        top: 1px;
-        border-radius: 50%;
-        background: var(--bustr-bg);
-        box-shadow: 0 1px 3px rgba(0,0,0,.35);
-        transition: transform .16s ease, background .16s ease;
+        content: ""; position: absolute; width: 14px; height: 14px; left: 1px; top: 1px; border-radius: 50%;
+        background: var(--bustr-bg); box-shadow: 0 1px 3px rgba(0,0,0,.35); transition: transform .16s ease, background .16s ease;
       }
-      #bustr-plus-panel .toggles input[type="checkbox"]:checked {
-        border-color: #5489c9;
-        background: #4278bd;
-      }
-      #bustr-plus-panel .toggles input[type="checkbox"]:checked::after {
-        transform: translateX(16px);
-        background: #fff;
-      }
+      #bustr-plus-panel .toggles input[type="checkbox"]:checked { border-color: #5489c9; background: #4278bd; }
+      #bustr-plus-panel .toggles input[type="checkbox"]:checked::after { transform: translateX(16px); background: #fff; }
       #bustr-plus-panel .actions { position: sticky; bottom: -10px; padding-top: 6px; background: var(--bustr-bg); }
       #bustr-plus-panel label span { display: block; color: var(--bustr-muted); margin-bottom: 1px; }
       #bustr-plus-panel .label-line { display: flex; align-items: flex-end; align-content: flex-end; gap: 4px; min-width: 0; min-height: 25px; line-height: 1.15; flex-wrap: wrap; overflow: hidden; }
       #bustr-plus-panel .help-dot {
-        display: inline-grid;
-        place-items: center;
-        width: 14px;
-        height: 14px;
-        margin-bottom: 1px;
-        color: #5489c9;
-        font-size: 12px;
-        line-height: 1;
-        cursor: help;
-        outline: none;
+        display: inline-grid; place-items: center; width: 14px; height: 14px; margin-bottom: 1px;
+        color: #5489c9; font-size: 12px; line-height: 1; cursor: help; outline: none;
       }
       #bustr-plus-help-tip {
-        position: fixed;
-        width: min(270px, calc(100vw - 24px));
-        padding: 8px 10px;
-        border-radius: 6px;
-        background: rgba(18, 18, 18, .95);
-        color: #f4f4f4;
-        box-shadow: 0 8px 22px rgba(0,0,0,.28);
-        font-size: 12px;
-        font-weight: 400;
-        line-height: 1.35;
-        text-align: left;
-        white-space: normal;
-        opacity: 1;
-        pointer-events: none;
-        z-index: 100001;
+        position: fixed; width: min(270px, calc(100vw - 24px)); padding: 8px 10px; border-radius: 6px;
+        background: rgba(18, 18, 18, .95); color: #f4f4f4; box-shadow: 0 8px 22px rgba(0,0,0,.28);
+        font-size: 12px; font-weight: 400; line-height: 1.35; text-align: left; white-space: normal;
+        opacity: 1; pointer-events: none; z-index: 100001;
       }
-      #bustr-plus-help-tip.bustr-plus-light {
-        background: rgba(255, 255, 255, .98);
-        color: #222;
-        box-shadow: 0 8px 24px rgba(0,0,0,.18);
-      }
+      #bustr-plus-help-tip.bustr-plus-light { background: rgba(255, 255, 255, .98); color: #222; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
       #bustr-plus-panel .hint { color: var(--bustr-muted); font-size: 11px; }
       #bustr-plus-panel .status { color: var(--bustr-plus-color, #85b200); font-weight: 700; }
       #bustr-plus-panel .version { color: var(--bustr-muted); font-size: 10px; text-align: right; }
       #bustr-plus-panel .icon-btn { width: 28px; min-width: 28px; padding: 0; display: inline-grid; place-items: center; }
       #bustr-plus-navitem {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        padding: 4px 0;
+        display: flex; justify-content: center; align-items: center; padding: 4px 0;
       }
       #bustr-plus-navitem .bustr-plus-navitem-link {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 2px;
-        width: 50px;
-        min-height: 44px;
-        padding: 4px 2px;
-        border: 0;
-        border-radius: 6px;
-        background: transparent;
-        color: #999;
-        cursor: pointer;
-        font: 700 9px/1.1 Arial, sans-serif;
-        text-transform: uppercase;
-        letter-spacing: .02em;
-        text-align: center;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+        width: 50px; min-height: 44px; padding: 4px 2px; border: 0; border-radius: 6px; background: transparent;
+        color: #999; cursor: pointer; font: 700 9px/1.1 Arial, sans-serif; text-transform: uppercase;
+        letter-spacing: .02em; text-align: center;
       }
       #bustr-plus-navitem .bustr-plus-navitem-link:hover,
-      #bustr-plus-navitem .bustr-plus-navitem-link:focus-visible {
-        color: #ccc;
-        background: rgba(255,255,255,.06);
-        outline: none;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-iconwrap {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 34px;
-        height: 34px;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-iconwrap svg {
-        display: block;
-        fill: currentColor;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-label {
-        white-space: nowrap;
-      }
+      #bustr-plus-navitem .bustr-plus-navitem-link:focus-visible { color: #ccc; background: rgba(255,255,255,.06); outline: none; }
+      #bustr-plus-navitem .bustr-plus-navitem-iconwrap { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; }
+      #bustr-plus-navitem .bustr-plus-navitem-iconwrap svg { display: block; fill: currentColor; }
+      #bustr-plus-navitem .bustr-plus-navitem-label { white-space: nowrap; }
       #bustr-plus-navitem.bustr-plus-navitem-fallback {
-        position: fixed;
-        z-index: 99998;
-        right: 10px;
-        bottom: 14px;
-        padding: 0;
-        background: rgba(24,24,24,.9);
-        border-radius: 8px;
-        box-shadow: 0 6px 18px rgba(0,0,0,.4);
+        position: fixed; z-index: 99998; right: 10px; bottom: 14px; padding: 0;
+        background: rgba(24,24,24,.9); border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.4);
       }
-      #bustr-plus-navitem.bustr-plus-navitem-fallback .bustr-plus-navitem-link {
-        color: #eee;
-      }
-      #body .users-list-title {
-        display: flex;
-        justify-content: start;
-        align-items: center;
-      }
+      #bustr-plus-navitem.bustr-plus-navitem-fallback .bustr-plus-navitem-link { color: #eee; }
+      #body .users-list-title { display: flex; justify-content: start; align-items: center; }
       #body .users-list-title .title { width: 269px; }
       #body .users-list-title .time { width: 50px; }
       #body .users-list-title .level { width: 53px; }
       #body .users-list-title .reason { width: 205px; }
-      #body .users-list-title .hardness {
-        display: block;
-        width: 79px;
-        text-align: center;
-      }
-      #body .user-info-list-wrap {
-        display: flex;
-        flex-direction: column;
-        justify-content: start;
-        align-items: center;
-      }
-      #body .user-info-list-wrap > li {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: start;
-        align-items: center;
-      }
-      #body .user-info-list-wrap > li .info-wrap {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: start;
-        align-items: center;
-      }
+      #body .users-list-title .hardness { display: block; width: 79px; text-align: center; }
+      #body .user-info-list-wrap { display: flex; flex-direction: column; justify-content: start; align-items: center; }
+      #body .user-info-list-wrap > li { display: flex; flex-wrap: wrap; justify-content: start; align-items: center; }
+      #body .user-info-list-wrap > li .info-wrap { display: flex; flex-wrap: wrap; justify-content: start; align-items: center; }
       #body .user-info-list-wrap > li .info-wrap .time { width: 54px; }
       #body .user-info-list-wrap > li .info-wrap .level { width: 57px; }
       #body .user-info-list-wrap > li .info-wrap .reason { width: 193px; }
-      #body .user-info-list-wrap > li .info-wrap .hardness {
-        display: block;
-        width: 50px;
-        text-align: center;
-      }
+      #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 50px; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
       .bustr-plus-hardness { display: inline-block; width: 46px; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
       .bustr-plus-hard-row { opacity: .32; }
@@ -538,26 +463,13 @@
       @media screen and (max-width: 784px) {
         #body .users-list-title .hardness { display: none; }
         #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: block; }
-        #body .user-info-list-wrap > li .info-wrap .reason {
-          width: 164px;
-          border-right: 1px solid rgb(34, 34, 34);
-        }
+        #body .user-info-list-wrap > li .info-wrap .reason { width: 164px; border-right: 1px solid rgb(34, 34, 34); }
         #body .user-info-list-wrap > li .info-wrap .hardness { width: 64px; }
       }
       @media screen and (max-width: 386px) {
-        #body .user-info-list-wrap > li .info-wrap .time {
-          width: 98px;
-          height: 37px;
-        }
-        #body .user-info-list-wrap > li .info-wrap .level {
-          width: 91px;
-          height: 37px;
-        }
-        #body .user-info-list-wrap > li .info-wrap .reason {
-          width: 171px;
-          height: 24px;
-          border-right: 1px solid rgb(34, 34, 34);
-        }
+        #body .user-info-list-wrap > li .info-wrap .time { width: 98px; height: 37px; }
+        #body .user-info-list-wrap > li .info-wrap .level { width: 91px; height: 37px; }
+        #body .user-info-list-wrap > li .info-wrap .reason { width: 171px; height: 24px; border-right: 1px solid rgb(34, 34, 34); }
         #body .user-info-list-wrap > li .info-wrap .hardness { width: 107px; }
       }
     `;
@@ -648,7 +560,6 @@
     window.addEventListener('popstate', updateToggleVisibility, { passive: true });
   }
 
-  // Original floating panel – only used when Hub is NOT present
   function renderPanel(forceOpen) {
     if (isHubPresent()) {
       removeSettingsPanel();
@@ -673,12 +584,12 @@
       <header>
         <span>${SCRIPT}</span>
         <span class="header-actions">
-          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '☀' : '☾'}</button>
+          <button type="button" class="icon-btn" data-action="theme" title="${s.theme === 'light' ? 'Use dark panel' : 'Use light panel'}">${s.theme === 'light' ? '' : '☾'}</button>
           <button type="button" data-action="close">Close</button>
         </span>
       </header>
       <div class="body">
-        <div class="status">Estimated busts left: ${formatAvailable()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
+        <div class="status">Estimated busts: ${formatAvailableWithHof()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
         <div class="hint">Custom key: ${API_KEY_PERMISSION} only. Uses user/log ${BUST_LOG_ID}.</div>
         <label>
           <span>Custom API key</span>
@@ -862,18 +773,13 @@
     panel.id = 'bustr-plus-keygen';
     const light = state.settings.theme === 'light';
     panel.style.cssText = [
-      'position:fixed',
-      'z-index:100000',
-      'right:14px',
-      'top:96px',
+      'position:fixed', 'z-index:100000', 'right:14px', 'top:96px',
       'width:min(430px,calc(100vw - 28px))',
       `background:${light ? '#f7f7f7' : '#202020'}`,
       `color:${light ? '#242424' : '#ddd'}`,
-      `border:1px solid ${light ? '#5489c9' : '#5489c9'}`,
-      'border-radius:8px',
-      'box-shadow:0 10px 30px rgba(0,0,0,.55)',
-      'font:12px/1.4 Arial,sans-serif',
-      'padding:11px',
+      `border:1px solid ${light ? '#c9c9c9' : '#5489c9'}`,
+      'border-radius:8px', 'box-shadow:0 10px 30px rgba(0,0,0,.55)',
+      'font:12px/1.4 Arial,sans-serif', 'padding:11px',
     ].join(';');
     panel.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
@@ -898,9 +804,7 @@
     document.body.appendChild(panel);
     panel.querySelector('[data-close]').addEventListener('click', () => panel.remove());
     panel.querySelector('[data-copy]').addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(API_KEY_TITLE);
-      } catch (err) {}
+      try { await navigator.clipboard.writeText(API_KEY_TITLE); } catch (err) {}
     });
     panel.querySelector('[data-autofill]').addEventListener('click', prefillTornApiKeyForm);
     setTimeout(prefillTornApiKeyForm, 800);
@@ -913,6 +817,7 @@
       const label = getNearbyText(input).toLowerCase();
       return /title|name|label/.test(label) && !/key/.test(label);
     }) || inputs.find((input) => input.type === 'text' && !input.value);
+    
     if (titleInput && !titleInput.value) {
       titleInput.value = API_KEY_TITLE;
       titleInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -924,6 +829,7 @@
       const wantsCustom = /\bcustom\b/.test(text);
       const wantsLog = /\blog\b/.test(text) && /\buser\b/.test(text);
       const rejectsBroad = /\bfull\b|\ball\b|\bfaction\b|\bcompany\b|\bforum\b|\bmessage\b|\bbazaar\b|\bnetworth\b/.test(text);
+      
       if ((wantsCustom || wantsLog) && !rejectsBroad) {
         if (control.tagName === 'OPTION') {
           control.selected = true;
@@ -953,16 +859,18 @@
 
   function escapeAttr(value) {
     return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[char]);
   }
 
   function formatAvailable() {
     return state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
+  }
+
+  function formatAvailableWithHof() {
+    const avail = formatAvailable();
+    const hof = state.hofRank != null ? state.hofRank.toLocaleString() : '?';
+    return `${avail} / ${hof}`;
   }
 
   async function loadBustData(force) {
@@ -1031,9 +939,7 @@
       }, timeoutMs);
       try {
         GM_xmlhttpRequest({
-          method: 'GET',
-          url,
-          anonymous: true,
+          method: 'GET', url, anonymous: true,
           onload: (response) => {
             if (settled) return;
             settled = true;
@@ -1189,9 +1095,12 @@
           stats.className = 'bustr-plus-nav';
           anchor.appendChild(stats);
         }
-        stats.textContent = formatAvailable();
-        stats.title = `BUSTR+ ${state.penaltyScore}/${state.penaltyThreshold || '?'}:${formatAvailable()}`;
+        // Desktop gets the new Available / HOF Busts format
+        stats.textContent = formatAvailableWithHof();
+        const hofText = state.hofRank != null ? `#${state.hofRank.toLocaleString()}` : '?';
+        stats.title = `BUSTR+ ${state.penaltyScore}/${state.penaltyThreshold || '?'} | HOF Busts: ${hofText} | Avail: ${formatAvailable()}`;
       } else {
+        // Mobile keeps the simple available count
         let pill = jailNav.querySelector('.bustr-plus-pill');
         if (!pill) {
           pill = document.createElement('span');
@@ -1201,6 +1110,7 @@
         pill.textContent = formatAvailable();
       }
     } catch (err) {
+      // Silent fail for nav stats
     } finally {
       state.navStatsPending = false;
     }
@@ -1488,78 +1398,75 @@
     }, Math.max(15, state.settings.refreshSeconds) * 1000);
   }
 
+  // =========================================================================
+  // INITIALIZATION (Cleaned & Consolidated)
+  // =========================================================================
   async function init() {
     loadState();
-    // Register after state is loaded so Hub prefs.values include the real API key
     registerWithHub();
+    
     armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
+    
     injectStyles();
     updateToggleVisibility();
     renderApiKeyGenerator();
+    
     if (!state.settings.enabled) {
       cleanupModifications();
       return;
     }
+    
+    // Scrape HOF Busts rank if not cached
+    if (getCachedHofRank() !== null) {
+      state.hofRank = getCachedHofRank();
+    } else {
+      scrapeHofRank();
+    }
+
     await loadBustData(false);
     renderAll();
-    // Re-register so Hub status / values reflect loaded bust data
-    registerWithHub();
     scanExistingBustSuccesses();
+    
     if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
       renderPanel(true);
     }
+    
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
     startPathWatcher();
+    
     window.addEventListener('resize', renderAll, { passive: true });
-    window.addEventListener('hashchange', renderApiKeyGenerator, { passive: true });
+    window.addEventListener('hashchange', () => {
+      renderApiKeyGenerator();
+      updateToggleVisibility();
+    }, { passive: true });
     window.addEventListener('pageshow', () => {
       armReturnToJailWatcher();
       returnToJailAfterQuickBustRedirect();
     }, { passive: true });
-  }
 
-  const ready = document.readyState === 'complete'
-    ? Promise.resolve()
-    : new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
-
-  ready.then(init).catch((err) => console.error(`${SCRIPT}:`, err));
-
-  // Register with hub + listen for hub lifecycle
-  function tryRegister() {
-    // Ensure storage is applied before the Hub snapshots prefs.values
-    loadState();
-    registerWithHub();
-    // Re-check after a short delay in case Hub mounts later
-    setTimeout(() => {
-      const nowPresent = isHubPresent();
-      if (nowPresent !== state.hubPresent) {
-        state.hubPresent = nowPresent;
-        updateToggleVisibility();
-        if (nowPresent) removeSettingsPanel();
-      }
-      // Refresh registration once more with latest state
-      loadState();
+    // Hub lifecycle listeners
+    document.addEventListener('torn-script-hub:ready', () => {
+      state.hubPresent = isHubPresent();
       registerWithHub();
-    }, 800);
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:dormant', () => {
+      state.hubPresent = false;
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:active', () => {
+      state.hubPresent = isHubPresent();
+      updateToggleVisibility();
+      if (state.hubPresent) removeSettingsPanel();
+    });
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', tryRegister);
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    tryRegister();
+    init();
   }
-  document.addEventListener('torn-script-hub:ready', tryRegister);
-  document.addEventListener('torn-script-hub:dormant', () => {
-    // Hub UI disabled – restore our own UI if enabled
-    state.hubPresent = false;
-    updateToggleVisibility();
-  });
-  document.addEventListener('torn-script-hub:active', () => {
-    state.hubPresent = isHubPresent();
-    updateToggleVisibility();
-    if (state.hubPresent) removeSettingsPanel();
-  });
 })();
