@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.9
-// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display via API.
+// @version      1.3.0
+// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display.
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -13,6 +13,7 @@
 // @grant        GM_openInTab
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
+// @connect      www.torn.com
 // @downloadURL  https://update.greasyfork.org/scripts/586532/Bustr%2B.user.js
 // @updateURL    https://update.greasyfork.org/scripts/586532/Bustr%2B.meta.js
 // ==/UserScript==
@@ -21,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.9';
+  const VERSION = '1.3.0';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -137,7 +138,7 @@
   }
 
   // =========================================================================
-  // TOTAL BUSTS VIA API
+  // TOTAL BUSTS VIA GM (No API Key Required!)
   // =========================================================================
   function getCachedTotalBusts() {
     const raw = store.get('totalBusts', null);
@@ -153,26 +154,35 @@
     state.totalBusts = count;
   }
 
-  function fetchTotalBustsFromAPI() {
-    if (!state.apiKey) return Promise.resolve(null);
-    const url = `https://api.torn.com/user/?selections=personalstats&key=${encodeURIComponent(state.apiKey)}`;
-    
+  function fetchTotalBustsViaGM() {
     return new Promise((resolve) => {
-      // Use the same universalGet fallback chain for reliability
-      universalGet(url, 8000).then(text => {
-        try {
-          const data = JSON.parse(text);
-          if (data.error) {
-            console.warn('[Bustr+] API error fetching personal stats:', data.error);
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: 'https://www.torn.com/personalstats.php?stats=peoplebusted&from=All',
+        anonymous: false, // Ensures your session cookies are sent
+        onload: (response) => {
+          try {
+            const html = response.responseText;
+            // Match "People busted" followed by non-digits, then the number
+            const match = html.match(/People\s+busted[^0-9]*(\d[\d,]*)/i);
+            if (match) {
+              const count = parseInt(match[1].replace(/,/g, ''), 10);
+              console.log('[Bustr+] Successfully fetched total busts:', count);
+              resolve(count);
+            } else {
+              console.warn('[Bustr+] Could not find "People busted" on personal stats page.');
+              resolve(null);
+            }
+          } catch (e) {
+            console.error('[Bustr+] Error parsing personal stats:', e);
             resolve(null);
-          } else {
-            const total = data.personalstats?.peoplebusted || 0;
-            resolve(total);
           }
-        } catch (e) {
+        },
+        onerror: (err) => {
+          console.error('[Bustr+] GM request failed for personal stats:', err);
           resolve(null);
         }
-      }).catch(() => resolve(null));
+      });
     });
   }
 
@@ -221,7 +231,7 @@
         status: getStatusText,
         prefs: {
           fields: [
-            { key: 'apiKey', type: 'password', label: 'Custom API key', default: '', placeholder: '16 character Torn custom key', hint: 'Required to fetch your bust log (for available busts) and personal stats (for total busts count). Must have User / Log permissions.' },
+            { key: 'apiKey', type: 'password', label: 'Custom API key', default: '', placeholder: '16 character Torn custom key', hint: 'Required to fetch your bust log (for available busts). Total busts are fetched securely via your browser session, so a safe "User / Log" key is perfect!' },
             { key: 'generateKey', type: 'button', label: 'Generate User / Log key', hint: 'Opens Torn API key page pre-filled for User / Log only', onClick: () => openUrl(API_KEY_URL) },
             { key: 'enabled', type: 'toggle', label: 'Active', default: true, hint: 'Turn Bustr+ on or off' },
             { key: 'skipBustConfirm', type: 'toggle', label: 'Skip bust confirm', default: true, hint: 'Automatically confirm bust actions' },
@@ -1386,13 +1396,13 @@
       return;
     }
     
-    // Fetch Total Busts via API if we have a key and no valid cache
-    if (state.apiKey && getCachedTotalBusts() === null) {
-      const total = await fetchTotalBustsFromAPI();
+    // Fetch Total Busts via GM if we don't have a valid cache
+    if (getCachedTotalBusts() === null) {
+      const total = await fetchTotalBustsViaGM();
       if (total !== null) {
         saveTotalBusts(total);
       }
-    } else if (getCachedTotalBusts() !== null) {
+    } else {
       state.totalBusts = getCachedTotalBusts();
     }
 
