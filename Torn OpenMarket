@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.4.5
+// @version      1.4.8
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,50 +15,19 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
-// CHANGELOG 1.4.5:
-// - Root cause of the inventory quality/bonus text overlapping the price/accuracy
-//   columns (1.4.3/1.4.4 tried and failed to fix this) confirmed via a real DOM dump:
-//   the inventory row is Torn's fixed-height (30px) single-line compact layout, with
-//   title-wrap and cont-wrap (price/accuracy/etc.) as fixed-width columns sharing
-//   that one line — there is no vertical wrapping involved. The injected bonus text
-//   was simply wider than the available column space, so it visually overlapped the
-//   next column regardless of any max-width/ellipsis truncation applied to the text,
-//   since even truncated text can still be wider than the room actually available.
-//   The full bonus text is no longer inserted into the row at all — only the short
-//   "Q XX.X%" quality badge (reliably narrow) plus a small "ⓘ" icon are added; tapping
-//   the icon shows the full bonus list via alert(), same as 1.4.4's approach, minus
-//   the wide text that was causing the collision.
-// - The click-to-reveal handler on inventory bonus text (added in 1.4.3) was
-//   intercepting the same click used to open/expand the equipped item row, since it
-//   sat directly on that click target and called stopPropagation()/preventDefault().
-//   The bonus text is now non-interactive again; a separate small "ⓘ" icon appended
-//   after it carries the tap-to-reveal alert() instead, so normal row clicks pass
-//   through untouched.
-//
-// CHANGELOG 1.4.3:
-// - Fixed inventory quality/bonus text visually overlapping adjacent row columns
-//   (price, accuracy) on rows with several bonuses, most visibly on the highlighted
-//   "currently equipped" row. .openmarket-inventory-meta/.openmarket-inventory-bonuses
-//   previously allowed wrapping onto a second line, which on some row layouts doesn't
-//   push the row taller and instead overlaps content beside it. Both are now
-//   single-line with ellipsis truncation, so they can never grow taller than expected.
-// - Since truncation hides the full bonus text, a tap/click handler on the bonus span
-//   now shows it via alert(). A hover title attribute alone would only work on
-//   desktop — Torn PDA and other touch devices have no hover state, so relying on
-//   hover would make truncated info completely unreachable there. The title attribute
-//   is kept too, as a harmless bonus for desktop mouse users.
-//
-// CHANGELOG 1.4.2:
-// - processItem() now calls markProcessed(el, key) on every exit path, including
-//   when calcQuality() returns null (item ID not in BASE_STATS_MAP) or when the
-//   computed quality is implausible. Previously only the success path marked the
-//   element as processed, so an unrecognised item's tile was silently re-evaluated
-//   (recomputing computeItemKey/calcQuality) on every DOM mutation indefinitely
-//   instead of being recognised as already handled.
-// - Extracted the duplicated icon-indicator-sniffing block (className/aria-label/
-//   title/data-title, lowercased and joined) out of displayCase.extractVisibleStats
-//   and inventory.extractInventoryStats into a single shared getIconIndicators()
-//   helper. No behavior change, removes copy-pasted logic.
+// CHANGELOG 1.4.8:
+// - extractInventoryBonuses() now returns { weaponBonuses, modBonuses } instead of a
+//   single filtered list — mods (100mW Laser, Tactical Brake, etc.) are no longer
+//   discarded outright, just kept separate from the weapon's own bonuses. The "ⓘ"
+//   icon's tooltip previously duplicated the same weapon bonus text already visible
+//   inline; it now shows mod bonuses only, and only appears at all when the item
+//   actually has a mod equipped. Weapon bonuses remain inline exactly as in 1.4.6/1.4.7.
+// - Dropped the click-to-alert() popup on the inventory "ⓘ" icon (added in 1.4.4/kept
+//   through 1.4.6) per explicit request — it's now a plain hover-tooltip affordance
+//   only (title attribute), matching the bonus text itself. No click listener means
+//   nothing here can ever intercept the row's own click/tap again. Trade-off: touch/
+//   PDA users have no way to see truncated text, same as hovering the bonus text
+//   directly would already be — accepted as the preferred behavior over the alert().
 
 (function () {
     'use strict';
@@ -1154,12 +1123,33 @@
             return null;
         },
 
+        // FIX (1.4.8): returns { weaponBonuses, modBonuses } instead of a single
+        // filtered list. 1.4.6 dropped mod bonuses (attached scopes/lasers/grips)
+        // entirely to avoid row-overlap; that also meant a weapon with a mod equipped
+        // showed no indication of it anywhere. Mods are now collected separately and
+        // shown only via the "ⓘ" tooltip (see processAll), never inline, so they still
+        // don't risk overlapping adjacent columns, but aren't silently dropped either.
+        // Structural detection is unchanged: mod bonuses are grouped inside an
+        // <li ... data-attachments-itemid="...">, carrying the attached mod's own item
+        // ID — confirmed via live DOM. The weapon's own bonus sits in a plain <li>
+        // with no such attribute.
         extractInventoryBonuses(el) {
-            const bonuses = [];
-            const seen = new Set();
+            const weaponBonuses = [];
+            const modBonuses = [];
+            const seenWeapon = new Set();
+            const seenMod = new Set();
+
+            const pushBonus = (target, seen, title, value, description) => {
+                if (title && !seen.has(title.toLowerCase())) {
+                    seen.add(title.toLowerCase());
+                    target.push({ title, value, description });
+                }
+            };
 
             // data-bonus-attachment-* icons (same as bazaar)
             qsa(this.selectors.bonusIcons, el).forEach(icon => {
+                const isMod = !!icon.closest('li[data-attachments-itemid]');
+
                 let titleAttr = icon.getAttribute(this.selectors.bonusTitleAttr) || '';
                 let descAttr = icon.getAttribute(this.selectors.bonusDescAttr) || '';
 
@@ -1177,14 +1167,17 @@
                 const valueMatch = descText.match(NUMBER_REGEX) || titleAttr.match(NUMBER_REGEX);
                 const value = valueMatch ? parseFloat(valueMatch[1]) : null;
 
-                if (title && !seen.has(title.toLowerCase())) {
-                    seen.add(title.toLowerCase());
-                    bonuses.push({ title, value, description: descText || titleAttr });
+                if (isMod) {
+                    pushBonus(modBonuses, seenMod, title, value, descText || titleAttr);
+                } else {
+                    pushBonus(weaponBonuses, seenWeapon, title, value, descText || titleAttr);
                 }
             });
 
             // title= on span wrappers around bonus icons
             qsa('.iconsbonuses span[title], [class*="iconsbonuses"] span[title]', el).forEach(span => {
+                const isMod = !!span.closest('li[data-attachments-itemid]');
+
                 const titleAttr = span.getAttribute('title') || '';
                 if (!titleAttr) return;
                 const tmp = create('div');
@@ -1193,13 +1186,15 @@
                 const descText = (tmp.textContent || '').replace(title, '').trim();
                 const valueMatch = (descText || titleAttr).match(NUMBER_REGEX);
                 const value = valueMatch ? parseFloat(valueMatch[1]) : null;
-                if (title && !seen.has(title.toLowerCase())) {
-                    seen.add(title.toLowerCase());
-                    bonuses.push({ title, value, description: descText || titleAttr });
+
+                if (isMod) {
+                    pushBonus(modBonuses, seenMod, title, value, descText || titleAttr);
+                } else {
+                    pushBonus(weaponBonuses, seenWeapon, title, value, descText || titleAttr);
                 }
             });
 
-            return bonuses;
+            return { weaponBonuses, modBonuses };
         },
 
         extractInventoryStats(el, itemID) {
@@ -1298,9 +1293,10 @@
                 const stats = this.extractInventoryStats(el, itemID);
                 if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) return;
 
-                const bonuses = this.extractInventoryBonuses(el);
+                const { weaponBonuses, modBonuses } = this.extractInventoryBonuses(el);
+                const allBonuses = [...weaponBonuses, ...modBonuses];
 
-                const key = computeItemKey(itemID, stats, bonuses);
+                const key = computeItemKey(itemID, stats, allBonuses);
                 if (isProcessed(el, key)) return;
 
                 // Resolve image + title anchors (inventory markup varies by category)
@@ -1316,7 +1312,7 @@
                 processItem(el, {
                     itemID,
                     stats,
-                    bonuses,
+                    bonuses: allBonuses,
                     selectors: {
                         imageWrapper: null,
                         title: null
@@ -1366,26 +1362,61 @@
                         }));
                     }
 
-                    if (bonuses.length > 0) {
+                    if (weaponBonuses.length > 0) {
                         // FIX (1.4.5): earlier attempts (1.4.3/1.4.4) tried to fit the
-                        // full bonus text inline next to the item name, truncated or
-                        // not. Confirmed via a real DOM dump that this row is Torn's
-                        // fixed-height (30px) single-line compact inventory row —
-                        // title-wrap and cont-wrap (price/accuracy/etc.) are laid out
-                        // as fixed-width columns sharing that one line, not stacked.
-                        // There is no vertical wrapping happening; the bonus text was
-                        // simply wider than the sliver of column space actually
-                        // available before the price/accuracy column starts, so it
-                        // visually overlapped that column regardless of any max-width/
-                        // ellipsis truncation applied to the text itself — truncating
-                        // the text doesn't help if even the truncated width is still
-                        // wider than the available room. Only the short "Q XX.X%"
-                        // badge is reliably narrow enough to coexist safely; the full
-                        // bonus text is no longer inserted into the row at all. A
-                        // small "ⓘ" icon (same tap-to-reveal approach as 1.4.4) is the
-                        // only addition, since its width is negligible regardless of
-                        // column layout.
-                        const fullBonusText = bonuses
+                        // full bonus text inline next to the item name on Torn's
+                        // fixed-height (30px) single-line compact inventory row, where
+                        // title-wrap and cont-wrap (price/accuracy/etc.) are fixed-
+                        // width columns sharing that one line — there's no vertical
+                        // wrapping happening, so text truncation alone didn't stop the
+                        // overlap: even truncated text can be wider than the room
+                        // actually available. 1.4.5 dropped inline bonus text entirely
+                        // and showed only a "ⓘ" icon as a result.
+                        //
+                        // FIX (1.4.6): mod bonuses (attached scopes/lasers/grips etc.)
+                        // are excluded from this inline text, keeping only the
+                        // weapon's own intrinsic bonuses. In the common case this
+                        // leaves just one short bonus (e.g. "Puncture: 28%"), which
+                        // fits inline without issue. The single-line truncation CSS
+                        // (.openmarket-inventory-bonuses) stays as a safety net for
+                        // the less common weapon with several of its own bonuses.
+                        //
+                        // FIX (1.4.8): mods are no longer discarded — see
+                        // extractInventoryBonuses(). They're surfaced separately below,
+                        // via the "ⓘ" tooltip only, never inline.
+                        const weaponBonusText = weaponBonuses
+                            .map(b => {
+                                if (FIXED_BONUSES.includes(b.title)) return b.title;
+                                const unit = getUnitFromDescription(b.description, b.value);
+                                return b.value != null ? `${b.title}: ${b.value}${unit}` : b.title;
+                            })
+                            .join(' · ');
+
+                        const bonusContainer = create('span', {
+                            className: 'openmarket-bonuses openmarket-inventory-bonuses',
+                            title: weaponBonusText,
+                            style: {
+                                display: 'inline',
+                                color: getBonusColour()
+                            }
+                        });
+                        weaponBonuses.forEach((bonus, i) => {
+                            if (i > 0) {
+                                bonusContainer.appendChild(document.createTextNode(' · '));
+                            }
+                            bonusContainer.appendChild(createBonusEl(bonus));
+                        });
+                        meta.appendChild(bonusContainer);
+                    }
+
+                    if (modBonuses.length > 0) {
+                        // FIX (1.4.8): mods (e.g. 100mW Laser, Tactical Brake) are
+                        // shown only here — as a hover tooltip on this icon — never
+                        // inline, since even one or two mod names/values tend to be
+                        // too wide for the fixed-width column (per 1.4.5's root-cause
+                        // finding). Tooltip text is mod-only, so it never repeats what
+                        // weaponBonuses already shows inline above.
+                        const modBonusText = modBonuses
                             .map(b => {
                                 if (FIXED_BONUSES.includes(b.title)) return b.title;
                                 const unit = getUnitFromDescription(b.description, b.value);
@@ -1395,19 +1426,16 @@
 
                         const infoIcon = create('span', {
                             textContent: 'ⓘ',
-                            title: fullBonusText,
+                            title: modBonusText,
                             style: {
                                 marginLeft: '3px',
-                                cursor: 'pointer',
+                                cursor: 'help',
                                 opacity: '0.75',
                                 fontSize: '11px'
                             }
                         });
-                        infoIcon.addEventListener('click', (e) => {
-                            e.stopPropagation();
-                            e.preventDefault();
-                            alert(fullBonusText);
-                        });
+                        // FIX (1.4.7): plain hover-tooltip affordance only, no click
+                        // listener — nothing here can intercept the row's own tap.
                         meta.appendChild(infoIcon);
                     }
 
@@ -1586,14 +1614,28 @@
         .openmarket-inventory-quality {
             white-space: nowrap;
         }
+        .openmarket-inventory-bonuses {
+            /* FIX (1.4.6): safety net for a weapon with several intrinsic (non-mod)
+               bonuses of its own — mods are now excluded before this ever gets built
+               (see extractInventoryBonuses), so this rarely needs to actually truncate
+               in practice, but caps it at one line with ellipsis just in case, rather
+               than letting it overlap the price/accuracy column again. */
+            max-width: 180px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        .openmarket-inventory-bonuses div {
+            display: inline;
+            font-size: 11px !important;
+        }
         .openmarket-inventory-meta {
-            /* FIX (1.4.5): .openmarket-inventory-bonuses truncation rules removed —
-               the full bonus text is no longer inserted inline on the compact
-               single-line inventory row at all (see processAll() comment), only the
-               short quality badge and a small icon, so no width constraint is needed
-               here anymore either. */
             display: inline-flex;
             align-items: center;
+            flex-wrap: nowrap;
+            overflow: hidden;
         }
     `;
         const style = document.createElement('style');
