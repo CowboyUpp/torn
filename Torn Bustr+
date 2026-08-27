@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.0
+// @version      1.3.1
 // @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -46,6 +46,7 @@
     theme: 'dark',
     redLimit: 0,
     greenLimit: 3,
+    manualTotalBusts: '' // NEW: Manual fallback
   };
 
   let state = {
@@ -138,9 +139,13 @@
   }
 
   // =========================================================================
-  // TOTAL BUSTS VIA GM (No API Key Required!)
+  // TOTAL BUSTS VIA GM (With Manual Fallback)
   // =========================================================================
   function getCachedTotalBusts() {
+    // If user set a manual value, always use it
+    if (state.settings.manualTotalBusts) {
+      return parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
+    }
     const raw = store.get('totalBusts', null);
     if (!raw || typeof raw !== 'object' || raw.count === null || !raw.ts) return null;
     if (Date.now() - raw.ts < CACHE_TTL_TOTAL) {
@@ -163,6 +168,11 @@
         onload: (response) => {
           try {
             const html = response.responseText;
+            // Debug: log first 300 chars to see if it's a login page or the real page
+            if (!html.includes('People') || !html.includes('busted')) {
+              console.warn('[Bustr+] Personal stats page did not contain expected text. Snippet:', html.substring(0, 300));
+            }
+            
             // Match "People busted" followed by non-digits, then the number
             const match = html.match(/People\s+busted[^0-9]*(\d[\d,]*)/i);
             if (match) {
@@ -170,7 +180,7 @@
               console.log('[Bustr+] Successfully fetched total busts:', count);
               resolve(count);
             } else {
-              console.warn('[Bustr+] Could not find "People busted" on personal stats page.');
+              console.warn('[Bustr+] Could not find "People busted" on personal stats page. You can enter it manually in settings.');
               resolve(null);
             }
           } catch (e) {
@@ -245,6 +255,7 @@
             { key: 'decayWindowHours', type: 'number', label: 'Decay window (hrs)', default: 72, min: 1, hint: 'How far back to look when estimating bust fatigue.' },
             { key: 'greenLimit', type: 'number', label: 'Green at busts', default: 3, min: 0, hint: 'When the jail menu counter turns green.' },
             { key: 'redLimit', type: 'number', label: 'Red at busts', default: 0, min: 0, hint: 'When the jail menu counter turns red.' },
+            { key: 'manualTotalBusts', type: 'text', label: 'Total Busts (Manual)', default: '', placeholder: 'e.g., 8857', hint: 'Optional: If background fetching fails, enter your total busts here and it will be used permanently.' },
           ],
           values: {
             enabled: state.settings.enabled,
@@ -260,6 +271,7 @@
             greenLimit: state.settings.greenLimit,
             redLimit: state.settings.redLimit,
             apiKey: state.apiKey || '',
+            manualTotalBusts: state.settings.manualTotalBusts || '',
           },
           onSave: (values) => {
             const wasEnabled = state.settings.enabled;
@@ -277,6 +289,7 @@
             state.settings.decayWindowHours = Math.max(1, Number(values.decayWindowHours) || 72);
             state.settings.greenLimit = Math.max(0, Number(values.greenLimit) || 0);
             state.settings.redLimit = Math.max(0, Number(values.redLimit) || 0);
+            state.settings.manualTotalBusts = String(values.manualTotalBusts || '').trim();
 
             if (typeof values.apiKey === 'string') {
               const key = values.apiKey.trim();
@@ -289,6 +302,11 @@
             saveSettings();
             recalcStats();
             saveStats();
+
+            // If manual total busts was set, update state immediately
+            if (state.settings.manualTotalBusts) {
+              state.totalBusts = parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
+            }
 
             if (!wasEnabled && state.settings.enabled) {
               keyPromise = loadBustData(false).then(() => {
@@ -592,6 +610,10 @@
           <label><span>Sort easiest</span><input id="bustr-plus-sortByHardness" type="checkbox" ${s.sortByHardness ? 'checked' : ''}></label>
           <label><span>Skip confirm</span><input id="bustr-plus-skipBustConfirm" type="checkbox" ${s.skipBustConfirm ? 'checked' : ''}></label>
         </div>
+        <label>
+          <span>Total Busts (Manual Fallback)</span>
+          <input id="bustr-plus-manual-total" type="text" value="${escapeAttr(s.manualTotalBusts)}" placeholder="e.g., 8857">
+        </label>
         <div class="row actions">
           <button type="button" class="danger" data-action="forget-key">Forget key</button>
           <button type="button" class="primary" data-action="save-settings">Save settings</button>
@@ -651,7 +673,7 @@
       deleteApiKey();
       state.timestamps = [];
       state.availableBusts = null;
-      state.totalBusts = null; // Clear cached total when key is removed
+      state.totalBusts = null;
       saveStats();
       renderAll();
       renderPanel(true);
@@ -731,6 +753,12 @@
     state.settings.hideHardTargets = panel.querySelector('#bustr-plus-hideHardTargets').checked;
     state.settings.sortByHardness = panel.querySelector('#bustr-plus-sortByHardness').checked;
     state.settings.skipBustConfirm = panel.querySelector('#bustr-plus-skipBustConfirm').checked;
+    
+    // Read manual total busts
+    const manualInput = panel.querySelector('#bustr-plus-manual-total');
+    if (manualInput) {
+      state.settings.manualTotalBusts = manualInput.value.trim();
+    }
   }
 
   function openUrl(url) {
@@ -1396,8 +1424,11 @@
       return;
     }
     
-    // Fetch Total Busts via GM if we don't have a valid cache
-    if (getCachedTotalBusts() === null) {
+    // If manual total busts is set, use it immediately
+    if (state.settings.manualTotalBusts) {
+      state.totalBusts = parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
+    } else if (getCachedTotalBusts() === null) {
+      // Otherwise try to fetch it
       const total = await fetchTotalBustsViaGM();
       if (total !== null) {
         saveTotalBusts(total);
