@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.8
-// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display.
+// @version      1.2.9
+// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration and Total Busts display via API.
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.8';
+  const VERSION = '1.2.9';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlusLogs';
   const API_KEY_PERMISSION = 'User / Log';
@@ -55,7 +55,6 @@
     penaltyThreshold: 0,
     availableBusts: null,
     totalBusts: null,
-    isScrapingTotal: false,
     lastFetchMs: 0,
     lastLocalBustMs: 0,
     lastLocalBustSignature: '',
@@ -138,7 +137,7 @@
   }
 
   // =========================================================================
-  // TOTAL BUSTS FROM PERSONAL STATS
+  // TOTAL BUSTS VIA API
   // =========================================================================
   function getCachedTotalBusts() {
     const raw = store.get('totalBusts', null);
@@ -154,86 +153,27 @@
     state.totalBusts = count;
   }
 
-  function extractTotalBustsFromPersonalStats(root) {
-    // Method 1: Look for "People busted" label and get the number next to it
-    const labels = root.querySelectorAll('td, div, span, th, p');
-    for (const label of labels) {
-      if (/people\s+busted/i.test(label.textContent)) {
-        const parent = label.closest('tr') || label.closest('div') || label.parentElement;
-        if (parent) {
-          const match = parent.textContent.match(/(\d[\d,]+)/);
-          if (match) {
-            return parseInt(match[1].replace(/,/g, ''), 10);
+  function fetchTotalBustsFromAPI() {
+    if (!state.apiKey) return Promise.resolve(null);
+    const url = `https://api.torn.com/user/?selections=personalstats&key=${encodeURIComponent(state.apiKey)}`;
+    
+    return new Promise((resolve) => {
+      // Use the same universalGet fallback chain for reliability
+      universalGet(url, 8000).then(text => {
+        try {
+          const data = JSON.parse(text);
+          if (data.error) {
+            console.warn('[Bustr+] API error fetching personal stats:', data.error);
+            resolve(null);
+          } else {
+            const total = data.personalstats?.peoplebusted || 0;
+            resolve(total);
           }
+        } catch (e) {
+          resolve(null);
         }
-      }
-    }
-    
-    // Method 2: Fallback to finding the largest number on the page (often the main stat)
-    const allText = root.body?.textContent || root.textContent;
-    const numbers = allText.match(/\b(\d{1,3}(?:,\d{3})+)\b/g);
-    if (numbers && numbers.length > 0) {
-      const sorted = numbers.map(n => parseInt(n.replace(/,/g, ''), 10)).sort((a, b) => b - a);
-      if (sorted[0] > 100) return sorted[0]; // Sanity check
-    }
-    
-    return null;
-  }
-
-  function scrapeTotalBusts() {
-    if (state.isScrapingTotal || !state.settings.enabled) return;
-    state.isScrapingTotal = true;
-    
-    // Get user ID from current page nav profile link if possible
-    let userId = null;
-    const userLink = document.querySelector('#nav-profile a[href*="XID="]');
-    if (userLink) {
-      const match = userLink.href.match(/XID=(\d+)/);
-      if (match) userId = match[1];
-    }
-    
-    document.querySelector('#bustr-stats-iframe')?.remove();
-    const iframe = document.createElement('iframe');
-    iframe.id = 'bustr-stats-iframe';
-    
-    // Try to load personal stats page with user ID for direct access
-    const statsUrl = userId 
-      ? `https://www.torn.com/personalstats.php?ID=${userId}&stats=peoplebusted&from=All`
-      : 'https://www.torn.com/personalstats.php?stats=peoplebusted&from=All';
-    
-    iframe.src = statsUrl;
-    iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
-    document.body.appendChild(iframe);
-
-    let attempts = 0;
-    const maxAttempts = 60;
-    const iv = setInterval(() => {
-      attempts++;
-      try {
-        const doc = iframe.contentDocument || iframe.contentWindow?.document;
-        if (!doc || doc.readyState !== 'complete') return;
-        
-        const count = extractTotalBustsFromPersonalStats(doc);
-        if (count !== null && count > 0) {
-          saveTotalBusts(count);
-          console.log('[Bustr+] Auto-scraped total busts from personal stats:', count);
-          clearInterval(iv);
-          iframe.remove();
-          state.isScrapingTotal = false;
-          renderAll();
-          return;
-        }
-      } catch (e) {
-        // cross-origin / still loading
-      }
-      
-      if (attempts > maxAttempts) {
-        clearInterval(iv);
-        iframe.remove();
-        state.isScrapingTotal = false;
-        console.warn('[Bustr+] Personal stats scrape timed out. Please ensure you are logged in.');
-      }
-    }, 500);
+      }).catch(() => resolve(null));
+    });
   }
 
   // =========================================================================
@@ -281,7 +221,7 @@
         status: getStatusText,
         prefs: {
           fields: [
-            { key: 'apiKey', type: 'password', label: 'Custom API key', default: '', placeholder: '16 character Torn custom key', hint: 'User / Log permission only. Used for bust log 5360.' },
+            { key: 'apiKey', type: 'password', label: 'Custom API key', default: '', placeholder: '16 character Torn custom key', hint: 'Required to fetch your bust log (for available busts) and personal stats (for total busts count). Must have User / Log permissions.' },
             { key: 'generateKey', type: 'button', label: 'Generate User / Log key', hint: 'Opens Torn API key page pre-filled for User / Log only', onClick: () => openUrl(API_KEY_URL) },
             { key: 'enabled', type: 'toggle', label: 'Active', default: true, hint: 'Turn Bustr+ on or off' },
             { key: 'skipBustConfirm', type: 'toggle', label: 'Skip bust confirm', default: true, hint: 'Automatically confirm bust actions' },
@@ -701,6 +641,7 @@
       deleteApiKey();
       state.timestamps = [];
       state.availableBusts = null;
+      state.totalBusts = null; // Clear cached total when key is removed
       saveStats();
       renderAll();
       renderPanel(true);
@@ -1445,11 +1386,14 @@
       return;
     }
     
-    // Scrape Total Busts from personal stats if not cached
-    if (getCachedTotalBusts() !== null) {
+    // Fetch Total Busts via API if we have a key and no valid cache
+    if (state.apiKey && getCachedTotalBusts() === null) {
+      const total = await fetchTotalBustsFromAPI();
+      if (total !== null) {
+        saveTotalBusts(total);
+      }
+    } else if (getCachedTotalBusts() !== null) {
       state.totalBusts = getCachedTotalBusts();
-    } else {
-      scrapeTotalBusts();
     }
 
     await loadBustData(false);
