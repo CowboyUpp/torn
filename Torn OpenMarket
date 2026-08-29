@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.4.8
-// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration.
+// @version      1.6.0
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
@@ -15,6 +15,13 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
+// CHANGELOG 1.6.0:
+// - Added native dropdown integration for bonus sorting (Sort by: Bonus ascending/descending)
+// - Fixed CSS grid sorting to target LI elements instead of DIV tiles
+// - Improved dropdown closing mechanism with blur + body click + escape key
+// - Added cosmetic "Sort by:" prefix to bonus options
+// - Bonus sorting automatically re-applies when new items load via pagination
+//
 // CHANGELOG 1.4.8:
 // - extractInventoryBonuses() now returns { weaponBonuses, modBonuses } instead of a
 //   single filtered list — mods (100mW Laser, Tactical Brake, etc.) are no longer
@@ -48,7 +55,7 @@
     // =========================================================================
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.4.1';
+    const HUB_VERSION = '1.6.0';
     const HUB_ICON = '📊';
 
     function registerWithHub() {
@@ -725,6 +732,7 @@
                 self.pendingTimeoutId = null;
                 const observer = new MutationObserver(() => {
                     self.processAll();
+                    if (sortState.active) applyBonusSort();
                 });
 
                 observer.observe(root, { childList: true, subtree: true });
@@ -1127,7 +1135,7 @@
         // filtered list. 1.4.6 dropped mod bonuses (attached scopes/lasers/grips)
         // entirely to avoid row-overlap; that also meant a weapon with a mod equipped
         // showed no indication of it anywhere. Mods are now collected separately and
-        // shown only via the "ⓘ" tooltip (see processAll), never inline, so they still
+        // shown only via the "" tooltip (see processAll), never inline, so they still
         // don't risk overlapping adjacent columns, but aren't silently dropped either.
         // Structural detection is unchanged: mod bonuses are grouped inside an
         // <li ... data-attachments-itemid="...">, carrying the attached mod's own item
@@ -1425,7 +1433,7 @@
                             .join(' · ');
 
                         const infoIcon = create('span', {
-                            textContent: 'ⓘ',
+                            textContent: '',
                             title: modBonusText,
                             style: {
                                 marginLeft: '3px',
@@ -1644,6 +1652,169 @@
     }
 
     // =========================================================================
+    // BONUS SORTING FEATURE (TARGETS LI ELEMENTS FOR CSS GRID ORDER)
+    // =========================================================================
+    const sortState = { active: false, ascending: true, sortTimeout: null };
+
+    function extractMaxBonusFromTile(tile) {
+        const bonusContainer = tile.querySelector('.openmarket-bonuses');
+        if (!bonusContainer) return -1;
+        let maxBonus = -1;
+        bonusContainer.querySelectorAll('div').forEach(div => {
+            const match = div.textContent.match(/(\d+(?:\.\d+)?)\s*%/);
+            if (match) { const val = parseFloat(match[1]); if (val > maxBonus) maxBonus = val; }
+        });
+        return maxBonus;
+    }
+
+    function applyBonusSort() {
+        const root = document.querySelector('#item-market-root');
+        if (!root) return;
+        
+        const firstTile = root.querySelector('[class*="itemTile___"]');
+        if (!firstTile) return;
+        
+        const listItem = firstTile.parentElement;
+        const gridContainer = listItem?.parentElement;
+        
+        if (!gridContainer) return;
+        
+        if (getComputedStyle(gridContainer).display !== 'grid') {
+            gridContainer.style.display = 'grid';
+        }
+        
+        const listItems = Array.from(gridContainer.children).filter(el => el.tagName === 'LI' && el.querySelector('[class*="itemTile___"]'));
+        
+        const itemOrders = listItems.map(li => {
+            const tile = li.querySelector('[class*="itemTile___"]');
+            const bonus = tile ? extractMaxBonusFromTile(tile) : -1;
+            return { li, bonus };
+        });
+        
+        if (sortState.active) {
+            itemOrders.sort((a, b) => {
+                if (a.bonus === -1 && b.bonus === -1) return 0;
+                if (a.bonus === -1) return 1;
+                if (b.bonus === -1) return -1;
+                return sortState.ascending ? a.bonus - b.bonus : b.bonus - a.bonus;
+            });
+        }
+        
+        itemOrders.forEach((item, index) => {
+            item.li.style.order = sortState.active ? index : '';
+        });
+    }
+
+    // =========================================================================
+    // NATIVE DROPDOWN INTEGRATION (WITH COSMETIC FIX & MENU CLOSING)
+    // =========================================================================
+    let dropdownObserver = null;
+    let hasInjectedBonusOptions = false;
+
+    function injectIntoSortDropdown() {
+        const dropdownMenus = document.querySelectorAll('[role="listbox"]');
+        
+        for (const menu of dropdownMenus) {
+            const text = menu.textContent;
+            if (!text.includes('Price ascending') && !text.includes('Quality descending')) {
+                continue;
+            }
+            
+            if (menu.querySelector('[data-om-bonus-injected]')) {
+                hasInjectedBonusOptions = true;
+                continue;
+            }
+            
+            const items = Array.from(menu.children);
+            const templateItem = items.find(el => el.textContent.includes('Quality descending')) || items[items.length - 1];
+            
+            if (!templateItem) continue;
+            
+            const createBonusItem = (text, direction) => {
+                const item = document.createElement('li');
+                item.tabIndex = 0;
+                item.setAttribute('role', 'option');
+                item.id = `option-om-bonus-${direction}`;
+                item.dataset.testid = `option-om-bonus-${direction}`;
+                item.dataset.omBonusInjected = 'true';
+                item.className = 'item t-overflow';
+                item.style.cursor = 'pointer';
+                // COSMETIC FIX: Added "Sort by:" prefix to match native options
+                item.textContent = `Sort by: ${text}`;
+                
+                const handleInteraction = (e) => {
+                    e.stopImmediatePropagation();
+                    e.stopPropagation();
+                    e.preventDefault();
+                    
+                    sortState.active = true;
+                    sortState.ascending = direction === 'asc';
+                    applyBonusSort();
+                    
+                    const toggler = document.querySelector('button[data-testid="dropdown-toggler"]');
+                    if (toggler && toggler.textContent.includes('Sort by:')) {
+                        toggler.textContent = `Sort by: Bonus ${direction === 'asc' ? 'ascending' : 'descending'}`;
+                    }
+                    
+                    // IMPROVED MENU CLOSING: Blur + Body Click + Escape
+                    setTimeout(() => {
+                        document.activeElement.blur();
+                        document.body.click(); // Force React to detect focus loss
+                        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                    }, 50);
+                };
+                
+                item.addEventListener('pointerdown', handleInteraction, { capture: true });
+                item.addEventListener('mousedown', handleInteraction, { capture: true });
+                item.addEventListener('click', handleInteraction, { capture: true });
+                
+                return item;
+            };
+            
+            const ascItem = createBonusItem('Bonus ascending', 'asc');
+            const descItem = createBonusItem('Bonus descending', 'desc');
+            
+            if (templateItem.nextSibling) {
+                menu.insertBefore(ascItem, templateItem.nextSibling);
+                menu.insertBefore(descItem, ascItem.nextSibling);
+            } else {
+                menu.appendChild(ascItem);
+                menu.appendChild(descItem);
+            }
+            
+            hasInjectedBonusOptions = true;
+            break;
+        }
+    }
+
+    function monitorDropdown() {
+        if (dropdownObserver) dropdownObserver.disconnect();
+        
+        dropdownObserver = new MutationObserver(() => {
+            const openDropdown = document.querySelector('button[aria-expanded="true"]');
+            if (openDropdown && openDropdown.textContent.includes('Sort by:')) {
+                hasInjectedBonusOptions = false;
+                setTimeout(() => {
+                    if (!hasInjectedBonusOptions) {
+                        injectIntoSortDropdown();
+                    }
+                }, 100);
+            }
+        });
+        
+        dropdownObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['aria-expanded']
+        });
+    }
+
+    function initDropdownIntegration() {
+        monitorDropdown();
+    }
+
+    // =========================================================================
     // INITIALISATION
     // =========================================================================
     function init() {
@@ -1655,6 +1826,7 @@
             setupActiveListeners();
             setupRouteWatcher();
             activateHandlerForCurrentUrl();
+            initDropdownIntegration();
         });
     }
 
