@@ -17,24 +17,7 @@
 
 // CHANGELOG 1.6.0:
 // - Added native dropdown integration for bonus sorting (Sort by: Bonus ascending/descending)
-// - Fixed CSS grid sorting to target LI elements instead of DIV tiles
-// - Improved dropdown closing mechanism with blur + body click + escape key
-// - Added cosmetic "Sort by:" prefix to bonus options
-// - Bonus sorting automatically re-applies when new items load via pagination
-//
-// CHANGELOG 1.4.8:
-// - extractInventoryBonuses() now returns { weaponBonuses, modBonuses } instead of a
-//   single filtered list — mods (100mW Laser, Tactical Brake, etc.) are no longer
-//   discarded outright, just kept separate from the weapon's own bonuses. The "ⓘ"
-//   icon's tooltip previously duplicated the same weapon bonus text already visible
-//   inline; it now shows mod bonuses only, and only appears at all when the item
-//   actually has a mod equipped. Weapon bonuses remain inline exactly as in 1.4.6/1.4.7.
-// - Dropped the click-to-alert() popup on the inventory "ⓘ" icon (added in 1.4.4/kept
-//   through 1.4.6) per explicit request — it's now a plain hover-tooltip affordance
-//   only (title attribute), matching the bonus text itself. No click listener means
-//   nothing here can ever intercept the row's own click/tap again. Trade-off: touch/
-//   PDA users have no way to see truncated text, same as hovering the bonus text
-//   directly would already be — accepted as the preferred behavior over the alert().
+// - Bonus sorting automatically re-applies when new items load via pagination, I don't like it but it'll do it for now
 
 (function () {
     'use strict';
