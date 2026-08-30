@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.2.2
-// @description  Safer Torn jail-busting helper with custom user/log key setup, bust budget estimate, hardness scores, filtering, sorting, and confirmation skipping. Now with full Script Hub integration.
+// @version      1.4.1
+// @description  Safer Torn jail-busting helper. One custom key (Log + Personal Stats). Available bust estimate, total people busted on desktop, hardness scores, filtering, sorting, confirm skip. Script Hub + standalone. PDA shows available only (compact nav).
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -13,21 +13,24 @@
 // @grant        GM_openInTab
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
-// @downloadURL https://update.greasyfork.org/scripts/586532/Bustr%2B.user.js
-// @updateURL https://update.greasyfork.org/scripts/586532/Bustr%2B.meta.js
+// @connect      www.torn.com
+// @downloadURL  https://update.greasyfork.org/scripts/586532/Bustr%2B.user.js
+// @updateURL    https://update.greasyfork.org/scripts/586532/Bustr%2B.meta.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.2.2';
+  const VERSION = '1.4.1';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
-  const API_KEY_TITLE = 'BUSTRPlusLogs';
-  const API_KEY_PERMISSION = 'User / Log';
-  const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlusLogs&user=log';
+  const API_KEY_TITLE = 'BUSTRPlus';
+  // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
+  const API_KEY_PERMISSION = 'User / Log + Personal Stats';
+  const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlus&user=log,personalstats';
   const BUST_LOG_ID = 5360;
   const HUB_ID = 'bustr-plus';
+  const CACHE_TTL_TOTAL = 6 * 60 * 60 * 1000; // 6 hours — total changes slowly
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -44,6 +47,7 @@
     theme: 'dark',
     redLimit: 0,
     greenLimit: 3,
+    manualTotalBusts: '' // NEW: Manual fallback
   };
 
   let state = {
@@ -53,6 +57,7 @@
     penaltyScore: 0,
     penaltyThreshold: 0,
     availableBusts: null,
+    totalBusts: null,
     lastFetchMs: 0,
     lastLocalBustMs: 0,
     lastLocalBustSignature: '',
@@ -135,6 +140,129 @@
   }
 
   // =========================================================================
+  // TOTAL BUSTS VIA GM (With Manual Fallback)
+  // =========================================================================
+  function getCachedTotalBusts() {
+    // If user set a manual value, always use it
+    if (state.settings.manualTotalBusts) {
+      return parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
+    }
+    const raw = store.get('totalBusts', null);
+    if (!raw || typeof raw !== 'object' || raw.count === null || !raw.ts) return null;
+    if (Date.now() - raw.ts < CACHE_TTL_TOTAL) {
+      return raw.count;
+    }
+    return null;
+  }
+
+  function saveTotalBusts(count) {
+    store.set('totalBusts', { count, ts: Date.now() });
+    state.totalBusts = count;
+  }
+
+  /**
+   * Total "People busted" from Torn API personalstats.peoplebusted.
+   * Requires the API key to include user → personalstats (Generate key button
+   * is pre-filled for log + personalstats). Falls back to page scrape, then manual.
+   */
+  async function fetchTotalBustsViaAPI() {
+    if (!state.apiKey) return null;
+    try {
+      // Narrow request keeps payload small; key must include user → personalstats
+      const url =
+        `https://api.torn.com/user/?selections=personalstats&stat=peoplebusted` +
+        `&comment=BustrPlus&key=${encodeURIComponent(state.apiKey)}`;
+      const data = await requestJson(url);
+      if (data && data.error) {
+        const msg = data.error.error || data.error;
+        console.warn('[Bustr+] personalstats API error:', msg);
+        return null;
+      }
+      const count = parsePeopleBusted(data);
+      if (Number.isFinite(count) && count >= 0) {
+        console.log('[Bustr+] Total busts from API:', count);
+        return count;
+      }
+      console.warn('[Bustr+] personalstats response missing peoplebusted', data);
+      return null;
+    } catch (err) {
+      console.warn('[Bustr+] fetchTotalBustsViaAPI failed:', err);
+      return null;
+    }
+  }
+
+  function parsePeopleBusted(data) {
+    if (!data) return null;
+    const ps = data.personalstats;
+    if (ps == null) return null;
+    if (typeof ps === 'number' && Number.isFinite(ps)) return ps;
+    if (typeof ps === 'object' && !Array.isArray(ps)) {
+      if (Number.isFinite(Number(ps.peoplebusted))) return Number(ps.peoplebusted);
+      // nested category bags
+      for (const val of Object.values(ps)) {
+        if (val && typeof val === 'object' && Number.isFinite(Number(val.peoplebusted))) {
+          return Number(val.peoplebusted);
+        }
+      }
+    }
+    if (Array.isArray(ps)) {
+      const hit = ps.find((x) => x && (x.name === 'peoplebusted' || x.stat === 'peoplebusted' || x.id === 'peoplebusted'));
+      if (hit && Number.isFinite(Number(hit.value))) return Number(hit.value);
+    }
+    return null;
+  }
+
+  function fetchTotalBustsViaGM() {
+    return new Promise((resolve) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        resolve(null);
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: 'https://www.torn.com/personalstats.php?stats=peoplebusted&from=All',
+        anonymous: false,
+        onload: (response) => {
+          try {
+            const html = response.responseText || '';
+            const match = html.match(/People\s+busted[^0-9]*(\d[\d,]*)/i);
+            if (match) {
+              const count = parseInt(match[1].replace(/,/g, ''), 10);
+              console.log('[Bustr+] Total busts from page scrape:', count);
+              resolve(Number.isFinite(count) ? count : null);
+            } else {
+              resolve(null);
+            }
+          } catch (e) {
+            resolve(null);
+          }
+        },
+        onerror: () => resolve(null),
+      });
+    });
+  }
+
+  async function refreshTotalBusts(force) {
+    if (state.settings.manualTotalBusts) {
+      const n = parseInt(String(state.settings.manualTotalBusts).replace(/,/g, ''), 10);
+      state.totalBusts = Number.isFinite(n) ? n : null;
+      return state.totalBusts;
+    }
+    if (!force) {
+      const cached = getCachedTotalBusts();
+      if (cached != null) {
+        state.totalBusts = cached;
+        return cached;
+      }
+    }
+    let total = await fetchTotalBustsViaAPI();
+    if (total == null) total = await fetchTotalBustsViaGM();
+    if (total != null) saveTotalBusts(total);
+    else state.totalBusts = getCachedTotalBusts();
+    return state.totalBusts;
+  }
+
+  // =========================================================================
   // HUB INTEGRATION
   // =========================================================================
   function isHubPresent() {
@@ -143,10 +271,10 @@
 
   function getStatusText() {
     if (!state.apiKey) {
-      return 'No API key set — paste a User / Log key below';
+      return 'No API key — generate one custom key (Log + Personal Stats)';
     }
-    const avail = state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
-    return `Estimated busts left: ${avail}  |  score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
+    // Hub panel has room for full avail/total on all devices
+    return `Busts ${formatAvailableWithTotal()} · score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
   }
 
   function registerWithHub() {
@@ -159,18 +287,14 @@
         version: VERSION,
         order: 200,
         open: () => {
-          // Prefer opening the Hub dashboard directly to Bustr+ settings.
-          // Fallback: go to jail page and refresh data.
           document.dispatchEvent(new CustomEvent('torn-script-hub:open', {
             detail: { scriptId: HUB_ID }
           }));
-          // Also refresh data if we are (or end up) on the jail page
           if (isJailPage()) {
             loadBustData(false).then(() => renderAll());
           }
         },
         close: () => {
-          // Called when user disables the script from Hub dashboard
           state.settings.enabled = false;
           saveSettings();
           cleanupModifications();
@@ -182,8 +306,8 @@
         status: getStatusText,
         prefs: {
           fields: [
-            { key: 'apiKey', type: 'password', label: 'Custom API key', default: '', placeholder: '16 character Torn custom key', hint: 'User / Log permission only. Used for bust log 5360.' },
-            { key: 'generateKey', type: 'button', label: 'Generate User / Log key', hint: 'Opens Torn API key page pre-filled for User / Log only', onClick: () => openUrl(API_KEY_URL) },
+            { key: 'apiKey', type: 'password', label: 'Custom API key (one key)', default: '', placeholder: '16 character Torn custom key', hint: 'One key only: User → Log and User → Personal Stats. Use Generate key.' },
+            { key: 'generateKey', type: 'button', label: 'Generate custom key', hint: 'Opens Torn API key page pre-filled for log + personalstats', onClick: () => openUrl(API_KEY_URL) },
             { key: 'enabled', type: 'toggle', label: 'Active', default: true, hint: 'Turn Bustr+ on or off' },
             { key: 'skipBustConfirm', type: 'toggle', label: 'Skip bust confirm', default: true, hint: 'Automatically confirm bust actions' },
             { key: 'hideHardTargets', type: 'toggle', label: 'Hide hard targets', default: true, hint: 'Completely hide targets above the hardness ceiling' },
@@ -196,6 +320,7 @@
             { key: 'decayWindowHours', type: 'number', label: 'Decay window (hrs)', default: 72, min: 1, hint: 'How far back to look when estimating bust fatigue.' },
             { key: 'greenLimit', type: 'number', label: 'Green at busts', default: 3, min: 0, hint: 'When the jail menu counter turns green.' },
             { key: 'redLimit', type: 'number', label: 'Red at busts', default: 0, min: 0, hint: 'When the jail menu counter turns red.' },
+            { key: 'manualTotalBusts', type: 'text', label: 'Total Busts (Manual)', default: '', placeholder: 'e.g., 8857', hint: 'Optional: If background fetching fails, enter your total busts here and it will be used permanently.' },
           ],
           values: {
             enabled: state.settings.enabled,
@@ -211,6 +336,7 @@
             greenLimit: state.settings.greenLimit,
             redLimit: state.settings.redLimit,
             apiKey: state.apiKey || '',
+            manualTotalBusts: state.settings.manualTotalBusts || '',
           },
           onSave: (values) => {
             const wasEnabled = state.settings.enabled;
@@ -228,22 +354,30 @@
             state.settings.decayWindowHours = Math.max(1, Number(values.decayWindowHours) || 72);
             state.settings.greenLimit = Math.max(0, Number(values.greenLimit) || 0);
             state.settings.redLimit = Math.max(0, Number(values.redLimit) || 0);
+            state.settings.manualTotalBusts = String(values.manualTotalBusts || '').trim();
 
-            // API key: only APPLY a new valid key. Never treat a blank Hub snapshot
-            // as "user cleared the key" — password fields often stay empty in
-            // the prefs.values copy (registration race / security blanking),
-            // and every other setting change would otherwise wipe the key.
+            // Only accept a real 16-char key; ignore blank Hub snapshots (never wipe key)
             if (typeof values.apiKey === 'string') {
               const key = values.apiKey.trim();
               if (key && /^[A-Za-z0-9]{16}$/.test(key) && key !== state.apiKey) {
                 setApiKey(key);
-                keyPromise = loadBustData(true).then(() => renderAll());
+                keyPromise = Promise.all([
+                  loadBustData(true),
+                  refreshTotalBusts(true),
+                ]).then(() => renderAll());
               }
             }
 
             saveSettings();
             recalcStats();
             saveStats();
+
+            // Manual total always wins; otherwise refresh from API when needed
+            if (state.settings.manualTotalBusts) {
+              state.totalBusts = parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
+            } else if (!keyPromise) {
+              keyPromise = refreshTotalBusts(false).then(() => renderAll());
+            }
 
             if (!wasEnabled && state.settings.enabled) {
               keyPromise = loadBustData(false).then(() => {
@@ -284,7 +418,7 @@
   }
 
   // =========================================================================
-  // STYLES (unchanged core, still used for hardness + nav when no Hub)
+  // STYLES
   // =========================================================================
   function injectStyles() {
     if (document.getElementById('bustr-plus-style')) return;
@@ -295,50 +429,28 @@
       body.bustr-plus-orange { --bustr-plus-color: #d08000; }
       body.bustr-plus-red { --bustr-plus-color: #e64d1a; }
       #nav-jail .bustr-plus-nav {
-        display: inline-flex;
-        position: relative;
-        top: 3px;
-        align-items: center;
-        justify-content: center;
-        min-width: 16px;
-        margin-left: 4px;
-        color: var(--bustr-plus-color, inherit);
-        font-weight: 700;
-        line-height: 1;
-        text-align: center;
-        vertical-align: middle;
+        display: inline-flex; position: relative; top: 3px; align-items: center; justify-content: center;
+        min-width: 16px; margin-left: 4px; color: var(--bustr-plus-color, inherit); font-weight: 400;
+        line-height: 1; text-align: center; vertical-align: middle;
       }
-      #nav-jail .bustr-plus-pill { position: absolute; top: 2px; right: 4px; min-width: 14px; text-align: center; color: var(--bustr-plus-color, #85b200); font-size: 11px; font-weight: 700; pointer-events: none; }
+      #nav-jail .bustr-plus-pill {
+        position: absolute; top: 2px; right: 4px; min-width: 14px; max-width: 28px;
+        text-align: center; color: var(--bustr-plus-color, #85b200);
+        font-size: 11px; font-weight: 400; pointer-events: none;
+        overflow: hidden; text-overflow: clip; white-space: nowrap;
+      }
       #bustr-plus-panel {
-        --bustr-bg: #202020;
-        --bustr-fg: #ddd;
-        --bustr-border: #444;
-        --bustr-header-border: #3a3a3a;
-        --bustr-input-bg: #111;
-        --bustr-button-bg: #303030;
-        --bustr-toggle-off: #555;
-        --bustr-danger-bg: #5b2520;
-        --bustr-danger-border: #a94b3f;
-        --bustr-danger-fg: #fff;
-        --bustr-muted: #aaa;
+        --bustr-bg: #202020; --bustr-fg: #ddd; --bustr-border: #444; --bustr-header-border: #3a3a3a;
+        --bustr-input-bg: #111; --bustr-button-bg: #303030; --bustr-toggle-off: #555;
+        --bustr-danger-bg: #5b2520; --bustr-danger-border: #a94b3f; --bustr-danger-fg: #fff; --bustr-muted: #aaa;
         position: fixed; z-index: 99999; right: 14px; top: 62px; width: min(470px, calc(100vw - 28px));
-        max-height: min(680px, calc(100vh - 92px));
-        overflow: hidden;
-        background: var(--bustr-bg); color: var(--bustr-fg); border: 1px solid var(--bustr-border); border-radius: 8px;
-        box-shadow: 0 10px 30px rgba(0,0,0,.55); font: 12px/1.4 Arial, sans-serif;
+        max-height: min(680px, calc(100vh - 92px)); overflow: hidden; background: var(--bustr-bg); color: var(--bustr-fg);
+        border: 1px solid var(--bustr-border); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.55); font: 12px/1.4 Arial, sans-serif;
       }
       #bustr-plus-panel.bustr-plus-light {
-        --bustr-bg: #f7f7f7;
-        --bustr-fg: #242424;
-        --bustr-border: #c9c9c9;
-        --bustr-header-border: #d8d8d8;
-        --bustr-input-bg: #fff;
-        --bustr-button-bg: #ececec;
-        --bustr-toggle-off: #d0d0d0;
-        --bustr-danger-bg: #fff1f0;
-        --bustr-danger-border: #c75146;
-        --bustr-danger-fg: #8d1f17;
-        --bustr-muted: #666;
+        --bustr-bg: #f7f7f7; --bustr-fg: #242424; --bustr-border: #c9c9c9; --bustr-header-border: #d8d8d8;
+        --bustr-input-bg: #fff; --bustr-button-bg: #ececec; --bustr-toggle-off: #d0d0d0;
+        --bustr-danger-bg: #fff1f0; --bustr-danger-border: #c75146; --bustr-danger-fg: #8d1f17; --bustr-muted: #666;
       }
       #bustr-plus-panel[hidden] { display: none; }
       #bustr-plus-panel header { display: flex; align-items: center; justify-content: space-between; padding: 9px 11px; border-bottom: 1px solid var(--bustr-header-border); font-weight: 700; }
@@ -358,179 +470,66 @@
       #bustr-plus-panel .toggles label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
       #bustr-plus-panel .toggles span { margin: 0; line-height: 1.15; }
       #bustr-plus-panel .toggles input[type="checkbox"] {
-        appearance: none;
-        -webkit-appearance: none;
-        position: relative;
-        width: 34px;
-        min-width: 34px;
-        height: 18px;
-        min-height: 18px;
-        margin: 0;
-        border: 1px solid var(--bustr-border);
-        border-radius: 999px;
-        background: var(--bustr-toggle-off);
-        cursor: pointer;
-        transition: background .16s ease, border-color .16s ease;
+        appearance: none; -webkit-appearance: none; position: relative; width: 34px; min-width: 34px; height: 18px;
+        min-height: 18px; margin: 0; border: 1px solid var(--bustr-border); border-radius: 999px;
+        background: var(--bustr-toggle-off); cursor: pointer; transition: background .16s ease, border-color .16s ease;
       }
       #bustr-plus-panel .toggles input[type="checkbox"]::after {
-        content: "";
-        position: absolute;
-        width: 14px;
-        height: 14px;
-        left: 1px;
-        top: 1px;
-        border-radius: 50%;
-        background: var(--bustr-bg);
-        box-shadow: 0 1px 3px rgba(0,0,0,.35);
-        transition: transform .16s ease, background .16s ease;
+        content: ""; position: absolute; width: 14px; height: 14px; left: 1px; top: 1px; border-radius: 50%;
+        background: var(--bustr-bg); box-shadow: 0 1px 3px rgba(0,0,0,.35); transition: transform .16s ease, background .16s ease;
       }
-      #bustr-plus-panel .toggles input[type="checkbox"]:checked {
-        border-color: #5489c9;
-        background: #4278bd;
-      }
-      #bustr-plus-panel .toggles input[type="checkbox"]:checked::after {
-        transform: translateX(16px);
-        background: #fff;
-      }
+      #bustr-plus-panel .toggles input[type="checkbox"]:checked { border-color: #5489c9; background: #4278bd; }
+      #bustr-plus-panel .toggles input[type="checkbox"]:checked::after { transform: translateX(16px); background: #fff; }
       #bustr-plus-panel .actions { position: sticky; bottom: -10px; padding-top: 6px; background: var(--bustr-bg); }
       #bustr-plus-panel label span { display: block; color: var(--bustr-muted); margin-bottom: 1px; }
       #bustr-plus-panel .label-line { display: flex; align-items: flex-end; align-content: flex-end; gap: 4px; min-width: 0; min-height: 25px; line-height: 1.15; flex-wrap: wrap; overflow: hidden; }
       #bustr-plus-panel .help-dot {
-        display: inline-grid;
-        place-items: center;
-        width: 14px;
-        height: 14px;
-        margin-bottom: 1px;
-        color: #5489c9;
-        font-size: 12px;
-        line-height: 1;
-        cursor: help;
-        outline: none;
+        display: inline-grid; place-items: center; width: 14px; height: 14px; margin-bottom: 1px;
+        color: #5489c9; font-size: 12px; line-height: 1; cursor: help; outline: none;
       }
       #bustr-plus-help-tip {
-        position: fixed;
-        width: min(270px, calc(100vw - 24px));
-        padding: 8px 10px;
-        border-radius: 6px;
-        background: rgba(18, 18, 18, .95);
-        color: #f4f4f4;
-        box-shadow: 0 8px 22px rgba(0,0,0,.28);
-        font-size: 12px;
-        font-weight: 400;
-        line-height: 1.35;
-        text-align: left;
-        white-space: normal;
-        opacity: 1;
-        pointer-events: none;
-        z-index: 100001;
+        position: fixed; width: min(270px, calc(100vw - 24px)); padding: 8px 10px; border-radius: 6px;
+        background: rgba(18, 18, 18, .95); color: #f4f4f4; box-shadow: 0 8px 22px rgba(0,0,0,.28);
+        font-size: 12px; font-weight: 400; line-height: 1.35; text-align: left; white-space: normal;
+        opacity: 1; pointer-events: none; z-index: 100001;
       }
-      #bustr-plus-help-tip.bustr-plus-light {
-        background: rgba(255, 255, 255, .98);
-        color: #222;
-        box-shadow: 0 8px 24px rgba(0,0,0,.18);
-      }
+      #bustr-plus-help-tip.bustr-plus-light { background: rgba(255, 255, 255, .98); color: #222; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
       #bustr-plus-panel .hint { color: var(--bustr-muted); font-size: 11px; }
       #bustr-plus-panel .status { color: var(--bustr-plus-color, #85b200); font-weight: 700; }
       #bustr-plus-panel .version { color: var(--bustr-muted); font-size: 10px; text-align: right; }
       #bustr-plus-panel .icon-btn { width: 28px; min-width: 28px; padding: 0; display: inline-grid; place-items: center; }
       #bustr-plus-navitem {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        padding: 4px 0;
+        display: flex; justify-content: center; align-items: center; padding: 4px 0;
       }
       #bustr-plus-navitem .bustr-plus-navitem-link {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 2px;
-        width: 50px;
-        min-height: 44px;
-        padding: 4px 2px;
-        border: 0;
-        border-radius: 6px;
-        background: transparent;
-        color: #999;
-        cursor: pointer;
-        font: 700 9px/1.1 Arial, sans-serif;
-        text-transform: uppercase;
-        letter-spacing: .02em;
-        text-align: center;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+        width: 50px; min-height: 44px; padding: 4px 2px; border: 0; border-radius: 6px; background: transparent;
+        color: #999; cursor: pointer; font: 700 9px/1.1 Arial, sans-serif; text-transform: uppercase;
+        letter-spacing: .02em; text-align: center;
       }
       #bustr-plus-navitem .bustr-plus-navitem-link:hover,
-      #bustr-plus-navitem .bustr-plus-navitem-link:focus-visible {
-        color: #ccc;
-        background: rgba(255,255,255,.06);
-        outline: none;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-iconwrap {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 34px;
-        height: 34px;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-iconwrap svg {
-        display: block;
-        fill: currentColor;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-label {
-        white-space: nowrap;
-      }
+      #bustr-plus-navitem .bustr-plus-navitem-link:focus-visible { color: #ccc; background: rgba(255,255,255,.06); outline: none; }
+      #bustr-plus-navitem .bustr-plus-navitem-iconwrap { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; }
+      #bustr-plus-navitem .bustr-plus-navitem-iconwrap svg { display: block; fill: currentColor; }
+      #bustr-plus-navitem .bustr-plus-navitem-label { white-space: nowrap; }
       #bustr-plus-navitem.bustr-plus-navitem-fallback {
-        position: fixed;
-        z-index: 99998;
-        right: 10px;
-        bottom: 14px;
-        padding: 0;
-        background: rgba(24,24,24,.9);
-        border-radius: 8px;
-        box-shadow: 0 6px 18px rgba(0,0,0,.4);
+        position: fixed; z-index: 99998; right: 10px; bottom: 14px; padding: 0;
+        background: rgba(24,24,24,.9); border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.4);
       }
-      #bustr-plus-navitem.bustr-plus-navitem-fallback .bustr-plus-navitem-link {
-        color: #eee;
-      }
-      #body .users-list-title {
-        display: flex;
-        justify-content: start;
-        align-items: center;
-      }
+      #bustr-plus-navitem.bustr-plus-navitem-fallback .bustr-plus-navitem-link { color: #eee; }
+      #body .users-list-title { display: flex; justify-content: start; align-items: center; }
       #body .users-list-title .title { width: 269px; }
       #body .users-list-title .time { width: 50px; }
       #body .users-list-title .level { width: 53px; }
       #body .users-list-title .reason { width: 205px; }
-      #body .users-list-title .hardness {
-        display: block;
-        width: 79px;
-        text-align: center;
-      }
-      #body .user-info-list-wrap {
-        display: flex;
-        flex-direction: column;
-        justify-content: start;
-        align-items: center;
-      }
-      #body .user-info-list-wrap > li {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: start;
-        align-items: center;
-      }
-      #body .user-info-list-wrap > li .info-wrap {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: start;
-        align-items: center;
-      }
+      #body .users-list-title .hardness { display: block; width: 79px; text-align: center; }
+      #body .user-info-list-wrap { display: flex; flex-direction: column; justify-content: start; align-items: center; }
+      #body .user-info-list-wrap > li { display: flex; flex-wrap: wrap; justify-content: start; align-items: center; }
+      #body .user-info-list-wrap > li .info-wrap { display: flex; flex-wrap: wrap; justify-content: start; align-items: center; }
       #body .user-info-list-wrap > li .info-wrap .time { width: 54px; }
       #body .user-info-list-wrap > li .info-wrap .level { width: 57px; }
       #body .user-info-list-wrap > li .info-wrap .reason { width: 193px; }
-      #body .user-info-list-wrap > li .info-wrap .hardness {
-        display: block;
-        width: 50px;
-        text-align: center;
-      }
+      #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 50px; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
       .bustr-plus-hardness { display: inline-block; width: 46px; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
       .bustr-plus-hard-row { opacity: .32; }
@@ -538,26 +537,13 @@
       @media screen and (max-width: 784px) {
         #body .users-list-title .hardness { display: none; }
         #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: block; }
-        #body .user-info-list-wrap > li .info-wrap .reason {
-          width: 164px;
-          border-right: 1px solid rgb(34, 34, 34);
-        }
+        #body .user-info-list-wrap > li .info-wrap .reason { width: 164px; border-right: 1px solid rgb(34, 34, 34); }
         #body .user-info-list-wrap > li .info-wrap .hardness { width: 64px; }
       }
       @media screen and (max-width: 386px) {
-        #body .user-info-list-wrap > li .info-wrap .time {
-          width: 98px;
-          height: 37px;
-        }
-        #body .user-info-list-wrap > li .info-wrap .level {
-          width: 91px;
-          height: 37px;
-        }
-        #body .user-info-list-wrap > li .info-wrap .reason {
-          width: 171px;
-          height: 24px;
-          border-right: 1px solid rgb(34, 34, 34);
-        }
+        #body .user-info-list-wrap > li .info-wrap .time { width: 98px; height: 37px; }
+        #body .user-info-list-wrap > li .info-wrap .level { width: 91px; height: 37px; }
+        #body .user-info-list-wrap > li .info-wrap .reason { width: 171px; height: 24px; border-right: 1px solid rgb(34, 34, 34); }
         #body .user-info-list-wrap > li .info-wrap .hardness { width: 107px; }
       }
     `;
@@ -648,7 +634,6 @@
     window.addEventListener('popstate', updateToggleVisibility, { passive: true });
   }
 
-  // Original floating panel – only used when Hub is NOT present
   function renderPanel(forceOpen) {
     if (isHubPresent()) {
       removeSettingsPanel();
@@ -678,14 +663,14 @@
         </span>
       </header>
       <div class="body">
-        <div class="status">Estimated busts left: ${formatAvailable()} | score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
-        <div class="hint">Custom key: ${API_KEY_PERMISSION} only. Uses user/log ${BUST_LOG_ID}.</div>
+        <div class="status">Estimated: ${formatAvailableWithTotal()} · score ${state.penaltyScore}/${state.penaltyThreshold || '?'}</div>
+        <div class="hint">One custom key: ${API_KEY_PERMISSION}. Log id ${BUST_LOG_ID} · desktop shows avail/total · PDA shows available only.</div>
         <label>
           <span>Custom API key</span>
           <input id="bustr-plus-key" type="password" autocomplete="off" value="${escapeAttr(state.apiKey)}" placeholder="Paste 16 character Torn custom key">
         </label>
         <div class="row">
-          <button type="button" data-action="open-api">Generate User / Log key</button>
+          <button type="button" data-action="open-api">Generate custom key</button>
           <button type="button" class="primary" data-action="save-key">Save and test</button>
         </div>
         <div class="grid">
@@ -701,6 +686,10 @@
           <label><span>Sort easiest</span><input id="bustr-plus-sortByHardness" type="checkbox" ${s.sortByHardness ? 'checked' : ''}></label>
           <label><span>Skip confirm</span><input id="bustr-plus-skipBustConfirm" type="checkbox" ${s.skipBustConfirm ? 'checked' : ''}></label>
         </div>
+        <label>
+          <span>Total Busts (Manual Fallback)</span>
+          <input id="bustr-plus-manual-total" type="text" value="${escapeAttr(s.manualTotalBusts)}" placeholder="e.g., 8857">
+        </label>
         <div class="row actions">
           <button type="button" class="danger" data-action="forget-key">Forget key</button>
           <button type="button" class="primary" data-action="save-settings">Save settings</button>
@@ -750,9 +739,11 @@
         return;
       }
       setApiKey(key);
-      showPanelHint(panel, 'Testing key...');
+      showPanelHint(panel, 'Testing key (log + personalstats)…');
       const ok = await loadBustData(true);
+      await refreshTotalBusts(true);
       if (!ok) return;
+      showPanelHint(panel, `OK · available ${formatAvailable()} · total ${state.totalBusts != null ? state.totalBusts.toLocaleString() : '?'}`);
       renderAll();
       renderPanel(true);
     });
@@ -760,6 +751,7 @@
       deleteApiKey();
       state.timestamps = [];
       state.availableBusts = null;
+      state.totalBusts = null;
       saveStats();
       renderAll();
       renderPanel(true);
@@ -839,6 +831,12 @@
     state.settings.hideHardTargets = panel.querySelector('#bustr-plus-hideHardTargets').checked;
     state.settings.sortByHardness = panel.querySelector('#bustr-plus-sortByHardness').checked;
     state.settings.skipBustConfirm = panel.querySelector('#bustr-plus-skipBustConfirm').checked;
+    
+    // Read manual total busts
+    const manualInput = panel.querySelector('#bustr-plus-manual-total');
+    if (manualInput) {
+      state.settings.manualTotalBusts = manualInput.value.trim();
+    }
   }
 
   function openUrl(url) {
@@ -851,113 +849,14 @@
     window.open(url, '_blank', 'noopener');
   }
 
-  function renderApiKeyGenerator(forceRefresh) {
-    if (window.location.pathname !== '/preferences.php') return;
-    if (!window.location.hash.includes('tab=api') || !window.location.hash.includes('title=BUSTRPlusLogs')) return;
-    const existing = document.getElementById('bustr-plus-keygen');
-    if (existing && !forceRefresh) return;
-    if (existing) existing.remove();
-
-    const panel = document.createElement('section');
-    panel.id = 'bustr-plus-keygen';
-    const light = state.settings.theme === 'light';
-    panel.style.cssText = [
-      'position:fixed',
-      'z-index:100000',
-      'right:14px',
-      'top:96px',
-      'width:min(430px,calc(100vw - 28px))',
-      `background:${light ? '#f7f7f7' : '#202020'}`,
-      `color:${light ? '#242424' : '#ddd'}`,
-      `border:1px solid ${light ? '#5489c9' : '#5489c9'}`,
-      'border-radius:8px',
-      'box-shadow:0 10px 30px rgba(0,0,0,.55)',
-      'font:12px/1.4 Arial,sans-serif',
-      'padding:11px',
-    ].join(';');
-    panel.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
-        <strong>BUSTR+ Custom Key</strong>
-        <button type="button" data-close style="border:1px solid ${light ? '#c9c9c9' : '#555'};background:${light ? '#ececec' : '#303030'};color:${light ? '#242424' : '#eee'};border-radius:5px;min-height:25px;padding:3px 8px;cursor:pointer;">Close</button>
-      </div>
-      <div style="display:grid;gap:7px;">
-        <div>Create a <strong>Custom</strong> Torn API key with this exact setup:</div>
-        <label>Title
-          <input readonly value="${escapeAttr(API_KEY_TITLE)}" style="box-sizing:border-box;width:100%;margin-top:2px;padding:4px 7px;border:1px solid ${light ? '#c9c9c9' : '#555'};border-radius:5px;background:${light ? '#fff' : '#111'};color:${light ? '#242424' : '#eee'};">
-        </label>
-        <label>Permission
-          <input readonly value="${escapeAttr(API_KEY_PERMISSION)} only" style="box-sizing:border-box;width:100%;margin-top:2px;padding:4px 7px;border:1px solid ${light ? '#c9c9c9' : '#555'};border-radius:5px;background:${light ? '#fff' : '#111'};color:${light ? '#242424' : '#eee'};">
-        </label>
-        <div style="color:${light ? '#666' : '#aaa'};font-size:11px;">BUSTR+ tries to prefill matching fields. If Torn changes the form, use these values manually: Custom key, User / Log only.</div>
-        <div style="display:flex;gap:7px;justify-content:flex-end;">
-          <button type="button" data-copy style="border:1px solid ${light ? '#c9c9c9' : '#555'};background:${light ? '#ececec' : '#303030'};color:${light ? '#242424' : '#eee'};border-radius:5px;min-height:25px;padding:3px 8px;cursor:pointer;">Copy title</button>
-          <button type="button" data-autofill style="border:1px solid #5489c9;background:#3769a8;color:#fff;border-radius:5px;min-height:25px;padding:3px 8px;cursor:pointer;">Prefill form</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(panel);
-    panel.querySelector('[data-close]').addEventListener('click', () => panel.remove());
-    panel.querySelector('[data-copy]').addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(API_KEY_TITLE);
-      } catch (err) {}
-    });
-    panel.querySelector('[data-autofill]').addEventListener('click', prefillTornApiKeyForm);
-    setTimeout(prefillTornApiKeyForm, 800);
-    setTimeout(prefillTornApiKeyForm, 2000);
-  }
-
-  function prefillTornApiKeyForm() {
-    const inputs = [...document.querySelectorAll('input, textarea')];
-    const titleInput = inputs.find((input) => {
-      const label = getNearbyText(input).toLowerCase();
-      return /title|name|label/.test(label) && !/key/.test(label);
-    }) || inputs.find((input) => input.type === 'text' && !input.value);
-    if (titleInput && !titleInput.value) {
-      titleInput.value = API_KEY_TITLE;
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-      titleInput.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-
-    for (const control of document.querySelectorAll('input[type="radio"], input[type="checkbox"], option')) {
-      const text = getNearbyText(control).toLowerCase();
-      const wantsCustom = /\bcustom\b/.test(text);
-      const wantsLog = /\blog\b/.test(text) && /\buser\b/.test(text);
-      const rejectsBroad = /\bfull\b|\ball\b|\bfaction\b|\bcompany\b|\bforum\b|\bmessage\b|\bbazaar\b|\bnetworth\b/.test(text);
-      if ((wantsCustom || wantsLog) && !rejectsBroad) {
-        if (control.tagName === 'OPTION') {
-          control.selected = true;
-          control.parentElement?.dispatchEvent(new Event('change', { bubbles: true }));
-        } else if (!control.checked) {
-          control.click();
-        }
-      }
-      if (rejectsBroad && control.checked && control.type === 'checkbox') {
-        control.click();
-      }
-    }
-  }
-
-  function getNearbyText(el) {
-    const labelledBy = el.getAttribute('aria-labelledby');
-    const ariaText = labelledBy
-      ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent || '').join(' ')
-      : '';
-    const escapedId = el.id && window.CSS && typeof CSS.escape === 'function' ? CSS.escape(el.id) : '';
-    const labelText = escapedId
-      ? [...document.querySelectorAll(`label[for="${escapedId}"]`)].map((label) => label.textContent || '').join(' ')
-      : '';
-    const parentText = el.closest('label, li, tr, div')?.textContent || '';
-    return `${ariaText} ${labelText} ${parentText}`;
+  // Floating key-gen helper panel removed (v1.4.1). Generate button still opens Torn's API page with query params.
+  function renderApiKeyGenerator() {
+    document.getElementById('bustr-plus-keygen')?.remove();
   }
 
   function escapeAttr(value) {
     return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[char]);
   }
 
@@ -965,16 +864,42 @@
     return state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
   }
 
+  /** Desktop / Hub: "3 / 8,500". Never use on PDA nav pill. */
+  function formatAvailableWithTotal() {
+    const avail = formatAvailable();
+    const total = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
+    return `${avail} / ${total}`;
+  }
+
+  /** Compact counter for small mobile/PDA jail slider. */
+  function formatNavCounter() {
+    return isCompactNav() ? String(formatAvailable()) : formatAvailableWithTotal();
+  }
+
+  function isCompactNav() {
+    // PDA / mobile sidebar and Torn PDA — total does not fit the pill
+    if (getViewportType() !== 'desktop') return true;
+    if (typeof window.PDA_httpGet === 'function') return true;
+    const ua = String(navigator.userAgent || '');
+    if (/TornPDA|Android|iPhone|iPad/i.test(ua) && window.innerWidth < 1100) return true;
+    return false;
+  }
+
   async function loadBustData(force) {
-    if (!state.apiKey) return;
+    if (!state.apiKey) return false;
     const ageMs = Date.now() - state.lastFetchMs;
-    if (!force && ageMs < state.settings.refreshSeconds * 1000) return;
+    if (!force && ageMs < state.settings.refreshSeconds * 1000) return true;
     if (state.loadBustDataPromise) return state.loadBustDataPromise;
 
-    const url = `https://api.torn.com/user/?selections=log&log=${BUST_LOG_ID}&key=${encodeURIComponent(state.apiKey)}`;
+    const url =
+      `https://api.torn.com/user/?selections=log&log=${BUST_LOG_ID}` +
+      `&comment=BustrPlus&key=${encodeURIComponent(state.apiKey)}`;
     state.loadBustDataPromise = (async () => {
       const data = await requestJson(url);
-      if (data.error) throw new Error(data.error.error || 'Torn API error');
+      if (data.error) {
+        const msg = data.error.error || data.error;
+        throw new Error(typeof msg === 'string' ? msg : 'Torn API error');
+      }
       state.timestamps = extractBustTimestamps(data);
       state.lastFetchMs = Date.now();
       recalcStats();
@@ -986,7 +911,6 @@
       return await state.loadBustDataPromise;
     } catch (err) {
       console.error(`${SCRIPT}:`, err);
-      if (force) renderPanel(true);
       const panel = document.getElementById('bustr-plus-panel');
       if (panel) showPanelHint(panel, `API error: ${err.message}`);
       return false;
@@ -1031,9 +955,7 @@
       }, timeoutMs);
       try {
         GM_xmlhttpRequest({
-          method: 'GET',
-          url,
-          anonymous: true,
+          method: 'GET', url, anonymous: true,
           onload: (response) => {
             if (settled) return;
             settled = true;
@@ -1182,15 +1104,23 @@
     try {
       const jailNav = await waitFor('#nav-jail', 5000);
       const anchor = jailNav.querySelector('a') || jailNav;
-      if (getViewportType() === 'desktop') {
+      const compact = isCompactNav();
+      const label = formatNavCounter();
+      const tip = compact
+        ? `Available busts (est.): ${formatAvailable()} · score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`
+        : `Available/total: ${formatAvailableWithTotal()} · score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
+
+      if (!compact) {
         let stats = anchor.querySelector('.bustr-plus-nav');
         if (!stats) {
           stats = document.createElement('span');
           stats.className = 'bustr-plus-nav';
           anchor.appendChild(stats);
         }
-        stats.textContent = formatAvailable();
-        stats.title = `BUSTR+ ${state.penaltyScore}/${state.penaltyThreshold || '?'}:${formatAvailable()}`;
+        // Remove mobile pill if we flipped to desktop
+        jailNav.querySelector('.bustr-plus-pill')?.remove();
+        stats.textContent = label;
+        stats.title = tip;
       } else {
         let pill = jailNav.querySelector('.bustr-plus-pill');
         if (!pill) {
@@ -1198,9 +1128,13 @@
           pill.className = 'bustr-plus-pill';
           jailNav.appendChild(pill);
         }
-        pill.textContent = formatAvailable();
+        // Remove desktop span on compact
+        anchor.querySelector('.bustr-plus-nav')?.remove();
+        pill.textContent = label;
+        pill.title = tip;
       }
     } catch (err) {
+      // Silent fail for nav stats
     } finally {
       state.navStatsPending = false;
     }
@@ -1444,6 +1378,11 @@
     state.availableBusts = state.penaltyThreshold > 0
       ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
       : null;
+    // Optimistic total bump (API personalstats can lag until next day for some views)
+    if (Number.isFinite(state.totalBusts)) {
+      state.totalBusts += 1;
+      if (!state.settings.manualTotalBusts) saveTotalBusts(state.totalBusts);
+    }
     saveStats();
     renderAll();
     return true;
@@ -1484,82 +1423,75 @@
     if (state.refreshTimerId) clearInterval(state.refreshTimerId);
     state.refreshTimerId = setInterval(async () => {
       await loadBustData(false);
+      // Total busts change slowly; refresh cache when expired
+      await refreshTotalBusts(false);
       renderAll();
     }, Math.max(15, state.settings.refreshSeconds) * 1000);
   }
 
+  // =========================================================================
+  // INITIALIZATION
+  // =========================================================================
   async function init() {
     loadState();
-    // Register after state is loaded so Hub prefs.values include the real API key
     registerWithHub();
+    
     armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
+    
     injectStyles();
     updateToggleVisibility();
     renderApiKeyGenerator();
+    
     if (!state.settings.enabled) {
       cleanupModifications();
       return;
     }
+    
+    await refreshTotalBusts(false);
     await loadBustData(false);
     renderAll();
-    // Re-register so Hub status / values reflect loaded bust data
-    registerWithHub();
     scanExistingBustSuccesses();
+    
     if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
       renderPanel(true);
     }
+    
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
     startPathWatcher();
+    
     window.addEventListener('resize', renderAll, { passive: true });
-    window.addEventListener('hashchange', renderApiKeyGenerator, { passive: true });
+    window.addEventListener('hashchange', () => {
+      renderApiKeyGenerator();
+      updateToggleVisibility();
+    }, { passive: true });
     window.addEventListener('pageshow', () => {
       armReturnToJailWatcher();
       returnToJailAfterQuickBustRedirect();
     }, { passive: true });
-  }
 
-  const ready = document.readyState === 'complete'
-    ? Promise.resolve()
-    : new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
-
-  ready.then(init).catch((err) => console.error(`${SCRIPT}:`, err));
-
-  // Register with hub + listen for hub lifecycle
-  function tryRegister() {
-    // Ensure storage is applied before the Hub snapshots prefs.values
-    loadState();
-    registerWithHub();
-    // Re-check after a short delay in case Hub mounts later
-    setTimeout(() => {
-      const nowPresent = isHubPresent();
-      if (nowPresent !== state.hubPresent) {
-        state.hubPresent = nowPresent;
-        updateToggleVisibility();
-        if (nowPresent) removeSettingsPanel();
-      }
-      // Refresh registration once more with latest state
-      loadState();
+    // Hub lifecycle listeners
+    document.addEventListener('torn-script-hub:ready', () => {
+      state.hubPresent = isHubPresent();
       registerWithHub();
-    }, 800);
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:dormant', () => {
+      state.hubPresent = false;
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:active', () => {
+      state.hubPresent = isHubPresent();
+      updateToggleVisibility();
+      if (state.hubPresent) removeSettingsPanel();
+    });
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', tryRegister);
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    tryRegister();
+    init();
   }
-  document.addEventListener('torn-script-hub:ready', tryRegister);
-  document.addEventListener('torn-script-hub:dormant', () => {
-    // Hub UI disabled – restore our own UI if enabled
-    state.hubPresent = false;
-    updateToggleVisibility();
-  });
-  document.addEventListener('torn-script-hub:active', () => {
-    state.hubPresent = isHubPresent();
-    updateToggleVisibility();
-    if (state.hubPresent) removeSettingsPanel();
-  });
 })();
