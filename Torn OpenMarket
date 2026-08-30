@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.6.2
+// @version      1.6.4
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,6 +15,13 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
+// CHANGELOG 1.6.4:
+// - FIXED: Prevented pagination fetches from resetting the bonus sort by tracking lastNativeSortKey.
+//
+// CHANGELOG 1.6.3:
+// - FIXED: Removed fragile monitorSortToggler that was resetting sort when React reverted button text.
+// - FIXED: Bonus sort now resets reliably when a native sort API call is detected.
+//
 // CHANGELOG 1.6.2:
 // - FIXED: ReferenceError in displayCase and inventory teardown (self -> this).
 // - FIXED: monitorSortToggler is now resilient to late DOM rendering and React node replacement.
@@ -24,11 +31,6 @@
 // - FIXED: Bonus sort state and CSS order styles are cleanly cleared when navigating away.
 // - FIXED: applyBonusSort is now debounced (100ms) during infinite scroll.
 // - FIXED: Dropdown injection now respects CONFIG.enableItemMarket toggle.
-//
-// CHANGELOG 1.6.0:
-// - Added native dropdown integration for bonus sorting.
-// - Fixed CSS grid sorting to target LI elements instead of DIV tiles.
-// - Improved dropdown closing mechanism.
 
 (function () {
     'use strict';
@@ -48,7 +50,7 @@
     // =========================================================================
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.6.2';
+    const HUB_VERSION = '1.6.4';
     const HUB_ICON = '📊';
 
     function registerWithHub() {
@@ -475,7 +477,7 @@
         },
         teardown() { 
             if (this.observer) { this.observer.disconnect(); this.observer = null; } 
-            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; } // FIXED: self -> this
+            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
         }
     };
 
@@ -568,7 +570,7 @@
         },
         teardown() { 
             if (this.observer) { this.observer.disconnect(); this.observer = null; } 
-            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; } // FIXED: self -> this
+            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
         }
     };
 
@@ -604,11 +606,25 @@
         history.replaceState = function (...args) { const result = originalReplaceState.apply(this, args); window.dispatchEvent(new Event('openmarket-locationchange')); return result; };
         ['popstate', 'hashchange', 'openmarket-locationchange'].forEach(evt => { window.addEventListener(evt, () => activateHandlerForCurrentUrl()); });
     }
+    
     function interceptFetch() {
         const originalFetch = window.fetch;
+        let lastNativeSortKey = null;
+
         window.fetch = async (...args) => {
             const response = await originalFetch(...args);
             const url = args[0] instanceof Request ? args[0].url : String(args[0]);
+            
+            // FIXED: Only reset bonus sort if the native sort parameters actually change
+            if (url.includes('sid=iMarket') && (url.includes('sortField') || url.includes('sortOrder'))) {
+                const key = (url.match(/sortField=[^&]*/)?.[0] || '') + '|' +
+                            (url.match(/sortOrder=[^&]*/)?.[0] || '');
+                if (key && key !== lastNativeSortKey) {
+                    lastNativeSortKey = key;
+                    if (sortState.active) resetBonusSort();
+                }
+            }
+            
             if (url.includes('sid=iMarket')) {
                 response.clone().json().then(data => {
                     if (!data?.items?.length) return;
@@ -620,6 +636,7 @@
             return response;
         };
     }
+
     function insertStyles() {
         const css = `[class*="itemTile___"] { padding: 5px 3px 0 !important; } [class*="itemTile___"] [class*="title___"] { padding: 5px 0 0px !important; } .openmarket-bonuses div { font-size: 11px !important; } .openmarket-inventory-quality { white-space: nowrap; } .openmarket-inventory-bonuses { max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle; } .openmarket-inventory-bonuses div { display: inline; font-size: 11px !important; } .openmarket-inventory-meta { display: inline-flex; align-items: center; flex-wrap: nowrap; overflow: hidden; }`;
         const style = document.createElement('style'); style.textContent = css; (document.head || document.documentElement).appendChild(style);
@@ -693,7 +710,6 @@
     // =========================================================================
     let dropdownObserver = null;
     let hasInjectedBonusOptions = false;
-    let sortTogglerObserver = null;
 
     function injectIntoSortDropdown() {
         if (!CONFIG.enableItemMarket) return;
@@ -778,35 +794,8 @@
         dropdownObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] });
     }
 
-    function monitorSortToggler() {
-        if (sortTogglerObserver) {
-            sortTogglerObserver.disconnect();
-            sortTogglerObserver = null;
-        }
-        
-        // FIXED: Observe document.body to catch the toggler appearing late or being replaced by React
-        sortTogglerObserver = new MutationObserver(() => {
-            if (!sortState.active) return; // Early exit for performance
-            
-            const toggler = document.querySelector('button[data-testid="dropdown-toggler"]');
-            if (toggler) {
-                const text = toggler.textContent;
-                if (!text.includes('Bonus ascending') && !text.includes('Bonus descending')) {
-                    resetBonusSort();
-                }
-            }
-        });
-        
-        sortTogglerObserver.observe(document.body, { 
-            childList: true, 
-            subtree: true, 
-            characterData: true 
-        });
-    }
-
     function initDropdownIntegration() {
         monitorDropdown();
-        monitorSortToggler();
     }
 
     // =========================================================================
