@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Item Market Portfolio
 // @namespace    https://github.com/CowboyUpp
-// @version      3.0.2
-// @description  Aggregates your active Item Market listings into an easy-to-read summary. Hub-integrated with ON/OFF control and lifecycle-aware native fallback.
+// @version      3.0.3
+// @description  Aggregates your active Item Market listings into an easy-to-read summary. Hub-integrated with ON/OFF control and lifecycle-aware native fallback. Toggle remains visible even when Hub is active.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @grant        GM_setValue
@@ -32,8 +32,8 @@
         const wasActive = hubIsActive;
         hubIsActive = !!(hubRow && !hubRow.classList.contains('tsh-disabled'));
         if (wasActive !== hubIsActive) {
-            if (hubIsActive) hideNativeToggle();
-            else showNativeToggle();
+            // Always ensure the native toggle is visible, regardless of hub state
+            showNativeToggle();
         }
     }
 
@@ -80,11 +80,6 @@
         }
     }
 
-    function hideNativeToggle() {
-        const toggle = document.getElementById('tm-market-fixed-toggle');
-        if (toggle) toggle.style.display = 'none';
-    }
-
     function registerWithHub() {
         document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
             detail: {
@@ -98,13 +93,12 @@
                     if (window.location.hash === TARGET_HASH) {
                         const checkbox = document.getElementById('tm-toggle-checkbox');
                         const overlay = document.getElementById('tm-summary-overlay');
-                        const toggle = document.getElementById('tm-market-fixed-toggle');
                         if (checkbox) checkbox.checked = true;
                         if (overlay) {
                             overlay.style.display = 'flex';
                             processMarketSummary({ forceRefresh: false });
                         }
-                        if (toggle) toggle.style.display = 'none';
+                        // Toggle remains visible so the user can uncheck it to close the overlay
                     } else {
                         sessionStorage.setItem('imp_autoOpen', '1');
                         window.location.href = '/page.php?sid=ItemMarket#/viewListing';
@@ -139,13 +133,13 @@
      * 01. Constants
      **************************************************************************/
 
-    const SCRIPT_VERSION = '3.0.2';
+    const SCRIPT_VERSION = '3.0.3';
     const TARGET_HASH = '#/viewListing';
 
     const TORN_API_HOST = 'api.torn.com';
 
     const TORN_API_SETUP_URL = 'https://www.torn.com/preferences.php#tab=api';
-    const TORN_CUSTOM_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey'
+    const TORN_CUSTOM_KEY_URL = 'https://www.torn.com/preferences.php?step=addNewKey#tab=api'
         + '&title=' + encodeURIComponent('Item Market Portfolio')
         + '&user=' + encodeURIComponent('itemmarket')
         + '&torn=' + encodeURIComponent('items');
@@ -1296,12 +1290,11 @@
             document.getElementById('tm-settings-btn').addEventListener('click', renderSettingsView);
         }
 
-        // ALWAYS create native toggle (lifecycle will show/hide it)
+        // ALWAYS create native toggle
         createNativeToggle();
 
-        // Apply current visibility based on hub state
-        if (hubIsActive) hideNativeToggle();
-        else showNativeToggle();
+        // Always show the native toggle, regardless of hub state
+        showNativeToggle();
     }
 
     function closeOverlay() {
@@ -1311,7 +1304,7 @@
 
         if (checkbox) checkbox.checked = false;
         if (overlay) overlay.style.display = 'none';
-        if (toggle && window.location.hash === TARGET_HASH && !hubIsActive) toggle.style.display = 'inline-flex';
+        if (toggle) toggle.style.display = 'inline-flex'; // Always show toggle when closed
     }
 
     function monitorViewAndRoute() {
@@ -1334,12 +1327,11 @@
                     overlay.style.display = 'flex';
                     processMarketSummary({ forceRefresh: false });
                 }
-                if (toggle) toggle.style.display = 'none';
                 return;
             }
 
             const isOpen = overlay && overlay.style.display === 'flex';
-            if (toggle) toggle.style.display = (isOpen || hubIsActive) ? 'none' : 'inline-flex';
+            if (toggle) toggle.style.display = isOpen ? 'none' : 'inline-flex';
         } else {
             const toggle = document.getElementById('tm-market-fixed-toggle');
             const overlay = document.getElementById('tm-summary-overlay');
@@ -1411,14 +1403,14 @@
         registerWithHub();
         monitorViewAndRoute();
     }
+    
     document.addEventListener('torn-script-hub:ready', () => {
         hubIsActive = true;
-        hideNativeToggle();
         registerWithHub();
     });
     document.addEventListener('torn-script-hub:active', () => {
         hubIsActive = true;
-        hideNativeToggle();
+        // Toggle remains visible
     });
     document.addEventListener('torn-script-hub:dormant', () => {
         hubIsActive = false;
