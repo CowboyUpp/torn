@@ -1,162 +1,213 @@
 // ==UserScript==
-// @name         Torn: Armory Loaned Status Dots
-// @namespace    torn.bundle.armory
-// @version      1.2
-// @description  Adds green/yellow/gray online status dots to faction members in the Armory "Loaned" section. Bundled with HoF & Mug Ping.
-// @author       You
-// @match        *://www.torn.com/*
+// @name         Armory Loaned Status Dots
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      2.8.1
+// @description  Status dots in front of loaned faction member names in the Armory. Requires Torn Script Hub.
+// @author       cowboyup
+// @match        https://www.torn.com/factions.php*
+// @run-at       document-idle
+// @license      MIT
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_registerMenuCommand
-// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      api.torn.com
+// @downloadURL https://update.greasyfork.org/scripts/593630/Armory%20Loaned%20Status%20Dots.user.js
+// @updateURL https://update.greasyfork.org/scripts/593630/Armory%20Loaned%20Status%20Dots.meta.js
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // ==========================================
-    // 1. SCRIPT HUB REGISTRATION
-    // ==========================================
-    window.dispatchEvent(new CustomEvent('torn-script-hub:register', {
-        detail: {
-            id: 'armory-loaned-status',
-            name: 'Armory Loaned Status',
-            version: '1.2',
-            author: 'You',
-            description: 'Adds online/away/offline status dots to faction members in the Armory Loaned section.',
-            icon: '🟢',
-            settings: true // Indicates this script has settings (API key)
-        }
-    }));
+    const VERSION = '2.8.1';
+    const HUB_ID = 'armory-loaned-status';
+    const HUB_NAME = 'Armory Loaned Status';
+    const QUEUE_PROPERTY = '__tornScriptHubQueue';
+    const CACHE_TTL = 120000; // 2 minutes
+    const STORE_PREFIX = 'armory_status_';
 
-    // ==========================================
-    // 2. SHARED API KEY & SETTINGS MANAGEMENT
-    // ==========================================
-    const STORAGE_KEYS = {
-        BUNDLE_KEY: 'torn_api_bundle_key',
-        CACHE: 'torn_faction_members_cache'
+    const STORE = {
+        get(key, fallback) {
+            try {
+                if (typeof GM_getValue === 'function') {
+                    const value = GM_getValue(STORE_PREFIX + key, undefined);
+                    if (value !== undefined) return value;
+                }
+            } catch (e) { console.warn('[Armory Status] GM_getValue error:', e); }
+            try {
+                const raw = localStorage.getItem(STORE_PREFIX + key);
+                if (raw !== null) return JSON.parse(raw);
+            } catch (e) { console.warn('[Armory Status] localStorage error:', e); }
+            return fallback;
+        },
+        set(key, value) {
+            try {
+                if (typeof GM_setValue === 'function') {
+                    GM_setValue(STORE_PREFIX + key, value);
+                }
+            } catch (e) { console.warn('[Armory Status] GM_setValue error:', e); }
+            try {
+                localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value));
+            } catch (e) { console.warn('[Armory Status] localStorage set error:', e); }
+        }
     };
 
-    const CACHE_TTL = 120000; // 2 minutes in milliseconds
+    let settings = Object.assign({}, { apiKey: '' }, STORE.get('settings', {}));
+    let isHubRegistered = false;
+    let isFetching = false;
+
+    function isHubPresent() {
+        if (document.getElementById('tsh-sidebar-row')) return true;
+        const q = window[QUEUE_PROPERTY];
+        return !!(q && q.__tshPatched);
+    }
 
     function getApiKey() {
-        return GM_getValue(STORAGE_KEYS.BUNDLE_KEY, '');
+        return (settings.apiKey && settings.apiKey.trim().length === 16) ? settings.apiKey.trim() : '';
+    }
+
+    function saveSettings() {
+        STORE.set('settings', settings);
     }
 
     function setApiKey(key) {
-        GM_setValue(STORAGE_KEYS.BUNDLE_KEY, key.trim());
-        // Clear cache when key changes to force fresh data
-        GM_setValue(STORAGE_KEYS.CACHE, null); 
+        settings.apiKey = key ? key.trim() : '';
+        saveSettings();
+        STORE.set('faction_members_cache', null);
     }
 
-    GM_registerMenuCommand('⚙️ Set / Reset Bundled API Key', () => {
-        const currentKey = getApiKey();
-        const newKey = prompt('Enter your Bundled Torn API Key (requires "faction -> members" permission):\n\nLeave blank to cancel.', currentKey);
-        if (newKey !== null) {
-            if (newKey.trim().length === 16) {
-                setApiKey(newKey);
-                alert('API Key updated! Refreshing page to apply changes.');
-                location.reload();
-            } else if (newKey.trim() !== '') {
-                alert('Invalid key format. Torn API keys are exactly 16 characters long.');
-            }
+    function getCachedMembers() {
+        const cached = STORE.get('faction_members_cache', null);
+        if (!cached) return null;
+        if (Date.now() - cached.timestamp > CACHE_TTL) {
+            STORE.set('faction_members_cache', null);
+            return null;
         }
-    });
+        return cached.data;
+    }
 
-    // ==========================================
-    // 3. CSS INJECTION (Desktop & PDA Optimized)
-    // ==========================================
-    GM_addStyle(`
-        .bundle-status-dot {
-            display: inline-block;
-            width: 9px;
-            height: 9px;
-            border-radius: 50%;
-            margin-right: 6px;
-            vertical-align: middle;
-            flex-shrink: 0;
-            transition: opacity 0.2s ease;
-        }
-        .bundle-status-dot:hover {
-            opacity: 0.7;
-        }
-        .bundle-status-dot.online {
-            background-color: #00a800;
-            box-shadow: 0 0 4px rgba(0, 168, 0, 0.6);
-        }
-        .bundle-status-dot.idle {
-            background-color: #ffb200;
-            box-shadow: 0 0 4px rgba(255, 178, 0, 0.6);
-        }
-        .bundle-status-dot.offline {
-            background-color: #888888;
-        }
-        /* PDA / Mobile specific tweaks */
-        @media screen and (max-width: 768px) {
-            .bundle-status-dot {
-                width: 8px;
-                height: 8px;
-                margin-right: 5px;
-            }
-        }
-    `);
+    function setCachedMembers(data) {
+        STORE.set('faction_members_cache', {
+            timestamp: Date.now(),
+            data: data
+        });
+    }
 
-    // ==========================================
-    // 4. CORE LOGIC & API FETCHING
-    // ==========================================
+    function formatTimeAgo(seconds) {
+        if (seconds < 0) seconds = 0;
+        if (seconds < 60) return `${seconds}s ago`;
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m ago`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `${hours}h ago`;
+        return `${Math.floor(hours / 24)}d ago`;
+    }
+
+    function createStatusIcon(status) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'armory-status-wrap';
+        wrapper.style.cssText = 'display: inline-flex; margin-right: 5px; vertical-align: middle;';
+
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        svg.setAttribute('width', '1em');
+        svg.setAttribute('height', '1em');
+        svg.setAttribute('viewBox', '0 0 12 12');
+        svg.setAttribute('class', 'armory-status-icon');
+
+        const gradientId = status === 'online' ? 'userStatusOnline' : status === 'idle' ? 'userStatusIdle' : 'userStatusOffline';
+
+        const circlePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        circlePath.setAttribute('fill', `url(#${gradientId})`);
+        circlePath.setAttribute('d', 'M0,6a6,6,0,1,1,6,6A6,6,0,0,1,0,6Z');
+
+        if (status === 'idle') {
+            const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            g.appendChild(circlePath);
+            const clockPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            clockPath.setAttribute('d', 'M5,3V7H9V6H6V3Z');
+            clockPath.setAttribute('fill', '#f2f2f2');
+            g.appendChild(clockPath);
+            svg.appendChild(g);
+        } else if (status === 'offline') {
+            svg.appendChild(circlePath);
+            const barPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            barPath.setAttribute('d', 'M3,5H9V7H3Z');
+            barPath.setAttribute('fill', '#f2f2f2');
+            svg.appendChild(barPath);
+        } else {
+            svg.appendChild(circlePath);
+        }
+
+        wrapper.appendChild(svg);
+        return wrapper;
+    }
+
     async function fetchFactionMembers() {
         const apiKey = getApiKey();
-        if (!apiKey) {
-            console.warn('[Armory Status] No bundled API key found. Use the Tampermonkey menu to set it.');
-            return null;
-        }
+        if (!apiKey) return null;
 
-        const now = Date.now();
-        const cached = GM_getValue(STORAGE_KEYS.CACHE, null);
+        const cached = getCachedMembers();
+        if (cached) return cached;
 
-        // Return cached data if it's still fresh
-        if (cached && (now - cached.timestamp < CACHE_TTL)) {
-            return cached.data;
-        }
+        if (isFetching) return null;
+        isFetching = true;
 
-        try {
-            const response = await fetch(`https://api.torn.com/faction/?selections=members&key=${apiKey}`);
-            const data = await response.json();
-
-            if (data.error) {
-                console.error('[Armory Status] API Error:', data.error);
-                if (data.error.code === 2) {
-                    alert('[Armory Status] Invalid API key. Please update it via the Tampermonkey menu.');
-                } else if (data.error.code === 6 || data.error.code === 16) {
-                    alert('[Armory Status] API key lacks "faction -> members" permission. Please generate a new custom key.');
-                }
-                return null;
+        return new Promise((resolve) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                isFetching = false;
+                resolve(null);
+                return;
             }
 
-            const membersMap = {};
-            if (data.members) {
-                for (const [xid, member] of Object.entries(data.members)) {
-                    // Map Torn's status to our CSS classes
-                    const status = member.last_action?.status || 'Offline';
-                    membersMap[xid] = status.toLowerCase(); // "online", "idle", "offline"
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://api.torn.com/v2/faction/members?key=${apiKey}`,
+                responseType: 'json',
+                timeout: 10000,
+                onload(res) {
+                    isFetching = false;
+                    try {
+                        const data = res.response || JSON.parse(res.responseText);
+                        if (data.error) {
+                            console.warn('[Armory Status] API Error:', data.error);
+                            if (data.error.code === 2) setApiKey('');
+                            resolve(null);
+                            return;
+                        }
+
+                        const membersMap = {};
+                        if (Array.isArray(data.members)) {
+                            for (const member of data.members) {
+                                const xid = String(member.id);
+                                const lastAction = member.last_action || {};
+                                membersMap[xid] = { 
+                                    status: (lastAction.status || 'Offline').toLowerCase(), 
+                                    timestamp: lastAction.timestamp || 0 
+                                };
+                            }
+                        }
+                        setCachedMembers(membersMap);
+                        resolve(membersMap);
+                    } catch (e) {
+                        console.warn('[Armory Status] Parse error:', e);
+                        resolve(null);
+                    }
+                },
+                onerror() {
+                    isFetching = false;
+                    console.warn('[Armory Status] Network error');
+                    resolve(null);
+                },
+                ontimeout() {
+                    isFetching = false;
+                    console.warn('[Armory Status] Request timeout');
+                    resolve(null);
                 }
-            }
-
-            // Save to shared cache
-            GM_setValue(STORAGE_KEYS.CACHE, { timestamp: now, data: membersMap });
-            return membersMap;
-
-        } catch (e) {
-            console.error('[Armory Status] Network error fetching faction data:', e);
-            return null;
-        }
+            });
+        });
     }
 
-    // ==========================================
-    // 5. DOM MANIPULATION & OBSERVER
-    // ==========================================
     function injectDots() {
-        // Target both Desktop and PDA structures for the loaned section
         const loanedLinks = document.querySelectorAll('.loaned a[href*="XID="], .loaned-item a[href*="XID="]');
         if (loanedLinks.length === 0) return;
 
@@ -164,53 +215,138 @@
             if (!membersMap) return;
 
             loanedLinks.forEach(link => {
-                if (link.dataset.bundleStatusProcessed) return;
+                const existingWrap = link.querySelector('.armory-status-wrap');
+                if (existingWrap) existingWrap.remove();
 
                 const href = link.getAttribute('href');
                 const match = href.match(/XID=(\d+)/);
                 if (!match) return;
 
                 const xid = match[1];
-                const statusClass = membersMap[xid] || 'offline';
+                const memberData = membersMap[xid] || { status: 'offline', timestamp: 0 };
+                const secondsAgo = Math.floor(Date.now() / 1000) - memberData.timestamp;
+                const timeString = formatTimeAgo(secondsAgo);
 
-                const dot = document.createElement('span');
-                dot.className = `bundle-status-dot ${statusClass}`;
-                dot.title = `Status: ${statusClass.charAt(0).toUpperCase() + statusClass.slice(1)}`;
+                const statusIcon = createStatusIcon(memberData.status);
+                statusIcon.setAttribute('title', `Status: ${memberData.status.charAt(0).toUpperCase() + memberData.status.slice(1)} (${timeString})`);
 
-                // Insert right in front of the name
-                link.insertBefore(dot, link.firstChild);
-                link.dataset.bundleStatusProcessed = 'true';
+                link.insertBefore(statusIcon, link.firstChild);
             });
         });
     }
 
-    // Only run on Faction pages to save resources
-    if (location.href.includes('factions.php')) {
-        // Initial run with a slight delay to let Torn's AJAX load the tab
+    // Single, idempotent registration function
+    function registerWithHub() {
+        if (isHubRegistered) return;
+        isHubRegistered = true;
+
+        const registration = {
+            id: HUB_ID,
+            name: HUB_NAME,
+            version: VERSION,
+            order: 260,
+            open: () => {
+                if (!location.href.includes('tab=armoury')) {
+                    window.location.href = 'https://www.torn.com/factions.php?step=your&type=1#/tab=armoury';
+                } else {
+                    STORE.set('faction_members_cache', null);
+                    injectDots();
+                }
+            },
+            close: () => console.log('[Armory Status] Closed via Hub'),
+            status: () => {
+                const key = getApiKey();
+                if (!key) return '⚠️ No API Key';
+                const loanedCount = document.querySelectorAll('.loaned a[href*="XID="], .loaned-item a[href*="XID="]').length;
+                return `${loanedCount} loaned items · v2 API`;
+            },
+            prefs: {
+                fields: [
+                    {
+                        key: 'apiKey',
+                        type: 'password',
+                        label: 'Torn API Key',
+                        default: '',
+                        placeholder: '16-character Public key',
+                        hint: 'Public access is sufficient. Key stored locally.'
+                    },
+                    {
+                        key: 'clearCache',
+                        type: 'button',
+                        label: 'Clear Cache',
+                        hint: 'Forces a fresh API fetch on next armory view',
+                        onClick: () => {
+                            STORE.set('faction_members_cache', null);
+                            alert('Cache cleared! Dots will refresh with new data.');
+                        }
+                    }
+                ],
+                values: { apiKey: settings.apiKey || '' },
+                onSave: (values) => {
+                    if (!values || typeof values !== 'object') return;
+                    if (typeof values.apiKey === 'string') {
+                        const trimmed = values.apiKey.trim();
+                        if (trimmed.length === 16 || trimmed === '') {
+                            setApiKey(trimmed);
+                        } else {
+                            alert('Invalid API key format. Must be exactly 16 characters or empty.');
+                        }
+                    }
+                }
+            }
+        };
+
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail: registration }));
+        (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
+    }
+
+    function watchForHub() {
+        if (isHubRegistered) return;
+        
+        // Polling fallback
+        const poll = setInterval(() => {
+            if (isHubPresent()) {
+                clearInterval(poll);
+                registerWithHub();
+            }
+        }, 500);
+
+        // Event listener fallback (idempotent due to isHubRegistered check)
+        document.addEventListener('torn-script-hub:ready', () => {
+            clearInterval(poll);
+            registerWithHub();
+        }, { once: true });
+    }
+
+    function init() {
+        // Attempt immediate registration if Hub is already present
+        if (isHubPresent()) {
+            registerWithHub();
+        } else {
+            watchForHub();
+        }
+
         setTimeout(injectDots, 800);
 
-        // Observe DOM for tab switches (Armoury tab, pagination, etc.)
         const observer = new MutationObserver((mutations) => {
-            let shouldRun = false;
             for (const mutation of mutations) {
                 if (mutation.addedNodes.length) {
                     for (const node of mutation.addedNodes) {
                         if (node.nodeType === 1 && (node.classList?.contains('loaned') || node.querySelector?.('.loaned'))) {
-                            shouldRun = true;
+                            setTimeout(injectDots, 300);
                             break;
                         }
                     }
                 }
-                if (shouldRun) break;
-            }
-            if (shouldRun) {
-                // Small debounce to prevent multiple rapid fires
-                clearTimeout(window.armoryStatusDebounce);
-                window.armoryStatusDebounce = setTimeout(injectDots, 300);
             }
         });
 
         observer.observe(document.body, { childList: true, subtree: true });
     }
 
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        init();
+    } else {
+        document.addEventListener('DOMContentLoaded', init);
+    }
 })();
