@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.6.5
+// @version      1.6.6
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,23 +15,12 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
-// CHANGELOG 1.6.5:
-// - FIXED: Added a robust DOM-reading fallback for the Item Market. If network fetches are blocked (403 Forbidden), the script will now read bonuses directly from the HTML, fixing PDA/mobile display issues.
-//
-// CHANGELOG 1.6.4:
-// - FIXED: Prevented pagination fetches from resetting the bonus sort by tracking lastNativeSortKey.
-//
-// CHANGELOG 1.6.3:
-// - FIXED: Removed fragile monitorSortToggler that was resetting sort when React reverted button text.
-// - FIXED: Bonus sort now resets reliably when a native sort API call is detected.
-//
-// CHANGELOG 1.6.2:
-// - FIXED: ReferenceError in displayCase and inventory teardown (self -> this).
-//
-// CHANGELOG 1.6.1:
-// - FIXED: Bonus sort state and CSS order styles are cleanly cleared when navigating away.
-// - FIXED: applyBonusSort is now debounced (100ms) during infinite scroll.
-// - FIXED: Dropdown injection now respects CONFIG.enableItemMarket toggle.
+// CHANGELOG 1.6.6:
+// - IMPROVED: Softened event interception (removed stopImmediatePropagation) for better mobile/PDA touch compatibility.
+// - IMPROVED: Made bonus regex match optional '%' to catch raw numbers if formatting changes.
+// - IMPROVED: Added XMLHttpRequest (XHR) interception fallback for mobile WebViews that block 'fetch'.
+// - FIXED: Removed unnecessary cache reset on page reactivation to prevent brief DOM fallback spikes.
+// - FIXED: Made grid enforcement safer by checking for 'flex' as well, preventing layout overrides.
 
 (function () {
     'use strict';
@@ -46,12 +35,9 @@
         debug: false
     };
 
-    // =========================================================================
-    // SCRIPT HUB INTEGRATION
-    // =========================================================================
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.6.5';
+    const HUB_VERSION = '1.6.6';
     const HUB_ICON = '📊';
 
     function registerWithHub() {
@@ -128,7 +114,6 @@
             statValue: '[class*="value___"]',
             statTypeElement: 'value',
             statTypeAttribute: 'aria-label',
-            // ADDED: Selectors for DOM fallback when fetch is blocked (403)
             bonusIcons: '[class*="bonuses___"] i, [class*="bonus-attachment"]',
             bonusTitleAttr: 'data-bonus-attachment-title',
             bonusDescAttr: 'data-bonus-attachment-description'
@@ -328,7 +313,7 @@
         processAll() {
             if (!isPageActive()) return;
 
-            // FALLBACK: If cache is empty (e.g., due to 403 fetch blocks or ad-blockers), read directly from DOM
+            // FALLBACK: If cache is empty (e.g., due to 403 fetch blocks), read directly from DOM
             if (this.cache.length === 0) {
                 if (CONFIG.debug) console.log('[OpenMarket] Fetch cache empty, falling back to DOM reading for Item Market.');
                 qsa(this.selectors.tile).forEach(el => {
@@ -340,7 +325,6 @@
                     if (!BASE_STATS_MAP[itemID]) return;
 
                     const stats = extractStats(el, this.selectors);
-                    // Skip if no stats found and it's not an armor piece
                     if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) {
                         if (BASE_STATS_MAP[itemID].baseArmour === 0) return;
                     }
@@ -355,17 +339,13 @@
                 return;
             }
 
-            // NORMAL: Use the intercepted fetch cache
+            // NORMAL: Use the intercepted fetch/XHR cache
             qsa(this.selectors.tile).forEach(el => {
                 const cached = this.matchToCache(el);
                 if (!cached) return;
                 processItem(el, {
                     itemID: cached.itemID,
-                    stats: {
-                        damage: cached.damage || 0,
-                        accuracy: cached.accuracy || 0,
-                        armour: cached.armor || 0
-                    },
+                    stats: { damage: cached.damage || 0, accuracy: cached.accuracy || 0, armour: cached.armor || 0 },
                     bonuses: cached.bonuses || [],
                     selectors: this.selectors
                 });
@@ -645,7 +625,11 @@
         const enabledMap = { itemMarket: CONFIG.enableItemMarket, auctionHouse: CONFIG.enableAuctionHouse, bazaar: CONFIG.enableBazaar, displayCase: CONFIG.enableDisplayCase, inventory: CONFIG.enableInventory };
         if (!type || !enabledMap[type]) { teardownCurrentHandler(); currentHandler = null; return; }
         const nextHandler = handlers[type];
-        if (currentHandler === nextHandler) { if (type === 'itemMarket') itemMarket.resetCache(); nextHandler.processAll(); return; }
+        if (currentHandler === nextHandler) { 
+            // FIXED: Removed unnecessary resetCache() on reactivation to prevent DOM fallback spikes
+            nextHandler.processAll(); 
+            return; 
+        }
         teardownCurrentHandler(); currentHandler = nextHandler; nextHandler.init();
     }
     function setupRouteWatcher() {
@@ -656,17 +640,17 @@
         ['popstate', 'hashchange', 'openmarket-locationchange'].forEach(evt => { window.addEventListener(evt, () => activateHandlerForCurrentUrl()); });
     }
     
-    function interceptFetch() {
-        const originalFetch = window.fetch;
+    function interceptFetchAndXHR() {
         let lastNativeSortKey = null;
 
+        // 1. Intercept Fetch
+        const originalFetch = window.fetch;
         window.fetch = async (...args) => {
             const response = await originalFetch(...args);
             const url = args[0] instanceof Request ? args[0].url : String(args[0]);
             
             if (url.includes('sid=iMarket') && (url.includes('sortField') || url.includes('sortOrder'))) {
-                const key = (url.match(/sortField=[^&]*/)?.[0] || '') + '|' +
-                            (url.match(/sortOrder=[^&]*/)?.[0] || '');
+                const key = (url.match(/sortField=[^&]*/)?.[0] || '') + '|' + (url.match(/sortOrder=[^&]*/)?.[0] || '');
                 if (key && key !== lastNativeSortKey) {
                     lastNativeSortKey = key;
                     if (sortState.active) resetBonusSort();
@@ -681,12 +665,30 @@
                     if (newItems.length > 0) { itemMarket.pushCache(newItems); if (isPageActive()) itemMarket.processAll(); }
                 }).catch(err => { 
                     if (!fetchParseWarned) { 
-                        console.warn('[OpenMarket] Fetch blocked (likely 403). Falling back to DOM reading.'); 
+                        console.warn('[OpenMarket] Fetch blocked. Falling back to DOM reading.'); 
                         fetchParseWarned = true; 
                     } 
                 });
             }
             return response;
+        };
+
+        // 2. Intercept XHR (Mobile WebView fallback)
+        const originalXHROpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url) {
+            if (typeof url === 'string' && url.includes('sid=iMarket')) {
+                this.addEventListener('load', function() {
+                    try {
+                        const data = JSON.parse(this.responseText);
+                        if (data?.items?.length) {
+                            const existingIds = new Set(itemMarket.cache.map(i => i.listingID));
+                            const newItems = data.items.filter(item => !existingIds.has(item.listingID));
+                            if (newItems.length > 0) { itemMarket.pushCache(newItems); if (isPageActive()) itemMarket.processAll(); }
+                        }
+                    } catch(e) {}
+                });
+            }
+            return originalXHROpen.apply(this, arguments);
         };
     }
 
@@ -705,7 +707,8 @@
         if (!bonusContainer) return -1;
         let maxBonus = -1;
         bonusContainer.querySelectorAll('div').forEach(div => {
-            const match = div.textContent.match(/(\d+(?:\.\d+)?)\s*%/);
+            // IMPROVED: Made '%' optional to catch raw numbers if formatting changes
+            const match = div.textContent.match(/(\d+(?:\.\d+)?)\s*%?/);
             if (match) { const val = parseFloat(match[1]); if (val > maxBonus) maxBonus = val; }
         });
         return maxBonus;
@@ -719,14 +722,16 @@
         if (!firstTile) return;
         
         const listItem = firstTile.parentElement;
-        const gridContainer = listItem?.parentElement;
-        if (!gridContainer) return;
+        const container = listItem?.parentElement;
+        if (!container) return;
         
-        if (getComputedStyle(gridContainer).display !== 'grid') {
-            gridContainer.style.display = 'grid';
+        // IMPROVED: Safer grid enforcement (check for flex too, don't blindly override)
+        const display = getComputedStyle(container).display;
+        if (display !== 'grid' && display !== 'flex') {
+            container.style.display = 'grid';
         }
         
-        const listItems = Array.from(gridContainer.children).filter(el => el.tagName === 'LI' && el.querySelector('[class*="itemTile___"]'));
+        const listItems = Array.from(container.children).filter(el => el.tagName === 'LI' && el.querySelector('[class*="itemTile___"]'));
         const itemOrders = listItems.map(li => {
             const tile = li.querySelector('[class*="itemTile___"]');
             const bonus = tile ? extractMaxBonusFromTile(tile) : -1;
@@ -762,7 +767,6 @@
     // NATIVE DROPDOWN INTEGRATION
     // =========================================================================
     let dropdownObserver = null;
-    let hasInjectedBonusOptions = false;
 
     function injectIntoSortDropdown() {
         if (!CONFIG.enableItemMarket) return;
@@ -771,10 +775,9 @@
         for (const menu of dropdownMenus) {
             const text = menu.textContent;
             if (!text.includes('Price ascending') && !text.includes('Quality descending')) continue;
-            if (menu.querySelector('[data-om-bonus-injected]')) {
-                hasInjectedBonusOptions = true;
-                continue;
-            }
+            
+            // FIXED: Per-menu check instead of global flag
+            if (menu.querySelector('[data-om-bonus-injected]')) continue;
             
             const items = Array.from(menu.children);
             const templateItem = items.find(el => el.textContent.includes('Quality descending')) || items[items.length - 1];
@@ -786,15 +789,15 @@
                 item.setAttribute('role', 'option');
                 item.id = `option-om-bonus-${direction}`;
                 item.dataset.testid = `option-om-bonus-${direction}`;
-                item.dataset.omBonusInjected = 'true';
+                item.dataset.omBonusInjected = 'true'; // Marks this specific menu as injected
                 item.className = 'item t-overflow';
                 item.style.cursor = 'pointer';
                 item.textContent = `Sort by: ${text}`;
                 
                 const handleInteraction = (e) => {
-                    e.stopImmediatePropagation();
-                    e.stopPropagation();
                     e.preventDefault();
+                    e.stopPropagation();
+                    // IMPROVED: Removed stopImmediatePropagation() for safer mobile touch compatibility
                     
                     sortState.active = true;
                     sortState.ascending = direction === 'asc';
@@ -812,9 +815,9 @@
                     }, 50);
                 };
                 
-                item.addEventListener('pointerdown', handleInteraction, { capture: true });
-                item.addEventListener('mousedown', handleInteraction, { capture: true });
-                item.addEventListener('click', handleInteraction, { capture: true });
+                // IMPROVED: Softer event listeners without capture phase for better mobile compatibility
+                item.addEventListener('click', handleInteraction);
+                item.addEventListener('pointerdown', (e) => { e.preventDefault(); handleInteraction(e); });
                 return item;
             };
             
@@ -828,7 +831,6 @@
                 menu.appendChild(ascItem);
                 menu.appendChild(descItem);
             }
-            hasInjectedBonusOptions = true;
             break;
         }
     }
@@ -838,9 +840,8 @@
         dropdownObserver = new MutationObserver(() => {
             const openDropdown = document.querySelector('button[aria-expanded="true"]');
             if (openDropdown && openDropdown.textContent.includes('Sort by:')) {
-                hasInjectedBonusOptions = false;
                 setTimeout(() => {
-                    if (!hasInjectedBonusOptions) injectIntoSortDropdown();
+                    injectIntoSortDropdown();
                 }, 100);
             }
         });
@@ -856,7 +857,7 @@
     // =========================================================================
     function init() {
         insertStyles();
-        interceptFetch();
+        interceptFetchAndXHR();
 
         document.addEventListener('DOMContentLoaded', () => {
             checkDarkMode();
