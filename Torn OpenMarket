@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn OpenMarket
 // @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.6.4
+// @version      1.6.5
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -15,6 +15,9 @@
 // @license      GNU GPLv3
 // ==/UserScript==
 
+// CHANGELOG 1.6.5:
+// - FIXED: Added a robust DOM-reading fallback for the Item Market. If network fetches are blocked (403 Forbidden), the script will now read bonuses directly from the HTML, fixing PDA/mobile display issues.
+//
 // CHANGELOG 1.6.4:
 // - FIXED: Prevented pagination fetches from resetting the bonus sort by tracking lastNativeSortKey.
 //
@@ -24,10 +27,8 @@
 //
 // CHANGELOG 1.6.2:
 // - FIXED: ReferenceError in displayCase and inventory teardown (self -> this).
-// - FIXED: monitorSortToggler is now resilient to late DOM rendering and React node replacement.
 //
 // CHANGELOG 1.6.1:
-// - FIXED: Bonus sort now automatically resets when a native sort option is chosen.
 // - FIXED: Bonus sort state and CSS order styles are cleanly cleared when navigating away.
 // - FIXED: applyBonusSort is now debounced (100ms) during infinite scroll.
 // - FIXED: Dropdown injection now respects CONFIG.enableItemMarket toggle.
@@ -50,7 +51,7 @@
     // =========================================================================
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.6.4';
+    const HUB_VERSION = '1.6.5';
     const HUB_ICON = '📊';
 
     function registerWithHub() {
@@ -116,11 +117,21 @@
 
     const SELECTORS = {
         itemMarket: {
-            root: '#item-market-root', tile: '[class*="itemTile___"]', imageWrapper: '[class*="tileImage___"]',
-            title: 'div > [class*="title___"]', price: '[class*="priceAndTotal___"] span',
-            statsContainer: '[class*="properties___"]', statEntry: '[class*="property___"]',
-            statIcon: '[class*="icon___"]', statValue: '[class*="value___"]',
-            statTypeElement: 'value', statTypeAttribute: 'aria-label'
+            root: '#item-market-root',
+            tile: '[class*="itemTile___"]',
+            imageWrapper: '[class*="tileImage___"]',
+            title: 'div > [class*="title___"]',
+            price: '[class*="priceAndTotal___"] span',
+            statsContainer: '[class*="properties___"]',
+            statEntry: '[class*="property___"]',
+            statIcon: '[class*="icon___"]',
+            statValue: '[class*="value___"]',
+            statTypeElement: 'value',
+            statTypeAttribute: 'aria-label',
+            // ADDED: Selectors for DOM fallback when fetch is blocked (403)
+            bonusIcons: '[class*="bonuses___"] i, [class*="bonus-attachment"]',
+            bonusTitleAttr: 'data-bonus-attachment-title',
+            bonusDescAttr: 'data-bonus-attachment-description'
         },
         auctionHouse: {
             root: '#auction-house-tabs', visibleTab: '#auction-house-tabs .tabContent:not([style*="display: none"])',
@@ -315,11 +326,49 @@
             return candidates[0];
         },
         processAll() {
-            if (!isPageActive() || this.cache.length === 0) return;
+            if (!isPageActive()) return;
+
+            // FALLBACK: If cache is empty (e.g., due to 403 fetch blocks or ad-blockers), read directly from DOM
+            if (this.cache.length === 0) {
+                if (CONFIG.debug) console.log('[OpenMarket] Fetch cache empty, falling back to DOM reading for Item Market.');
+                qsa(this.selectors.tile).forEach(el => {
+                    const img = el.querySelector('img');
+                    if (!img) return;
+                    const match = img.src.match(/\/images\/items\/(\d+)\//);
+                    if (!match) return;
+                    const itemID = parseInt(match[1], 10);
+                    if (!BASE_STATS_MAP[itemID]) return;
+
+                    const stats = extractStats(el, this.selectors);
+                    // Skip if no stats found and it's not an armor piece
+                    if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) {
+                        if (BASE_STATS_MAP[itemID].baseArmour === 0) return;
+                    }
+
+                    processItem(el, {
+                        itemID: itemID,
+                        stats: stats,
+                        bonuses: extractBonusesFromDOM(el, this.selectors),
+                        selectors: this.selectors
+                    });
+                });
+                return;
+            }
+
+            // NORMAL: Use the intercepted fetch cache
             qsa(this.selectors.tile).forEach(el => {
                 const cached = this.matchToCache(el);
                 if (!cached) return;
-                processItem(el, { itemID: cached.itemID, stats: { damage: cached.damage || 0, accuracy: cached.accuracy || 0, armour: cached.armor || 0 }, bonuses: cached.bonuses || [], selectors: this.selectors });
+                processItem(el, {
+                    itemID: cached.itemID,
+                    stats: {
+                        damage: cached.damage || 0,
+                        accuracy: cached.accuracy || 0,
+                        armour: cached.armor || 0
+                    },
+                    bonuses: cached.bonuses || [],
+                    selectors: this.selectors
+                });
             });
         },
         init() {
@@ -615,7 +664,6 @@
             const response = await originalFetch(...args);
             const url = args[0] instanceof Request ? args[0].url : String(args[0]);
             
-            // FIXED: Only reset bonus sort if the native sort parameters actually change
             if (url.includes('sid=iMarket') && (url.includes('sortField') || url.includes('sortOrder'))) {
                 const key = (url.match(/sortField=[^&]*/)?.[0] || '') + '|' +
                             (url.match(/sortOrder=[^&]*/)?.[0] || '');
@@ -631,7 +679,12 @@
                     const existingIds = new Set(itemMarket.cache.map(i => i.listingID));
                     const newItems = data.items.filter(item => !existingIds.has(item.listingID));
                     if (newItems.length > 0) { itemMarket.pushCache(newItems); if (isPageActive()) itemMarket.processAll(); }
-                }).catch(err => { if (!fetchParseWarned) { console.warn('[OpenMarket] Failed to parse Item Market response.', err); fetchParseWarned = true; } });
+                }).catch(err => { 
+                    if (!fetchParseWarned) { 
+                        console.warn('[OpenMarket] Fetch blocked (likely 403). Falling back to DOM reading.'); 
+                        fetchParseWarned = true; 
+                    } 
+                });
             }
             return response;
         };
