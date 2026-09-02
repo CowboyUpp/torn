@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn OpenMarket
-// @namespace    https://greasyfork.org/en/scripts/589775-openmarket
-// @version      1.6.6
+// @name         OpenMarket
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      1.6.12
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -14,13 +14,6 @@
 // @run-at       document-start
 // @license      GNU GPLv3
 // ==/UserScript==
-
-// CHANGELOG 1.6.6:
-// - IMPROVED: Softened event interception (removed stopImmediatePropagation) for better mobile/PDA touch compatibility.
-// - IMPROVED: Made bonus regex match optional '%' to catch raw numbers if formatting changes.
-// - IMPROVED: Added XMLHttpRequest (XHR) interception fallback for mobile WebViews that block 'fetch'.
-// - FIXED: Removed unnecessary cache reset on page reactivation to prevent brief DOM fallback spikes.
-// - FIXED: Made grid enforcement safer by checking for 'flex' as well, preventing layout overrides.
 
 (function () {
     'use strict';
@@ -37,8 +30,8 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.6.6';
-    const HUB_ICON = '📊';
+    const HUB_VERSION = '1.6.12';
+    const HUB_ICON = '';
 
     function registerWithHub() {
         const detail = {
@@ -313,7 +306,6 @@
         processAll() {
             if (!isPageActive()) return;
 
-            // FALLBACK: If cache is empty (e.g., due to 403 fetch blocks), read directly from DOM
             if (this.cache.length === 0) {
                 if (CONFIG.debug) console.log('[OpenMarket] Fetch cache empty, falling back to DOM reading for Item Market.');
                 qsa(this.selectors.tile).forEach(el => {
@@ -339,7 +331,6 @@
                 return;
             }
 
-            // NORMAL: Use the intercepted fetch/XHR cache
             qsa(this.selectors.tile).forEach(el => {
                 const cached = this.matchToCache(el);
                 if (!cached) return;
@@ -626,7 +617,6 @@
         if (!type || !enabledMap[type]) { teardownCurrentHandler(); currentHandler = null; return; }
         const nextHandler = handlers[type];
         if (currentHandler === nextHandler) { 
-            // FIXED: Removed unnecessary resetCache() on reactivation to prevent DOM fallback spikes
             nextHandler.processAll(); 
             return; 
         }
@@ -643,7 +633,6 @@
     function interceptFetchAndXHR() {
         let lastNativeSortKey = null;
 
-        // 1. Intercept Fetch
         const originalFetch = window.fetch;
         window.fetch = async (...args) => {
             const response = await originalFetch(...args);
@@ -673,7 +662,6 @@
             return response;
         };
 
-        // 2. Intercept XHR (Mobile WebView fallback)
         const originalXHROpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function(method, url) {
             if (typeof url === 'string' && url.includes('sid=iMarket')) {
@@ -707,7 +695,6 @@
         if (!bonusContainer) return -1;
         let maxBonus = -1;
         bonusContainer.querySelectorAll('div').forEach(div => {
-            // IMPROVED: Made '%' optional to catch raw numbers if formatting changes
             const match = div.textContent.match(/(\d+(?:\.\d+)?)\s*%?/);
             if (match) { const val = parseFloat(match[1]); if (val > maxBonus) maxBonus = val; }
         });
@@ -725,7 +712,6 @@
         const container = listItem?.parentElement;
         if (!container) return;
         
-        // IMPROVED: Safer grid enforcement (check for flex too, don't blindly override)
         const display = getComputedStyle(container).display;
         if (display !== 'grid' && display !== 'flex') {
             container.style.display = 'grid';
@@ -773,15 +759,17 @@
 
         const dropdownMenus = document.querySelectorAll('[role="listbox"]');
         for (const menu of dropdownMenus) {
-            const text = menu.textContent;
-            if (!text.includes('Price ascending') && !text.includes('Quality descending')) continue;
+            const text = menu.textContent.toLowerCase();
+            if (!text.includes('price') && !text.includes('quality') && !text.includes('damage') && !text.includes('accuracy')) {
+                continue;
+            }
             
-            // FIXED: Per-menu check instead of global flag
             if (menu.querySelector('[data-om-bonus-injected]')) continue;
             
             const items = Array.from(menu.children);
-            const templateItem = items.find(el => el.textContent.includes('Quality descending')) || items[items.length - 1];
-            if (!templateItem) continue;
+            // DETECT PDA: Check if native options omit "Sort by:" prefix
+            const isPDA = !items[0].textContent.toLowerCase().includes('sort by');
+            const prefix = isPDA ? '' : 'Sort by: ';
             
             const createBonusItem = (text, direction) => {
                 const item = document.createElement('li');
@@ -789,63 +777,72 @@
                 item.setAttribute('role', 'option');
                 item.id = `option-om-bonus-${direction}`;
                 item.dataset.testid = `option-om-bonus-${direction}`;
-                item.dataset.omBonusInjected = 'true'; // Marks this specific menu as injected
+                item.dataset.omBonusInjected = 'true';
                 item.className = 'item t-overflow';
                 item.style.cursor = 'pointer';
-                item.textContent = `Sort by: ${text}`;
+                item.textContent = `${prefix}${text}`;
                 
                 const handleInteraction = (e) => {
                     e.preventDefault();
-                    e.stopPropagation();
-                    // IMPROVED: Removed stopImmediatePropagation() for safer mobile touch compatibility
+                    e.stopPropagation(); // Stop React from bubbling the click on our injected node
                     
                     sortState.active = true;
                     sortState.ascending = direction === 'asc';
                     applyBonusSort();
                     
-                    const toggler = document.querySelector('button[data-testid="dropdown-toggler"]');
-                    if (toggler && toggler.textContent.includes('Sort by:')) {
-                        toggler.textContent = `Sort by: Bonus ${direction === 'asc' ? 'ascending' : 'descending'}`;
-                    }
+                    // FIXED: Find all toggler buttons and pick the one that is actually the Sort dropdown
+                    const allTogglers = document.querySelectorAll('button[data-testid="dropdown-toggler"]');
+                    const toggler = Array.from(allTogglers).find(btn => 
+                        btn.textContent.includes('Sort by') || /ascending|descending/i.test(btn.textContent)
+                    ) || allTogglers[0];
                     
-                    setTimeout(() => {
-                        document.activeElement.blur();
-                        document.body.click();
-                        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-                    }, 50);
+                    if (toggler) {
+                        toggler.textContent = `${prefix}Bonus ${direction === 'asc' ? 'ascending' : 'descending'}`;
+                        
+                        // Force close the dropdown by blurring and clicking the toggler
+                        if (document.activeElement) document.activeElement.blur();
+                        setTimeout(() => {
+                            toggler.click();
+                        }, 50);
+                    }
                 };
                 
-                // IMPROVED: Softer event listeners without capture phase for better mobile compatibility
                 item.addEventListener('click', handleInteraction);
-                item.addEventListener('pointerdown', (e) => { e.preventDefault(); handleInteraction(e); });
                 return item;
             };
             
             const ascItem = createBonusItem('Bonus ascending', 'asc');
             const descItem = createBonusItem('Bonus descending', 'desc');
             
-            if (templateItem.nextSibling) {
-                menu.insertBefore(ascItem, templateItem.nextSibling);
-                menu.insertBefore(descItem, ascItem.nextSibling);
-            } else {
-                menu.appendChild(ascItem);
-                menu.appendChild(descItem);
-            }
+            // Always append to the very end of the menu to prevent splitting native options
+            menu.appendChild(ascItem);
+            menu.appendChild(descItem);
             break;
         }
     }
 
     function monitorDropdown() {
         if (dropdownObserver) dropdownObserver.disconnect();
+        
         dropdownObserver = new MutationObserver(() => {
             const openDropdown = document.querySelector('button[aria-expanded="true"]');
-            if (openDropdown && openDropdown.textContent.includes('Sort by:')) {
+            // Also check if a listbox exists in the DOM, regardless of the button's aria state.
+            // This catches PDA CSS-class toggles and race conditions where the menu appends before the attribute flips.
+            const hasOpenMenu = document.querySelector('[role="listbox"]');
+            
+            if (openDropdown || hasOpenMenu) {
                 setTimeout(() => {
                     injectIntoSortDropdown();
                 }, 100);
             }
         });
-        dropdownObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] });
+        
+        dropdownObserver.observe(document.body, { 
+            childList: true, 
+            subtree: true, 
+            attributes: true, 
+            attributeFilter: ['aria-expanded'] 
+        });
     }
 
     function initDropdownIntegration() {
