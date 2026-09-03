@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Burglary Helper Pro
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      1.0.1
-// @description  Advanced burglary helper with market values, archived confidence, and community stats. Integrates with Torn Script Hub.
+// @version      1.0.2
+// @description  Advanced burglary helper with market values, archived confidence, and community stats. Integrates seamlessly with Torn Script Hub.
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -78,8 +78,8 @@
             .tbh-warning { color: #ff4444; font-weight: bold; margin-left: 5px; font-size: 14px; }
             .tbh-stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
             .tbh-value { color: #4caf50; font-weight: bold; }
-            .tbh-bad { color: #ff4444; }
             .tbh-moderate { color: #ffa500; }
+            .tbh-bad { color: #ff4444; }
         `;
         document.head.appendChild(style);
     }
@@ -219,63 +219,43 @@
     }
 
     // =========================================================================
-    // TORN SCRIPT HUB REGISTRATION
+    // TORN SCRIPT HUB REGISTRATION (MATCHES HUB v4.3.0 EXACTLY)
     // =========================================================================
     (function registerWithScriptHub() {
         const HUB_EVENTS = {
-            REGISTER: 'torn-script-hub-register',
-            UNREGISTER: 'torn-script-hub-unregister'
+            REGISTER: 'torn-script-hub:register',
+            READY: 'torn-script-hub:ready'
         };
 
-        function waitForHub(retries = 0) {
-            if (retries > 20) {
-                console.warn('[TBH] Script Hub not found, registration skipped');
-                return;
-            }
-            
-            // Check if Hub is ready
-            const hubExists = document.querySelector('[data-torn-script-hub]') || window.tornScriptHubReady;
-            if (hubExists) {
-                registerScript();
-            } else {
-                setTimeout(() => waitForHub(retries + 1), 500);
-            }
-        }
-
-        function registerScript() {
+        function attemptRegistration() {
             const registrationDetails = {
-                id: 'burglary-helper-pro',
+                id: '594123', // GreasyFork Script ID
                 name: 'Burglary Helper Pro',
                 version: '1.0.1',
-                order: 500,
+                order: 500, // Lower number = higher in the Hub list
                 active: true,
                 
+                // REQUIRED by Hub: must be a function
                 open: function() {
-                    const info = `Burglary Helper Pro v1.0.1\n\n` +
-                        `Features:\n` +
-                        `• Market value tooltips\n` +
-                        `• Recommended item warnings\n` +
-                        `• Confidence level indicators\n` +
-                        `• Community stats integration\n\n` +
-                        `Configure settings via the Torn Script Hub preferences panel.`;
-                    alert(info);
+                    alert('Burglary Helper Pro v1.0.1\n\nConfigure settings via the Script Hub preferences panel (Settings tab).');
                 },
                 
+                // Hub preferences schema
                 prefs: {
                     fields: [
-                        {
-                            key: 'worker_url',
-                            label: 'Cloudflare Worker URL',
-                            type: 'text',
+                        { 
+                            key: 'worker_url', 
+                            label: 'Cloudflare Worker URL', 
+                            type: 'text', 
                             default: 'https://torn-burglary-api.selbaer.workers.dev',
                             description: 'Your Cloudflare Worker API endpoint for market data'
                         },
-                        {
-                            key: 'torn_api_key',
-                            label: 'Torn API Key',
-                            type: 'password',
+                        { 
+                            key: 'torn_api_key', 
+                            label: 'Torn API Key', 
+                            type: 'password', 
                             default: '',
-                            description: 'Your Torn API key (read-only) for inventory checking'
+                            description: 'Read-only key for inventory checking'
                         }
                     ],
                     values: {
@@ -290,18 +270,18 @@
                 }
             };
 
-            document.dispatchEvent(new CustomEvent(HUB_EVENTS.REGISTER, {
-                detail: registrationDetails
-            }));
-            
-            console.log('[TBH] Registered with Torn Script Hub');
+            console.log('[TBH] Dispatching registration to Script Hub:', registrationDetails.name);
+            document.dispatchEvent(new CustomEvent(HUB_EVENTS.REGISTER, { detail: registrationDetails }));
         }
 
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => waitForHub());
-        } else {
-            waitForHub();
-        }
+        // 1. Try registering immediately
+        attemptRegistration();
+        
+        // 2. Listen for the Hub's ready event (in case it loads after this script)
+        document.addEventListener(HUB_EVENTS.READY, attemptRegistration);
+        
+        // 3. Fallback: Try again after 2 seconds just in case of race conditions
+        setTimeout(attemptRegistration, 2000);
     })();
 
     // =========================================================================
