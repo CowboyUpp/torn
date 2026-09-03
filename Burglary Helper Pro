@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Burglary Helper Pro
-// @namespace    https://github.com/selbaer/torn-burglary-helper
-// @version      1.0.0
-// @description  Advanced burglary helper with market values, archived confidence, and community stats.
+// @namespace    https://greasyfork.org/en/users/1608691-cowboyup
+// @version      1.0.1
+// @description  Advanced burglary helper with market values, archived confidence, and community stats. Integrates with Torn Script Hub.
 // @author       cowboyup
+// @license      MIT
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @grant        GM_getValue
@@ -12,18 +13,20 @@
 // @connect      workers.dev
 // @connect      api.torn.com
 // @run-at       document-idle
+// @updateURL    https://greasyfork.org/scripts/594123/code/Burglary%20Helper%20Pro.meta.js
+// @downloadURL  https://greasyfork.org/scripts/594123/code/Burglary%20Helper%20Pro.user.js
+// @homepageURL  https://greasyfork.org/scripts/594123
+// @supportURL   https://greasyfork.org/en/scripts/594123-burglary-helper-pro/feedback
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // --- CONFIGURATION ---
-    // You can change these in the settings panel (gear icon) on the crimes page
-    let WORKER_URL = GM_getValue('worker_url', 'https://torn-burglary-api.selbaer.workers.dev'); 
-    let TORN_API_KEY = GM_getValue('torn_api_key', '');
+    // --- CONFIGURATION (Managed via Script Hub or GM values) ---
+    const WORKER_URL = GM_getValue('torn_burglary_worker_url', 'https://torn-burglary-api.selbaer.workers.dev');
+    const TORN_API_KEY = GM_getValue('torn_api_key', '');
 
     // --- 34 TARGETS DICTIONARY ---
-    // Note: Item IDs are placeholders. You can update them with real IDs from the Torn API if needed.
     const TARGET_DATA = {
         "Apartment": { recommended: "Credit Card", unique: "Personal Computer", uniqueId: 295 },
         "Beach Hut": { recommended: "Jemmy", unique: "Cash", uniqueId: 0 },
@@ -63,30 +66,6 @@
 
     let userInventory = new Set();
 
-    // --- UI: SETTINGS PANEL ---
-    function createSettingsPanel() {
-        const btn = document.createElement('div');
-        btn.innerHTML = '⚙️';
-        btn.style.cssText = 'position:fixed;bottom:20px;right:20px;font-size:24px;cursor:pointer;background:#222;color:#fff;padding:10px;border-radius:50%;z-index:9999;box-shadow:0 2px 5px rgba(0,0,0,0.5);';
-        btn.title = 'Burglary Helper Settings';
-        document.body.appendChild(btn);
-
-        btn.addEventListener('click', () => {
-            const workerUrl = prompt('Enter your Cloudflare Worker URL:', WORKER_URL);
-            if (workerUrl !== null) {
-                WORKER_URL = workerUrl.replace(/\/$/, ''); // Remove trailing slash
-                GM_setValue('worker_url', WORKER_URL);
-            }
-            const apiKey = prompt('Enter your Torn API Key (for inventory check):', TORN_API_KEY);
-            if (apiKey !== null) {
-                TORN_API_KEY = apiKey;
-                GM_setValue('torn_api_key', TORN_API_KEY);
-                loadUserInventory(); // Reload inventory with new key
-            }
-            alert('Settings saved! Refresh the page to apply.');
-        });
-    }
-
     // --- UI: TOOLTIP & WARNING INJECTION ---
     function injectStyles() {
         const style = document.createElement('style');
@@ -121,7 +100,6 @@
     // --- TORN TOOLS INTEGRATION ---
     function getMarketPriceFromTornTools(itemId) {
         try {
-            // Torn Tools usually stores data in localStorage. Adjust key if needed.
             const ttData = localStorage.getItem('torn_tools_data'); 
             if (ttData) {
                 const parsed = JSON.parse(ttData);
@@ -135,7 +113,7 @@
 
     // --- API FETCH WRAPPER ---
     async function fetchItemMarketData(itemId) {
-        if (itemId === 0) return 0; // Cash unique
+        if (itemId === 0) return 0;
         
         const ttPrice = getMarketPriceFromTornTools(itemId);
         if (ttPrice) return ttPrice;
@@ -198,12 +176,9 @@
                 const data = TARGET_DATA[targetName];
                 if (!data) return;
 
-                // Extract confidence from the intercepted data or DOM
-                // For this MVP, we'll look for a progress bar or default to 0
                 let confidence = 0;
                 const progressBar = row.querySelector('[class*="progress"]');
                 if (progressBar) {
-                    // Try to parse width or aria-valuenow
                     confidence = parseInt(progressBar.style.width) || parseInt(progressBar.getAttribute('aria-valuenow')) || 0;
                 }
 
@@ -227,6 +202,5 @@
 
     // --- INITIALIZATION ---
     injectStyles();
-    createSettingsPanel();
     loadUserInventory();
 })();
