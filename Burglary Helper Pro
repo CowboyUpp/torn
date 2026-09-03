@@ -1,0 +1,232 @@
+// ==UserScript==
+// @name         Burglary Helper Pro
+// @namespace    https://github.com/selbaer/torn-burglary-helper
+// @version      1.0.0
+// @description  Advanced burglary helper with market values, archived confidence, and community stats.
+// @author       cowboyup
+// @match        https://www.torn.com/page.php?sid=crimes*
+// @match        https://www.torn.com/loader.php?sid=crimes*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      workers.dev
+// @connect      api.torn.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- CONFIGURATION ---
+    // You can change these in the settings panel (gear icon) on the crimes page
+    let WORKER_URL = GM_getValue('worker_url', 'https://torn-burglary-api.selbaer.workers.dev'); 
+    let TORN_API_KEY = GM_getValue('torn_api_key', '');
+
+    // --- 34 TARGETS DICTIONARY ---
+    // Note: Item IDs are placeholders. You can update them with real IDs from the Torn API if needed.
+    const TARGET_DATA = {
+        "Apartment": { recommended: "Credit Card", unique: "Personal Computer", uniqueId: 295 },
+        "Beach Hut": { recommended: "Jemmy", unique: "Cash", uniqueId: 0 },
+        "Bungalow": { recommended: "Window Breaker", unique: "Soap on a Rope", uniqueId: 342 },
+        "Cottage": { recommended: "Window Breaker", unique: "Jacket", uniqueId: 112 },
+        "Farmhouse": { recommended: "Window Breaker", unique: "Turkey Baster", uniqueId: 401 },
+        "Lake House": { recommended: "Jemmy", unique: "Box of Medical Supplies", uniqueId: 198 },
+        "Luxury Villa": { recommended: "Window Breaker", unique: "Persian Rug", uniqueId: 312 },
+        "Manor House": { recommended: "Lockpicks", unique: "Chandelier", uniqueId: 305 },
+        "Mobile Home": { recommended: "Rope", unique: "Claymore Mine", uniqueId: 250 },
+        "Secluded Cabin": { recommended: "Jemmy", unique: "Pack of Cuban Cigars", uniqueId: 288 },
+        "Suburban Home": { recommended: "Window Breaker", unique: "Lottery Voucher", uniqueId: 330 },
+        "Tool Shed": { recommended: "Lockpicks", unique: "Flashlight", uniqueId: 290 },
+        "Advertising Agency": { recommended: "Skeleton Key", unique: "Can of Damp Valley", uniqueId: 275 },
+        "Barbershop": { recommended: "Lockpicks", unique: "Cut-Throat Razor", uniqueId: 265 },
+        "Chiropractors": { recommended: "Window Breaker", unique: "Xanax", uniqueId: 150 },
+        "Cleaning Agency": { recommended: "Jemmy", unique: "Tumble Dryer", uniqueId: 380 },
+        "Dentists Office": { recommended: "Credit Card", unique: "Latex Gloves", uniqueId: 210 },
+        "Funeral Directors": { recommended: "Lockpicks", unique: "Empty Blood Bag", uniqueId: 215 },
+        "Liquor Store": { recommended: "Skeleton Key", unique: "Six-Pack of Alcohol", uniqueId: 180 },
+        "Market": { recommended: "Jemmy", unique: "Fanny Pack", uniqueId: 115 },
+        "Postal Office": { recommended: "Credit Card", unique: "Stamp Collection", uniqueId: 320 },
+        "Recruitment Agency": { recommended: "Window Breaker", unique: "Jade Buddha", uniqueId: 308 },
+        "Self Storage Facility": { recommended: "Skeleton Key", unique: "Opium", uniqueId: 160 },
+        "Brewery": { recommended: "Rope", unique: "Empty Box", uniqueId: 200 },
+        "Dockside Warehouse": { recommended: "Lockpicks", unique: "Erotic DVD", uniqueId: 240 },
+        "Farm Storage Unit": { recommended: "Jemmy", unique: "Cattle Prod", uniqueId: 255 },
+        "Fertilizer Plant": { recommended: "Lockpicks", unique: "Truck Nuts", uniqueId: 390 },
+        "Foundry": { recommended: "Jemmy", unique: "Yasukuni Sword", uniqueId: 270 },
+        "Old Factory": { recommended: "Window Breaker", unique: "Small Explosive Device", uniqueId: 245 },
+        "Paper Mill": { recommended: "Skeleton Key", unique: "Cash", uniqueId: 0 },
+        "Printing Works": { recommended: "Window Breaker", unique: "Hot Foil Stamper", uniqueId: 285 },
+        "Shipyard": { recommended: "Jemmy", unique: "Anchor", uniqueId: 230 },
+        "Slaughterhouse": { recommended: "Credit Card", unique: "Bloody Apron", uniqueId: 220 },
+        "Truckyard": { recommended: "Skeleton Key", unique: "Can of Munster", uniqueId: 278 }
+    };
+
+    let userInventory = new Set();
+
+    // --- UI: SETTINGS PANEL ---
+    function createSettingsPanel() {
+        const btn = document.createElement('div');
+        btn.innerHTML = '⚙️';
+        btn.style.cssText = 'position:fixed;bottom:20px;right:20px;font-size:24px;cursor:pointer;background:#222;color:#fff;padding:10px;border-radius:50%;z-index:9999;box-shadow:0 2px 5px rgba(0,0,0,0.5);';
+        btn.title = 'Burglary Helper Settings';
+        document.body.appendChild(btn);
+
+        btn.addEventListener('click', () => {
+            const workerUrl = prompt('Enter your Cloudflare Worker URL:', WORKER_URL);
+            if (workerUrl !== null) {
+                WORKER_URL = workerUrl.replace(/\/$/, ''); // Remove trailing slash
+                GM_setValue('worker_url', WORKER_URL);
+            }
+            const apiKey = prompt('Enter your Torn API Key (for inventory check):', TORN_API_KEY);
+            if (apiKey !== null) {
+                TORN_API_KEY = apiKey;
+                GM_setValue('torn_api_key', TORN_API_KEY);
+                loadUserInventory(); // Reload inventory with new key
+            }
+            alert('Settings saved! Refresh the page to apply.');
+        });
+    }
+
+    // --- UI: TOOLTIP & WARNING INJECTION ---
+    function injectStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            .tbh-tooltip-trigger { cursor: help; border-bottom: 1px dotted #aaa; position: relative; display: inline-block; }
+            .tbh-tooltip { visibility: hidden; width: 260px; background-color: #1a1a1a; color: #fff; text-align: left; border-radius: 6px; padding: 10px; position: absolute; z-index: 10000; bottom: 125%; left: 50%; margin-left: -130px; opacity: 0; transition: opacity 0.3s; border: 1px solid #444; font-size: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.5); pointer-events: none; }
+            .tbh-tooltip-trigger:hover .tbh-tooltip { visibility: visible; opacity: 1; }
+            .tbh-warning { color: #ff4444; font-weight: bold; margin-left: 5px; font-size: 14px; }
+            .tbh-stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+            .tbh-value { color: #4caf50; font-weight: bold; }
+            .tbh-bad { color: #ff4444; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function buildTooltipHTML(targetName, confidence, marketPrice) {
+        const data = TARGET_DATA[targetName] || {};
+        const hasItem = userInventory.has(data.recommended);
+        const warningFlag = !hasItem ? `<span class="tbh-warning" title="Missing recommended item: ${data.recommended}">⚠️</span>` : '';
+        
+        let confidenceColor = confidence < 40 ? 'tbh-bad' : (confidence < 80 ? 'tbh-value' : 'tbh-value');
+        
+        return `
+            <div class="tbh-stat-row"><span>Target:</span> <strong>${targetName} ${warningFlag}</strong></div>
+            <div class="tbh-stat-row"><span>Confidence:</span> <span class="${confidenceColor}">${confidence}%</span></div>
+            <div class="tbh-stat-row"><span>Unique:</span> <span>${data.unique || 'Unknown'}</span></div>
+            <div class="tbh-stat-row"><span>Est. Value:</span> <span class="tbh-value">$${(marketPrice || 0).toLocaleString()}</span></div>
+            <div class="tbh-stat-row"><span>Rec. Item:</span> <span style="color: ${hasItem ? '#4caf50' : '#ff4444'}">${hasItem ? '✅ In Inventory' : '❌ Missing'}</span></div>
+        `;
+    }
+
+    // --- TORN TOOLS INTEGRATION ---
+    function getMarketPriceFromTornTools(itemId) {
+        try {
+            // Torn Tools usually stores data in localStorage. Adjust key if needed.
+            const ttData = localStorage.getItem('torn_tools_data'); 
+            if (ttData) {
+                const parsed = JSON.parse(ttData);
+                if (parsed.items && parsed.items[itemId]) {
+                    return parsed.items[itemId].market_price || parsed.items[itemId].last_price;
+                }
+            }
+        } catch (e) { console.warn("[TBH] Failed to read Torn Tools data", e); }
+        return null;
+    }
+
+    // --- API FETCH WRAPPER ---
+    async function fetchItemMarketData(itemId) {
+        if (itemId === 0) return 0; // Cash unique
+        
+        const ttPrice = getMarketPriceFromTornTools(itemId);
+        if (ttPrice) return ttPrice;
+
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: `${WORKER_URL}/api/v1/item/${itemId}`,
+                onload: function(response) {
+                    try {
+                        const data = JSON.parse(response.responseText);
+                        resolve(data.market?.last_price || data.market?.average_price || 0);
+                    } catch (e) { resolve(0); }
+                },
+                onerror: () => resolve(0)
+            });
+        });
+    }
+
+    // --- INVENTORY LOADING ---
+    async function loadUserInventory() {
+        if (!TORN_API_KEY) return;
+        try {
+            const res = await fetch(`https://api.torn.com/v2/user/?selections=inventory&key=${TORN_API_KEY}`);
+            const data = await res.json();
+            if (data.inventory) {
+                userInventory = new Set(Object.values(data.inventory).map(i => i.name));
+            }
+        } catch (e) { console.error("[TBH] Failed to load inventory", e); }
+    }
+
+    // --- FETCH INTERCEPTOR ---
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const response = await originalFetch.apply(this, args);
+        if (args[0] && typeof args[0] === 'string' && args[0].includes('sid=crimesData') && args[0].includes('typeID=7')) {
+            const clone = response.clone();
+            clone.json().then(data => {
+                if (data.DB && data.DB.crimesByType && data.DB.crimesByType.properties) {
+                    processScoutedTargets(data.DB.crimesByType.properties);
+                }
+            }).catch(() => {});
+        }
+        return response;
+    };
+
+    // --- DOM MANIPULATION ---
+    function processScoutedTargets(properties) {
+        setTimeout(() => {
+            const targetRows = document.querySelectorAll('div[class*="virtualItem"]');
+            targetRows.forEach(row => {
+                if (row.querySelector('[class*="propertyTypeSection"]')) return;
+                if (row.dataset.tbhProcessed) return;
+                row.dataset.tbhProcessed = "true";
+
+                const nameNode = row.querySelector('[class*="title"]'); 
+                if (!nameNode) return;
+
+                const targetName = nameNode.textContent.trim();
+                const data = TARGET_DATA[targetName];
+                if (!data) return;
+
+                // Extract confidence from the intercepted data or DOM
+                // For this MVP, we'll look for a progress bar or default to 0
+                let confidence = 0;
+                const progressBar = row.querySelector('[class*="progress"]');
+                if (progressBar) {
+                    // Try to parse width or aria-valuenow
+                    confidence = parseInt(progressBar.style.width) || parseInt(progressBar.getAttribute('aria-valuenow')) || 0;
+                }
+
+                fetchItemMarketData(data.uniqueId).then(price => {
+                    const tooltipHTML = buildTooltipHTML(targetName, confidence, price);
+                    const wrapper = document.createElement('span');
+                    wrapper.className = 'tbh-tooltip-trigger';
+                    wrapper.innerHTML = targetName;
+                    
+                    const tooltip = document.createElement('span');
+                    tooltip.className = 'tbh-tooltip';
+                    tooltip.innerHTML = tooltipHTML;
+                    
+                    wrapper.appendChild(tooltip);
+                    nameNode.innerHTML = ''; 
+                    nameNode.appendChild(wrapper);
+                });
+            });
+        }, 500);
+    }
+
+    // --- INITIALIZATION ---
+    injectStyles();
+    createSettingsPanel();
+    loadUserInventory();
+})();
