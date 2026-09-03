@@ -203,4 +203,85 @@
     // --- INITIALIZATION ---
     injectStyles();
     loadUserInventory();
+
+// --- TORN SCRIPT HUB REGISTRATION ---
+(function registerWithScriptHub() {
+    const HUB_EVENTS = {
+        REGISTER: 'torn-script-hub-register',
+        UNREGISTER: 'torn-script-hub-unregister'
+    };
+
+    // Wait for the Hub to be ready
+    function waitForHub(retries = 0) {
+        if (retries > 20) {
+            console.warn('[TBH] Script Hub not found, registration skipped');
+            return;
+        }
+        
+        const hubReady = document.dispatchEvent(new CustomEvent('torn-script-hub-ready-check'));
+        if (hubReady || window.tornScriptHubReady) {
+            registerScript();
+        } else {
+            setTimeout(() => waitForHub(retries + 1), 500);
+        }
+    }
+
+    function registerScript() {
+        const registrationDetails = {
+            id: 'burglary-helper-pro',
+            name: 'Burglary Helper Pro',
+            version: '1.0.1',
+            order: 500, // Controls position in Hub menu (lower = higher)
+            active: true,
+            
+            // This function is called when user clicks your script in the Hub
+            open: function() {
+                // Open settings or show info
+                alert('Burglary Helper Pro\n\nConfigure via GreasyFork settings or GM values:\n- worker_url: Your Cloudflare Worker URL\n- torn_api_key: Your Torn API key');
+            },
+            
+            // Preferences schema for the Hub's settings UI
+            prefs: {
+                fields: [
+                    {
+                        key: 'worker_url',
+                        label: 'Cloudflare Worker URL',
+                        type: 'text',
+                        default: 'https://torn-burglary-api.selbaer.workers.dev',
+                        description: 'Your Cloudflare Worker API endpoint'
+                    },
+                    {
+                        key: 'torn_api_key',
+                        label: 'Torn API Key',
+                        type: 'password',
+                        default: '',
+                        description: 'Your Torn API key (read-only) for inventory checking'
+                    }
+                ],
+                values: {
+                    worker_url: GM_getValue('worker_url', 'https://torn-burglary-api.selbaer.workers.dev'),
+                    torn_api_key: GM_getValue('torn_api_key', '')
+                },
+                onSave: function(values) {
+                    GM_setValue('worker_url', values.worker_url);
+                    GM_setValue('torn_api_key', values.torn_api_key);
+                    alert('Settings saved! Refresh the page to apply changes.');
+                }
+            }
+        };
+
+        // Dispatch the registration event
+        document.dispatchEvent(new CustomEvent(HUB_EVENTS.REGISTER, {
+            detail: registrationDetails
+        }));
+        
+        console.log('[TBH] Registered with Torn Script Hub');
+    }
+
+    // Start the registration process
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => waitForHub());
+    } else {
+        waitForHub();
+    }
 })();
