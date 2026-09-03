@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Burglary Helper Pro
 // @namespace    https://github.com/selbaer/torn-burglary-helper
-// @version      1.2.1
-// @description  Advanced burglary helper with market values, community stats, smart casing advice, and a pre-scout loot database. Integrates with Torn Script Hub.
+// @version      1.3.0
+// @description  Advanced burglary helper with market values, community stats, smart casing advice, and burgled status tracking. Integrates with Torn Script Hub.
 // @author       selbaer
 // @license      MIT
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -26,45 +26,54 @@
     const WORKER_URL = GM_getValue('worker_url', 'https://torn-burglary-api.selbaer.workers.dev');
     const TORN_API_KEY = GM_getValue('torn_api_key', '');
 
-    // --- 34 TARGETS DICTIONARY ---
+    // --- 34 TARGETS DICTIONARY (Merged with 5k-install community data + Aliases) ---
     const TARGET_DATA = {
-        "Apartment": { recommended: "Credit Card", unique: "Personal Computer, High-Speed Drive, Blank DVDs", uniqueId: 295, notableLoot: ["Printer", "Graver", "Paperclips", "Premium Alcohol"], cases: "4-6" },
-        "Beach Hut": { recommended: "Jemmy", unique: "Cash ($160k - $400k)", uniqueId: 0, notableLoot: ["Window Breaker", "Hydrochloric Acid", "Net"], cases: "1" },
-        "Bungalow": { recommended: "Window Breaker", unique: "Soap on a Rope, Xanax, Vitamins, Toothbrush", uniqueId: 342, notableLoot: ["Melatonin", "Laptop"], cases: "1-2" },
-        "Cottage": { recommended: "Window Breaker", unique: "Jacket, Lawyer's Business Card", uniqueId: 112, notableLoot: ["Lockpicks", "Handcuffs", "Printer", "Bottle of Minty Mayhem"], cases: "2" },
-        "Farmhouse": { recommended: "Window Breaker", unique: "Turkey Baster, Bull Semen", uniqueId: 401, notableLoot: ["Razor Wire", "Drill", "C4 Explosive", "Detonator & Ignition Cord"], cases: "2-3" },
-        "Lake House": { recommended: "Jemmy", unique: "Box of Medical Supplies (x2)", uniqueId: 198, notableLoot: ["Window Breaker", "Binoculars", "Bottle of Mistletoe Madness"], cases: "3+" },
-        "Luxury Villa": { recommended: "Window Breaker", unique: "Persian Rug", uniqueId: 312, notableLoot: ["Wirecutters", "Stash Box", "Melatonin", "Xanax"], cases: "4+" },
-        "Manor House": { recommended: "Lockpicks", unique: "Chandelier", uniqueId: 305, notableLoot: ["Special Ammunition", "Chainsaw", "Horse's Head"], cases: "4-6" },
-        "Mobile Home": { recommended: "Rope", unique: "Claymore Mine, Luger, WWII Helmet", uniqueId: 250, notableLoot: ["Jemmy", "Blowtorch", "Drill"], cases: "1-2" },
-        "Secluded Cabin": { recommended: "Jemmy", unique: "Pack of Cuban Cigars, Windproof Lighter, Cigar Cutter", uniqueId: 288, notableLoot: ["Lockpicks", "Binoculars", "Stick of Dynamite", "Remote Detonator"], cases: "1-2" },
-        "Suburban Home": { recommended: "Window Breaker", unique: "Lottery Voucher", uniqueId: 330, notableLoot: ["Coat Hanger", "Drill", "Jemmy", "Wirecutters"], cases: "1-2" },
-        "Tool Shed": { recommended: "Lockpicks", unique: "Flashlight", uniqueId: 290, notableLoot: ["Lockpicks", "Blowtorch", "Ammonia", "Drill"], cases: "1" },
-        "Advertising Agency": { recommended: "Skeleton Key", unique: "Can of Damp Valley (x2)", uniqueId: 275, notableLoot: ["Laptop", "Premium Alcohol"], cases: "4-6" },
-        "Barbershop": { recommended: "Lockpicks", unique: "Cut-Throat Razor", uniqueId: 265, notableLoot: ["Consumables", "Weapons"], cases: "1-2" },
-        "Chiropractors": { recommended: "Window Breaker", unique: "Xanax (x3)", uniqueId: 150, notableLoot: ["Small Suitcase", "Ketamine", "Morphine", "Tyrosine"], cases: "2" },
-        "Cleaning Agency": { recommended: "Jemmy", unique: "Tumble Dryer", uniqueId: 380, notableLoot: ["Lye", "Ammonia", "Ladder", "Lockpicks"], cases: "1-2" },
-        "Dentists Office": { recommended: "Credit Card", unique: "Latex Gloves, Golden Tooth (x6)", uniqueId: 210, notableLoot: ["Grinding Stone", "Polishing Pad", "Small Suitcase", "Epinephrine"], cases: "1-2" },
-        "Funeral Directors": { recommended: "Lockpicks", unique: "Empty Blood Bag, Bone Saw, Bone, Cassock", uniqueId: 215, notableLoot: ["Casket", "Chloroform", "Small Suitcase", "Medical Bill"], cases: "2-3" },
-        "Liquor Store": { recommended: "Skeleton Key", unique: "Six-Pack of Alcohol", uniqueId: 180, notableLoot: ["Premium Consumables", "Crocozade"], cases: "2-3" },
-        "Market": { recommended: "Jemmy", unique: "Fanny Pack", uniqueId: 115, notableLoot: ["Laptop", "Bonded Latex", "Premium Consumables"], cases: "4-6" },
-        "Postal Office": { recommended: "Credit Card", unique: "Stamp Collection", uniqueId: 320, notableLoot: ["Advanced Driving Manual", "Energy Drinks", "Special Ammunition"], cases: "5+" },
-        "Recruitment Agency": { recommended: "Window Breaker", unique: "Jade Buddha, Bowling Trophy", uniqueId: 308, notableLoot: ["Printer", "Window Breaker", "Premium Alcohol"], cases: "4-6" },
-        "Self Storage Facility": { recommended: "Skeleton Key", unique: "Opium (x4)", uniqueId: 160, notableLoot: ["Skeleton Key", "Binoculars", "Ammonia", "Potassium Nitrate", "Embosser"], cases: "6+" },
-        "Brewery": { recommended: "Rope", unique: "Empty Box, Bottle of Stinky Swamp Punch (x6)", uniqueId: 200, notableLoot: ["Premium Alcohol", "Dynamite", "Ignition Cord", "Six-Pack of Alcohol"], cases: "8+" },
-        "Dockside Warehouse": { recommended: "Lockpicks", unique: "Erotic DVD", uniqueId: 240, notableLoot: ["Consumables", "Special Ammunition", "Armor", "Temps"], cases: "7+" },
-        "Farm Storage Unit": { recommended: "Jemmy", unique: "Cattle Prod", uniqueId: 255, notableLoot: ["Machine Parts", "Ammonia", "Urea", "Phosphorus", "Potassium Nitrate", "Crucible"], cases: "4-6" },
-        "Fertilizer Plant": { recommended: "Lockpicks", unique: "Truck Nuts", uniqueId: 390, notableLoot: ["Fertilizer", "Razor Wire", "Ignition Cord", "Remote Detonator"], cases: "2-3" },
-        "Foundry": { recommended: "Jemmy", unique: "Yasukuni Sword", uniqueId: 270, notableLoot: ["Machine Parts", "Aluminum Plate", "Brass Ingot", "Phosphorus"], cases: "2-3" },
-        "Old Factory": { recommended: "Window Breaker", unique: "Empty Box, Small Explosive Device", uniqueId: 245, notableLoot: ["Brass Ingots", "Machine Parts", "Sticks of Dynamite", "Remote Detonator"], cases: "1-2" },
-        "Paper Mill": { recommended: "Skeleton Key", unique: "Cash ($224k)", uniqueId: 0, notableLoot: ["Bond Paper", "Machine Parts", "Box of Medical Supplies", "Skeleton Key"], cases: "2-3" },
-        "Printing Works": { recommended: "Window Breaker", unique: "Hot Foil Stamper", uniqueId: 285, notableLoot: ["Blank Credit Cards", "Blank Tokens", "Certificate Seal", "Bond Paper", "Wax Seal Stamp"], cases: "4-6" },
-        "Shipyard": { recommended: "Jemmy", unique: "Anchor", uniqueId: 230, notableLoot: ["Skeleton Key", "Box of Medical Supplies", "C4 Explosive", "Brass Ingot", "Machine Part"], cases: "8+" },
-        "Slaughterhouse": { recommended: "Credit Card", unique: "Bloody Apron", uniqueId: 220, notableLoot: ["Box of Medical Supplies", "Chloroform", "Potassium Nitrate", "Empty Blood Bag"], cases: "1-2" },
-        "Truckyard": { recommended: "Skeleton Key", unique: "Can of Munster", uniqueId: 278, notableLoot: ["Binoculars", "Wirecutters", "Window Breaker", "Skeleton Key", "Special Ammunition"], cases: "1-2" }
+        "Apartment": { recommended: "Credit Card", unique: "Personal Computer, High-Speed Drive, Blank DVDs", uniqueId: 295, notable: ["Printer", "Graver", "Paperclips"], cases: "4-6", advice: "Loot is good, mostly items related to forgeries." },
+        "Beach Hut": { recommended: "Jemmy", unique: "Cash ($160k - $400k)", uniqueId: 0, notable: ["Window Breaker", "Hydrochloric Acid"], cases: "1", advice: "Case once then burgle." },
+        "Bungalow": { recommended: "Window Breaker", unique: "Soap on a Rope, Xanax, Vitamins, Toothbrush", uniqueId: 342, notable: ["Melatonin", "Laptop"], cases: "1-2", advice: "Mostly common consumables, clothes and weapons." },
+        "Cottage": { recommended: "Window Breaker", unique: "Jacket, Lawyer's Business Card", uniqueId: 112, notable: ["Lockpicks", "Handcuffs", "Printer"], cases: "2", advice: "Has a lot of noteworthy finds including lockpicks." },
+        "Farmhouse": { recommended: "Window Breaker", unique: "Turkey Baster, Bull Semen", uniqueId: 401, notable: ["Razor Wire", "Drill", "C4 Explosive", "Detonator"], cases: "2-3", advice: "Loot is very interesting, explosively so." },
+        "Lake House": { recommended: "Jemmy", unique: "Box of Medical Supplies (x2)", uniqueId: 198, notable: ["Window Breaker", "Binoculars"], cases: "3+", advice: "Loot is mostly consumables and junk, with lucrative premium booze." },
+        "Luxury Villa": { recommended: "Window Breaker", unique: "Persian Rug", uniqueId: 312, notable: ["Wirecutters", "Stash Box", "Melatonin", "Xanax"], cases: "4+", advice: "Loot is pretty good, mostly money and consumables." },
+        "Manor House": { recommended: "Lockpicks", unique: "Chandelier", uniqueId: 305, notable: ["Special Ammunition", "Chainsaw"], cases: "4-6", advice: "Case four to six times." },
+        "Mobile Home": { recommended: "Rope", unique: "Claymore Mine, Luger, WWII Helmet", uniqueId: 250, notable: ["Jemmy", "Blowtorch", "Drill"], cases: "1-2", advice: "Case once, rarely twice." },
+        "Secluded Cabin": { recommended: "Jemmy", unique: "Pack of Cuban Cigars, Windproof Lighter, Cigar Cutter", uniqueId: 288, notable: ["Lockpicks", "Binoculars", "Stick of Dynamite"], cases: "1-2", advice: "Loot includes mostly weapons and gear." },
+        "Suburban Home": { recommended: "Window Breaker", unique: "Lottery Voucher", uniqueId: 330, notable: ["Coat Hanger", "Drill", "Jemmy", "Wirecutters"], cases: "1-2", advice: "Many tools used for existing and upcoming crimes." },
+        "Tool Shed": { recommended: "Lockpicks", unique: "Flashlight", uniqueId: 290, notable: ["Lockpicks", "Blowtorch", "Ammonia", "Drill"], cases: "1", advice: "Case once then burgle, best place to find lockpicks." },
+        "Advertising Agency": { recommended: "Skeleton Key", unique: "Can of Damp Valley (x2)", uniqueId: 275, notable: ["Laptop", "Premium Alcohol"], cases: "4-6", advice: "Money finds are fairly common here." },
+        "Advertisement Agency": { ref: "Advertising Agency" }, "Ad Agency": { ref: "Advertising Agency" },
+        "Barbershop": { recommended: "Lockpicks", unique: "Cut-Throat Razor", uniqueId: 265, notable: ["Consumables", "Weapons"], cases: "1-2", advice: "Loot is either basic components or junk." },
+        "Chiropractors": { recommended: "Window Breaker", unique: "Xanax (x3)", uniqueId: 150, notable: ["Small Suitcase", "Ketamine", "Morphine"], cases: "2", advice: "Loot is mostly junk but some interesting finds remain." },
+        "Cleaning Agency": { recommended: "Jemmy", unique: "Tumble Dryer", uniqueId: 380, notable: ["Lye", "Ammonia", "Ladder", "Lockpicks"], cases: "1-2", advice: "Loot appears to be used for body disposal/explosives." },
+        "Cleaning Firm": { ref: "Cleaning Agency" },
+        "Dentists Office": { recommended: "Credit Card", unique: "Latex Gloves, Golden Tooth (x6)", uniqueId: 210, notable: ["Grinding Stone", "Small Suitcase", "Epinephrine"], cases: "1-2", advice: "Arguably the best commercial location overall." },
+        "Funeral Directors": { recommended: "Lockpicks", unique: "Empty Blood Bag, Bone Saw, Bone, Cassock", uniqueId: 215, notable: ["Casket", "Chloroform", "Small Suitcase"], cases: "2-3", advice: "Loot seems mostly related to future crimes." },
+        "Funeral Home": { ref: "Funeral Directors" }, "Funeral Parlor": { ref: "Funeral Directors" },
+        "Liquor Store": { recommended: "Skeleton Key", unique: "Six-Pack of Alcohol", uniqueId: 180, notable: ["Premium Consumables", "Crocozade"], cases: "2-3", advice: "Loot is quite good, mostly junk but a lot of premium alcohol." },
+        "Market": { recommended: "Jemmy", unique: "Fanny Pack", uniqueId: 115, notable: ["Laptop", "Bonded Latex"], cases: "4-6", advice: "Loot includes a few crime components and premium consumables." },
+        "Postal Office": { recommended: "Credit Card", unique: "Stamp Collection", uniqueId: 320, notable: ["Advanced Driving Manual", "Special Ammunition"], cases: "5+", advice: "Loot is mostly lackluster bar a few very good exceptions." },
+        "Recruitment Agency": { recommended: "Window Breaker", unique: "Jade Buddha, Bowling Trophy", uniqueId: 308, notable: ["Printer", "Window Breaker", "Premium Alcohol"], cases: "4-6", advice: "Loot is junk for the most part with a few lucrative exceptions." },
+        "Recruit Agency": { ref: "Recruitment Agency" }, "Temp Agency": { ref: "Recruitment Agency" },
+        "Self Storage Facility": { recommended: "Skeleton Key", unique: "Opium (x4)", uniqueId: 160, notable: ["Skeleton Key", "Binoculars", "Ammonia", "Potassium Nitrate"], cases: "6+", advice: "Loot is very good, with items useful for forgeries and bombing." },
+        "Self Storage": { ref: "Self Storage Facility" },
+        "Brewery": { recommended: "Rope", unique: "Empty Box, Bottle of Stinky Swamp Punch (x6)", uniqueId: 200, notable: ["Premium Alcohol", "Dynamite", "Ignition Cord"], cases: "8+", advice: "Avoid entirely or case upwards from eight." },
+        "Dockside Warehouse": { recommended: "Lockpicks", unique: "Erotic DVD", uniqueId: 240, notable: ["Consumables", "Special Ammunition"], cases: "7+", advice: "Loot seems to be weapons, armor, temps and meds." },
+        "Docklands": { ref: "Dockside Warehouse" },
+        "Farm Storage Unit": { recommended: "Jemmy", unique: "Cattle Prod", uniqueId: 255, notable: ["Machine Parts", "Ammonia", "Urea", "Phosphorus", "Crucible"], cases: "4-6", advice: "Loot is excellent, mostly fertilizers or explosive components." },
+        "Farm Storage": { ref: "Farm Storage Unit" },
+        "Fertilizer Plant": { recommended: "Lockpicks", unique: "Truck Nuts", uniqueId: 390, notable: ["Fertilizer", "Razor Wire", "Ignition Cord"], cases: "2-3", advice: "Fertilizer is extremely common, some explosives and cannabis." },
+        "Foundry": { recommended: "Jemmy", unique: "Yasukuni Sword", uniqueId: 270, notable: ["Machine Parts", "Aluminum Plate", "Brass Ingot"], cases: "2-3", advice: "Loot is extremely interesting including multiple materials." },
+        "Old Factory": { recommended: "Window Breaker", unique: "Empty Box, Small Explosive Device", uniqueId: 245, notable: ["Brass Ingots", "Machine Parts", "Sticks of Dynamite"], cases: "1-2", advice: "Loot is fairly interesting, mostly future crime components." },
+        "Paper Mill": { recommended: "Skeleton Key", unique: "Cash ($224k)", uniqueId: 0, notable: ["Bond Paper", "Machine Parts", "Box of Medical Supplies"], cases: "2-3", advice: "Loot is mainly stationery, forgery-related items." },
+        "Printing Works": { recommended: "Window Breaker", unique: "Hot Foil Stamper", uniqueId: 285, notable: ["Blank Credit Cards", "Blank Tokens", "Certificate Seal"], cases: "4-6", advice: "Loot is completely centered on forgery components." },
+        "Shipyard": { recommended: "Jemmy", unique: "Anchor", uniqueId: 230, notable: ["Skeleton Key", "Box of Medical Supplies", "C4 Explosive", "Brass Ingot"], cases: "8+", advice: "Loot is very interesting including brass ingots." },
+        "Slaughterhouse": { recommended: "Credit Card", unique: "Bloody Apron", uniqueId: 220, notable: ["Box of Medical Supplies", "Chloroform", "Potassium Nitrate"], cases: "1-2", advice: "Loot seems to be mostly medical items and other components." },
+        "Truckyard": { recommended: "Skeleton Key", unique: "Can of Munster", uniqueId: 278, notable: ["Binoculars", "Wirecutters", "Window Breaker", "Special Ammunition"], cases: "1-2", advice: "Loot is extremely interesting, including ammo and tools." }
     };
 
     let userInventory = new Set();
+    let virtualListObserver = null;
+    const observerConfig = { childList: true, subtree: true };
 
     // =========================================================================
     // UI: STYLES & TOOLTIP
@@ -86,30 +95,163 @@
         document.head.appendChild(style);
     }
 
-    function buildTooltipHTML(targetName, confidence, marketPrice, isAllClear) {
-        const data = TARGET_DATA[targetName] || {};
+    function buildTooltipHTML(targetName, confidence, marketPrice, isAllClear, data) {
         const hasItem = userInventory.has(data.recommended);
         const warningFlag = !hasItem ? `<span class="tbh-warning" title="Missing recommended item: ${data.recommended}">⚠️</span>` : '';
         
         let confidenceClass = 'tbh-bad';
         let advice = `⚠️ High fail risk. Case ${data.cases} times.`;
         if (confidence >= 80) { confidenceClass = 'tbh-value'; advice = '🟢 Very Safe. Max confidence.'; }
-        else if (confidence >= 40) { confidenceClass = 'tbh-moderate'; advice = `🟡 Sweet Spot. Safe to burgle. (Rec: ${data.cases} cases)`; }
+        else if (confidence >= 40) { confidenceClass = 'tbh-moderate'; advice = `🟡 Sweet Spot. Safe to burgle.`; }
 
         const allClearBadge = isAllClear ? '<span class="tbh-all-clear">ALL CLEAR</span>' : '';
-        const notableLoot = data.notableLoot ? data.notableLoot.join(', ') : 'Unknown';
+        const notableLoot = data.notable ? data.notable.join(', ') : 'Unknown';
 
         return `
             <div class="tbh-stat-row"><span>Target:</span> <strong>${targetName} ${warningFlag} ${allClearBadge}</strong></div>
             <div class="tbh-stat-row"><span>Confidence:</span> <span class="${confidenceClass}">${confidence}%</span></div>
             <div class="tbh-stat-row" style="font-size:11px; opacity:0.8;"><span>Advice:</span> <span>${advice}</span></div>
-            <div class="tbh-stat-row" style="font-size:11px; opacity:0.8;"><span>Community Rate:</span> <span>Logging active...</span></div>
             <div class="tbh-stat-row"><span>Unique:</span> <span style="font-size:11px;">${data.unique || 'Unknown'}</span></div>
             <div class="tbh-stat-row"><span>Est. Value:</span> <span class="tbh-value">$${(marketPrice || 0).toLocaleString()}</span></div>
             <div class="tbh-stat-row"><span>Rec. Item:</span> <span style="color: ${hasItem ? '#4caf50' : '#ff4444'}; font-size:11px;">${hasItem ? '✅ In Inventory' : '❌ Missing'}</span></div>
             <div class="tbh-stat-row" style="margin-top:8px; border-top:1px solid #444; padding-top:6px;"><span style="font-size:11px; opacity:0.7;">Notable Regulars:</span></div>
             <div style="font-size:11px; color:#ccc; line-height:1.4;">${notableLoot}</div>
         `;
+    }
+
+    // =========================================================================
+    // HELPER FUNCTIONS (Stolen from 5k-install script)
+    // =========================================================================
+    function getTargetItems(virtualList) {
+        if (!virtualList) return [];
+        return Array.from(virtualList.querySelectorAll('div[class*="virtualItem"]'))
+            .filter(item => !item.querySelector('[class*="propertyTypeSection"]'));
+    }
+
+    function getBurgledPlaces() {
+        const stats = document.querySelectorAll("button[class*='statistic']");
+        const burgled = new Set();
+        stats.forEach(button => {
+            const label = button.querySelector("span[class*='label']");
+            if (label && label.textContent.trim().endsWith(" burgled")) {
+                const target = label.textContent.trim().replace(" burgled", "");
+                burgled.add(target);
+                // Add known aliases to the set
+                if (target === 'Advertising Agency') { burgled.add('Advertisement Agency'); burgled.add('Ad Agency'); }
+                if (target === 'Cleaning Agency') burgled.add('Cleaning Firm');
+                if (target === 'Funeral Directors') { burgled.add('Funeral Home'); burgled.add('Funeral Parlor'); }
+                if (target === 'Recruitment Agency') { burgled.add('Recruit Agency'); burgled.add('Temp Agency'); }
+                if (target === 'Self Storage Facility') burgled.add('Self Storage');
+                if (target === 'Dockside Warehouse') burgled.add('Docklands');
+                if (target === 'Farm Storage Unit') burgled.add('Farm Storage');
+            }
+        });
+        return burgled;
+    }
+
+    // =========================================================================
+    // DOM MANIPULATION & OBSERVER
+    // =========================================================================
+    function processScoutedTargets() {
+        const virtualList = document.querySelector('div[class*="virtualList"]');
+        if (!virtualList) return;
+
+        const targetRows = getTargetItems(virtualList);
+        const burgledPlaces = getBurgledPlaces();
+
+        targetRows.forEach(row => {
+            if (row.dataset.tbhProcessed) return;
+            
+            // 1. Robust Target Name Extraction (Desktop & Mobile)
+            const mobileTitle = row.querySelector('[class*="titleAndProgress"] > [class*="title"]');
+            let targetName = "";
+            let nameNode = null;
+
+            if (mobileTitle) {
+                targetName = mobileTitle.textContent.trim();
+                nameNode = mobileTitle;
+            } else {
+                const titleCard = row.querySelector('[class*="crimeOptionSection"][class*="flexGrow"]') || row.querySelector('[class*="crimeOptionSection"]');
+                if (titleCard) {
+                    const firstTextNode = [...titleCard.childNodes].find(n => n.nodeType === Node.TEXT_NODE && n.nodeValue.trim());
+                    if (firstTextNode) {
+                        targetName = firstTextNode.nodeValue.trim();
+                        nameNode = firstTextNode;
+                    }
+                }
+            }
+
+            // Resolve aliases
+            let data = TARGET_DATA[targetName];
+            if (data && data.ref) data = TARGET_DATA[data.ref];
+
+            if (!targetName || !data) {
+                row.dataset.tbhProcessed = "true";
+                return;
+            }
+            
+            row.dataset.tbhProcessed = "true";
+
+            // 2. Accurate Confidence Extraction
+            let confidence = 0;
+            const progressFill = row.querySelector('[class*="progressFill"]');
+            if (progressFill) {
+                const sizeProp = window.innerWidth <= 784 ? 'width' : 'height';
+                const styleVal = progressFill.style[sizeProp] || progressFill.style.width || progressFill.style.height;
+                confidence = parseInt(styleVal) || 0;
+            }
+
+            // 3. Status Checks
+            const isAllClear = row.textContent.toLowerCase().includes('all clear');
+            const burgledStatus = burgledPlaces.has(targetName) ? 'success' : 'none';
+
+            // 4. Fetch Market Data & Inject Tooltip
+            fetchItemMarketData(data.uniqueId).then(price => {
+                const tooltipHTML = buildTooltipHTML(targetName, confidence, price, isAllClear, data);
+                
+                const wrapper = document.createElement('span');
+                wrapper.className = 'tbh-tooltip-trigger';
+                
+                // Apply burgled status color
+                if (burgledStatus === 'success') wrapper.style.color = 'var(--crimes-stats-successes-color, #4caf50)';
+                
+                wrapper.innerHTML = nameNode.nodeType === Node.TEXT_NODE ? targetName : (nameNode.innerHTML || targetName);
+                
+                const tooltip = document.createElement('span');
+                tooltip.className = 'tbh-tooltip';
+                tooltip.innerHTML = tooltipHTML;
+                wrapper.appendChild(tooltip);
+                
+                if (nameNode.nodeType === Node.TEXT_NODE) {
+                    nameNode.replaceWith(wrapper);
+                } else {
+                    nameNode.innerHTML = '';
+                    nameNode.appendChild(wrapper);
+                }
+            });
+        });
+    }
+
+    function attachVirtualListObserver() {
+        const virtualList = document.querySelector('div[class*="virtualList"]');
+        if (!virtualList) return;
+        if (virtualListObserver) virtualListObserver.disconnect();
+
+        virtualListObserver = new MutationObserver((mutations) => {
+            let hasAdded = false;
+            mutations.forEach(m => {
+                m.addedNodes.forEach(n => {
+                    if (n.nodeType === 1 && n.matches('div[class*="virtualItem"]') && !n.querySelector('[class*="propertyTypeSection"]')) {
+                        hasAdded = true;
+                    }
+                });
+            });
+
+            if (hasAdded) {
+                processScoutedTargets();
+            }
+        });
+        virtualListObserver.observe(virtualList, observerConfig);
     }
 
     // =========================================================================
@@ -124,7 +266,7 @@
                     return parsed.items[itemId].market_price || parsed.items[itemId].last_price;
                 }
             }
-        } catch (e) { /* Silent fail for Torn Tools */ }
+        } catch (e) { /* Silent fail */ }
         return null;
     }
 
@@ -164,133 +306,14 @@
     }
 
     // =========================================================================
-    // FETCH INTERCEPTOR & DOM MANIPULATION (BULLETPROOF TEXT-NODE TARGETING)
-    // =========================================================================
-    const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
-        const response = await originalFetch.apply(this, args);
-        if (args[0] && typeof args[0] === 'string' && args[0].includes('sid=crimesData') && args[0].includes('typeID=7')) {
-            const clone = response.clone();
-            clone.json().then(data => {
-                if (data.DB && data.DB.crimesByType && data.DB.crimesByType.properties) {
-                    processScoutedTargets(data.DB.crimesByType.properties);
-                }
-            }).catch(() => {});
-        }
-        return response;
-    };
-
-    function processScoutedTargets(properties) {
-        setTimeout(() => {
-            const virtualList = document.querySelector('div[class*="virtualList"]');
-            if (!virtualList) return;
-
-            const targetRows = Array.from(virtualList.querySelectorAll('div[class*="virtualItem"]'))
-                .filter(item => !item.querySelector('[class*="propertyTypeSection"]'));
-
-            console.log(`[TBH] Found ${targetRows.length} scouted target rows to process.`);
-
-            targetRows.forEach(row => {
-                if (row.dataset.tbhProcessed) return;
-                
-                // 1. Find the crime option section
-                const crimeOptionSection = row.querySelector('[class*="crimeOptionSection"]');
-                if (!crimeOptionSection) return;
-
-                // 2. Hunt for the target name (it's often a raw text node!)
-                let targetName = "";
-                let nameNode = null;
-
-                // Strategy A: Look for a raw text node directly inside crimeOptionSection
-                for (const node of crimeOptionSection.childNodes) {
-                    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
-                        targetName = node.textContent.trim();
-                        nameNode = node;
-                        break;
-                    }
-                }
-
-                // Strategy B: Fallback to the first span that isn't a utility span
-                if (!nameNode) {
-                    const spans = crimeOptionSection.querySelectorAll('span');
-                    for (const span of spans) {
-                        if (!span.className.includes('hf-value') && !span.className.includes('abandon') && !span.className.includes('close')) {
-                            targetName = span.textContent.trim();
-                            nameNode = span;
-                            break;
-                        }
-                    }
-                }
-
-                if (!nameNode || !TARGET_DATA[targetName]) {
-                    row.dataset.tbhProcessed = "true"; // Mark as processed to avoid loops
-                    return;
-                }
-                
-                row.dataset.tbhProcessed = "true";
-
-                // 3. Extract confidence
-                let confidence = 0;
-                let isAllClear = false;
-                
-                const progressBar = row.querySelector('[class*="progress"], [class*="bar"], [class*="confidence"]');
-                if (progressBar) {
-                    confidence = parseInt(progressBar.style.width) || parseInt(progressBar.getAttribute('aria-valuenow')) || 0;
-                }
-                
-                if (row.textContent.toLowerCase().includes('all clear')) {
-                    isAllClear = true;
-                }
-
-                const data = TARGET_DATA[targetName];
-                fetchItemMarketData(data.uniqueId).then(price => {
-                    const tooltipHTML = buildTooltipHTML(targetName, confidence, price, isAllClear);
-                    
-                    // 4. Inject the tooltip wrapper
-                    if (nameNode.nodeType === Node.TEXT_NODE) {
-                        const wrapper = document.createElement('span');
-                        wrapper.className = 'tbh-tooltip-trigger';
-                        wrapper.innerHTML = targetName;
-                        
-                        const tooltip = document.createElement('span');
-                        tooltip.className = 'tbh-tooltip';
-                        tooltip.innerHTML = tooltipHTML;
-                        wrapper.appendChild(tooltip);
-                        
-                        nameNode.replaceWith(wrapper);
-                    } else {
-                        const wrapper = document.createElement('span');
-                        wrapper.className = 'tbh-tooltip-trigger';
-                        wrapper.innerHTML = nameNode.innerHTML || targetName;
-                        
-                        const tooltip = document.createElement('span');
-                        tooltip.className = 'tbh-tooltip';
-                        tooltip.innerHTML = tooltipHTML;
-                        wrapper.appendChild(tooltip);
-                        
-                        nameNode.innerHTML = '';
-                        nameNode.appendChild(wrapper);
-                    }
-                    console.log(`[TBH] Successfully injected tooltip for: ${targetName}`);
-                });
-            });
-        }, 500);
-    }
-
-    // =========================================================================
     // TORN SCRIPT HUB REGISTRATION
     // =========================================================================
     (function registerWithScriptHub() {
         const HUB_EVENTS = { REGISTER: 'torn-script-hub:register', READY: 'torn-script-hub:ready' };
-
         function attemptRegistration() {
             const registrationDetails = {
-                id: '594123',
-                name: 'Burglary Helper Pro',
-                version: '1.2.1',
-                order: 500,
-                active: true,
-                open: function() { alert('Burglary Helper Pro v1.2.1\n\nConfigure settings via the Script Hub preferences panel.'); },
+                id: '594123', name: 'Burglary Helper Pro', version: '1.3.0', order: 500, active: true,
+                open: function() { alert('Burglary Helper Pro v1.3.0\n\nConfigure settings via the Script Hub preferences panel.'); },
                 prefs: {
                     fields: [
                         { key: 'worker_url', label: 'Cloudflare Worker URL', type: 'text', default: 'https://torn-burglary-api.selbaer.workers.dev' },
@@ -306,7 +329,6 @@
             };
             document.dispatchEvent(new CustomEvent(HUB_EVENTS.REGISTER, { detail: registrationDetails }));
         }
-
         attemptRegistration();
         document.addEventListener(HUB_EVENTS.READY, attemptRegistration);
         setTimeout(attemptRegistration, 2000);
@@ -317,5 +339,12 @@
     // =========================================================================
     injectStyles();
     loadUserInventory();
-    console.log('[TBH] Burglary Helper Pro v1.2.1 loaded with bulletproof text-node targeting');
+    
+    // Initial run
+    setTimeout(() => {
+        processScoutedTargets();
+        attachVirtualListObserver();
+    }, 1000);
+
+    console.log('[TBH] Burglary Helper Pro v1.3.0 loaded with battle-tested DOM logic');
 })();
