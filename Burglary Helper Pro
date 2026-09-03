@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Burglary Helper Pro
 // @namespace    https://github.com/selbaer/torn-burglary-helper
-// @version      1.2.0
+// @version      1.2.1
 // @description  Advanced burglary helper with market values, community stats, smart casing advice, and a pre-scout loot database. Integrates with Torn Script Hub.
 // @author       selbaer
 // @license      MIT
@@ -26,7 +26,7 @@
     const WORKER_URL = GM_getValue('worker_url', 'https://torn-burglary-api.selbaer.workers.dev');
     const TORN_API_KEY = GM_getValue('torn_api_key', '');
 
-    // --- 34 TARGETS DICTIONARY (Ported from the 5k-install community script) ---
+    // --- 34 TARGETS DICTIONARY ---
     const TARGET_DATA = {
         "Apartment": { recommended: "Credit Card", unique: "Personal Computer, High-Speed Drive, Blank DVDs", uniqueId: 295, notableLoot: ["Printer", "Graver", "Paperclips", "Premium Alcohol"], cases: "4-6" },
         "Beach Hut": { recommended: "Jemmy", unique: "Cash ($160k - $400k)", uniqueId: 0, notableLoot: ["Window Breaker", "Hydrochloric Acid", "Net"], cases: "1" },
@@ -82,8 +82,6 @@
             .tbh-bad { color: #ff4444; }
             .tbh-all-clear { background: #4caf50; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 10px; margin-left: 8px; animation: tbh-pulse 2s infinite; }
             @keyframes tbh-pulse { 0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(76, 175, 80, 0); } 100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); } }
-            .tbh-preview-btn { position: fixed; bottom: 80px; right: 20px; z-index: 9998; background: #3d6eac; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.3); }
-            .tbh-preview-btn:hover { background: #355e94; }
         `;
         document.head.appendChild(style);
     }
@@ -151,7 +149,10 @@
     }
 
     async function loadUserInventory() {
-        if (!TORN_API_KEY) return;
+        if (!TORN_API_KEY) {
+            console.log('[TBH] No API key provided. Inventory checking disabled.');
+            return;
+        }
         try {
             const res = await fetch(`https://api.torn.com/v2/user/?selections=inventory&key=${TORN_API_KEY}`);
             const data = await res.json();
@@ -163,12 +164,11 @@
     }
 
     // =========================================================================
-    // FETCH INTERCEPTOR & DOM MANIPULATION (BULLETPROOF SELECTORS)
+    // FETCH INTERCEPTOR & DOM MANIPULATION (BULLETPROOF TEXT-NODE TARGETING)
     // =========================================================================
     const originalFetch = window.fetch;
     window.fetch = async function(...args) {
         const response = await originalFetch.apply(this, args);
-        // Intercept the exact burglary crimes list payload
         if (args[0] && typeof args[0] === 'string' && args[0].includes('sid=crimesData') && args[0].includes('typeID=7')) {
             const clone = response.clone();
             clone.json().then(data => {
@@ -182,48 +182,96 @@
 
     function processScoutedTargets(properties) {
         setTimeout(() => {
-            // 1. Use resilient "contains" selector for React virtual lists
             const virtualList = document.querySelector('div[class*="virtualList"]');
             if (!virtualList) return;
 
-            // 2. Get all items, but filter out the "Scout for targets" header row
             const targetRows = Array.from(virtualList.querySelectorAll('div[class*="virtualItem"]'))
                 .filter(item => !item.querySelector('[class*="propertyTypeSection"]'));
 
+            console.log(`[TBH] Found ${targetRows.length} scouted target rows to process.`);
+
             targetRows.forEach(row => {
                 if (row.dataset.tbhProcessed) return;
+                
+                // 1. Find the crime option section
+                const crimeOptionSection = row.querySelector('[class*="crimeOptionSection"]');
+                if (!crimeOptionSection) return;
+
+                // 2. Hunt for the target name (it's often a raw text node!)
+                let targetName = "";
+                let nameNode = null;
+
+                // Strategy A: Look for a raw text node directly inside crimeOptionSection
+                for (const node of crimeOptionSection.childNodes) {
+                    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+                        targetName = node.textContent.trim();
+                        nameNode = node;
+                        break;
+                    }
+                }
+
+                // Strategy B: Fallback to the first span that isn't a utility span
+                if (!nameNode) {
+                    const spans = crimeOptionSection.querySelectorAll('span');
+                    for (const span of spans) {
+                        if (!span.className.includes('hf-value') && !span.className.includes('abandon') && !span.className.includes('close')) {
+                            targetName = span.textContent.trim();
+                            nameNode = span;
+                            break;
+                        }
+                    }
+                }
+
+                if (!nameNode || !TARGET_DATA[targetName]) {
+                    row.dataset.tbhProcessed = "true"; // Mark as processed to avoid loops
+                    return;
+                }
+                
                 row.dataset.tbhProcessed = "true";
 
-                // 3. Find the title node resiliently
-                const nameNode = row.querySelector('[class*="title"]') || row.querySelector('[class*="name"]'); 
-                if (!nameNode) return;
-
-                const targetName = nameNode.textContent.trim();
-                const data = TARGET_DATA[targetName];
-                if (!data) return;
-
-                // 4. Extract confidence from progress bar
+                // 3. Extract confidence
                 let confidence = 0;
                 let isAllClear = false;
-                const progressBar = row.querySelector('[class*="progress"]') || row.querySelector('[class*="bar"]') || row.querySelector('[class*="confidence"]');
+                
+                const progressBar = row.querySelector('[class*="progress"], [class*="bar"], [class*="confidence"]');
                 if (progressBar) {
                     confidence = parseInt(progressBar.style.width) || parseInt(progressBar.getAttribute('aria-valuenow')) || 0;
                 }
-                if (row.textContent.toLowerCase().includes('all clear')) isAllClear = true;
+                
+                if (row.textContent.toLowerCase().includes('all clear')) {
+                    isAllClear = true;
+                }
 
+                const data = TARGET_DATA[targetName];
                 fetchItemMarketData(data.uniqueId).then(price => {
                     const tooltipHTML = buildTooltipHTML(targetName, confidence, price, isAllClear);
-                    const wrapper = document.createElement('span');
-                    wrapper.className = 'tbh-tooltip-trigger';
-                    wrapper.innerHTML = targetName;
                     
-                    const tooltip = document.createElement('span');
-                    tooltip.className = 'tbh-tooltip';
-                    tooltip.innerHTML = tooltipHTML;
-                    
-                    wrapper.appendChild(tooltip);
-                    nameNode.innerHTML = ''; 
-                    nameNode.appendChild(wrapper);
+                    // 4. Inject the tooltip wrapper
+                    if (nameNode.nodeType === Node.TEXT_NODE) {
+                        const wrapper = document.createElement('span');
+                        wrapper.className = 'tbh-tooltip-trigger';
+                        wrapper.innerHTML = targetName;
+                        
+                        const tooltip = document.createElement('span');
+                        tooltip.className = 'tbh-tooltip';
+                        tooltip.innerHTML = tooltipHTML;
+                        wrapper.appendChild(tooltip);
+                        
+                        nameNode.replaceWith(wrapper);
+                    } else {
+                        const wrapper = document.createElement('span');
+                        wrapper.className = 'tbh-tooltip-trigger';
+                        wrapper.innerHTML = nameNode.innerHTML || targetName;
+                        
+                        const tooltip = document.createElement('span');
+                        tooltip.className = 'tbh-tooltip';
+                        tooltip.innerHTML = tooltipHTML;
+                        wrapper.appendChild(tooltip);
+                        
+                        nameNode.innerHTML = '';
+                        nameNode.appendChild(wrapper);
+                    }
+                    console.log(`[TBH] Successfully injected tooltip for: ${targetName}`);
                 });
             });
         }, 500);
@@ -239,10 +287,10 @@
             const registrationDetails = {
                 id: '594123',
                 name: 'Burglary Helper Pro',
-                version: '1.2.0',
+                version: '1.2.1',
                 order: 500,
                 active: true,
-                open: function() { alert('Burglary Helper Pro v1.2.0\n\nConfigure settings via the Script Hub preferences panel.'); },
+                open: function() { alert('Burglary Helper Pro v1.2.1\n\nConfigure settings via the Script Hub preferences panel.'); },
                 prefs: {
                     fields: [
                         { key: 'worker_url', label: 'Cloudflare Worker URL', type: 'text', default: 'https://torn-burglary-api.selbaer.workers.dev' },
@@ -269,5 +317,5 @@
     // =========================================================================
     injectStyles();
     loadUserInventory();
-    console.log('[TBH] Burglary Helper Pro v1.2.0 loaded with battle-tested selectors');
+    console.log('[TBH] Burglary Helper Pro v1.2.1 loaded with bulletproof text-node targeting');
 })();
