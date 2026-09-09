@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.16
+// @version      1.6.17
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -32,7 +32,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.6.16';
+    const HUB_VERSION = '1.6.17';
     const HUB_ICON = '';
 
     function registerWithHub() {
@@ -130,7 +130,7 @@
         inventory: {
             root: '.items-wrap, #mainContainer, body', tile: 'li[data-item], li[data-weaponinfo="1"], li[data-weaponInfo="1"]',
             imageWrapper: '.img-wrap, .thumbnail-wrap, .item-plate, [class*="img"]', image: 'img',
-            title: '.name-wrap, .title-wrap, .name, [class*="name"]', statsContainer: '.bonuses-wrap, .info-cont, .cont-wrap, [class*="infoBonuses"], [class*="bonuses"]',
+            title: '.name-wrap, .title-wrap .name, .name-wrap .name, .title-wrap .t-overflow', statsContainer: '.bonuses-wrap, .info-cont, .cont-wrap, [class*="infoBonuses"], [class*="bonuses"]',
             statEntry: '[class*="bonus"], [class*="property"], span, li, div', statIcon: 'i', statValue: 'span, b, strong, [class*="value"]',
             statTypeElement: 'icon', statTypeAttribute: 'className',
             bonusIcons: 'i[class*="bonus-attachment-"], [data-bonus-attachment-title], .iconsbonuses i, [class*="iconsbonuses"] i',
@@ -358,8 +358,7 @@
                 observer.observe(root, { childList: true, subtree: true });
                 self.observer = observer;
                 self.processAll();
-                
-                // Start dropdown monitoring ONLY when Item Market is active
+
                 initDropdownIntegration();
             }, 10, (timeoutId) => { self.pendingTimeoutId = timeoutId; });
         },
@@ -367,6 +366,62 @@
             if (this.observer) { this.observer.disconnect(); this.observer = null; }
             if (this.pendingTimeoutId) { clearTimeout(this.pendingTimeoutId); this.pendingTimeoutId = null; }
             teardownDropdownIntegration();
+        }
+    };
+
+    // =========================================================================
+    // SINGLE ITEM MARKET VIEW (Add/View Listing)
+    // =========================================================================
+    const itemMarketSingle = {
+        observer: null,
+        init() {
+            const self = this;
+            const root = document.querySelector('#mainContainer') || document.body;
+            const observer = new MutationObserver(() => {
+                self.processAll();
+            });
+            observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class'] });
+            self.observer = observer;
+            self.processAll();
+        },
+        processAll() {
+            if (!isPageActive()) return;
+            const images = document.querySelectorAll('img[src*="/images/items/"]');
+            images.forEach(img => {
+                if (img.parentElement && img.parentElement.querySelector('.openmarket-quality-box')) return;
+                const match = img.src.match(/\/images\/items\/(\d+)\//);
+                if (!match) return;
+                const itemID = parseInt(match[1], 10);
+                if (!BASE_STATS_MAP[itemID]) return;
+
+                const container = img.closest('div') || img.parentElement || document.body;
+
+                let stats = { damage: 0, accuracy: 0, armour: 0 };
+                container.querySelectorAll('span, div, p, b, strong, td').forEach(el => {
+                    const text = (el.textContent || '').toLowerCase();
+                    const val = parseFloat(el.textContent);
+                    if (!isNaN(val)) {
+                        if (text.includes('damage')) stats.damage = val;
+                        else if (text.includes('accuracy')) stats.accuracy = val;
+                        else if (text.includes('armor') || text.includes('armour') || text.includes('defence')) stats.armour = val;
+                    }
+                });
+
+                const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
+                if (quality !== null) {
+                    const maxRange = stats.armour > 0 ? 100 : 300;
+                    const numericQuality = parseFloat(quality);
+                    if (numericQuality >= -10 && numericQuality <= maxRange + 10) {
+                        const wrapper = img.parentElement;
+                        if (wrapper && !wrapper.querySelector('.openmarket-quality-box')) {
+                            insertQualityBox(wrapper, quality, maxRange);
+                        }
+                    }
+                }
+            });
+        },
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
         }
     };
 
@@ -505,8 +560,8 @@
             let polls = 0; self.pollTimer = setInterval(() => { self.processAll(); polls++; if (polls >= 30) { clearInterval(self.pollTimer); self.pollTimer = null; } }, 1000);
             self.processAll();
         },
-        teardown() { 
-            if (this.observer) { this.observer.disconnect(); this.observer = null; } 
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
             if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
         }
     };
@@ -598,44 +653,57 @@
             let polls = 0; self.pollTimer = setInterval(() => { self.processAll(); polls++; if (polls >= 20) { clearInterval(self.pollTimer); self.pollTimer = null; } }, 500);
             self.processAll();
         },
-        teardown() { 
-            if (this.observer) { this.observer.disconnect(); this.observer = null; } 
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
             if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
         }
     };
 
     function detectPageType(href) {
-        if (href.includes('sid=ItemMarket')) return 'itemMarket';
+        if (href.includes('sid=ItemMarket')) {
+            if (href.includes('#/addListing') || href.includes('#/viewListing')) {
+                return 'itemMarketSingle';
+            }
+            return 'itemMarket';
+        }
         if (href.includes('amarket.php')) return 'auctionHouse';
         if (href.includes('bazaar.php')) return 'bazaar';
         if (href.includes('displaycase.php')) return 'displayCase';
         if (href.includes('item.php')) return 'inventory';
         return null;
     }
+
     function teardownCurrentHandler() {
         if (!currentHandler) return;
         if (typeof currentHandler.teardown === 'function') currentHandler.teardown();
         else ['observer', 'outerObserver', 'innerObserver'].forEach(key => { if (currentHandler[key]) { currentHandler[key].disconnect(); currentHandler[key] = null; } });
         if (currentHandler.pendingTimeoutId) { clearTimeout(currentHandler.pendingTimeoutId); currentHandler.pendingTimeoutId = null; }
-        
+
         resetBonusSort();
     }
+
     function activateHandlerForCurrentUrl() {
         const type = detectPageType(window.location.href);
-        const handlers = { itemMarket, auctionHouse, bazaar, displayCase, inventory };
-        const enabledMap = { itemMarket: CONFIG.enableItemMarket, auctionHouse: CONFIG.enableAuctionHouse, bazaar: CONFIG.enableBazaar, displayCase: CONFIG.enableDisplayCase, inventory: CONFIG.enableInventory };
+        const handlers = { itemMarket, itemMarketSingle, auctionHouse, bazaar, displayCase, inventory };
+        const enabledMap = {
+            itemMarket: CONFIG.enableItemMarket,
+            itemMarketSingle: CONFIG.enableItemMarket,
+            auctionHouse: CONFIG.enableAuctionHouse,
+            bazaar: CONFIG.enableBazaar,
+            displayCase: CONFIG.enableDisplayCase,
+            inventory: CONFIG.enableInventory
+        };
         if (!type || !enabledMap[type]) { teardownCurrentHandler(); currentHandler = null; return; }
         const nextHandler = handlers[type];
-        
-        if (currentHandler === nextHandler) { 
-            // RESTORED: Clear the market cache when staying on the Item Market page
-            // to prevent stale data from matching against new search/category results.
+
+        if (currentHandler === nextHandler) {
             if (type === 'itemMarket') itemMarket.resetCache();
-            nextHandler.processAll(); 
-            return; 
+            nextHandler.processAll();
+            return;
         }
         teardownCurrentHandler(); currentHandler = nextHandler; nextHandler.init();
     }
+
     function setupRouteWatcher() {
         const originalPushState = history.pushState;
         const originalReplaceState = history.replaceState;
@@ -643,7 +711,7 @@
         history.replaceState = function (...args) { const result = originalReplaceState.apply(this, args); window.dispatchEvent(new Event('openmarket-locationchange')); return result; };
         ['popstate', 'hashchange', 'openmarket-locationchange'].forEach(evt => { window.addEventListener(evt, () => activateHandlerForCurrentUrl()); });
     }
-    
+
     function interceptFetchAndXHR() {
         let lastNativeSortKey = null;
 
@@ -653,7 +721,7 @@
                 const fieldMatch = checkStr.match(/sortField=([^&\s]*)/);
                 const orderMatch = checkStr.match(/sortOrder=([^&\s]*)/);
                 const key = (fieldMatch ? fieldMatch[1] : '') + '|' + (orderMatch ? orderMatch[1] : '');
-                
+
                 if (key && key !== lastNativeSortKey) {
                     lastNativeSortKey = key;
                     if (sortState.active) {
@@ -667,20 +735,20 @@
         window.fetch = async (...args) => {
             const response = await originalFetch(...args);
             const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-            
+
             checkAndResetSort(url);
-            
+
             if (url.includes('sid=iMarket')) {
                 response.clone().json().then(data => {
                     if (!data?.items?.length) return;
                     const existingIds = new Set(itemMarket.cache.map(i => i.listingID));
                     const newItems = data.items.filter(item => !existingIds.has(item.listingID));
                     if (newItems.length > 0) { itemMarket.pushCache(newItems); if (isPageActive()) itemMarket.processAll(); }
-                }).catch(err => { 
-                    if (!fetchParseWarned) { 
-                        console.warn('[OpenMarket] Fetch blocked. Falling back to DOM reading.'); 
-                        fetchParseWarned = true; 
-                    } 
+                }).catch(err => {
+                    if (!fetchParseWarned) {
+                        console.warn('[OpenMarket] Fetch blocked. Falling back to DOM reading.');
+                        fetchParseWarned = true;
+                    }
                 });
             }
             return response;
@@ -729,26 +797,26 @@
     function applyBonusSort() {
         const root = document.querySelector('#item-market-root');
         if (!root) return;
-        
+
         const firstTile = root.querySelector('[class*="itemTile___"]');
         if (!firstTile) return;
-        
+
         const listItem = firstTile.parentElement;
         const container = listItem?.parentElement;
         if (!container) return;
-        
+
         const display = getComputedStyle(container).display;
         if (display !== 'grid' && display !== 'flex') {
             container.style.display = 'grid';
         }
-        
+
         const listItems = Array.from(container.children).filter(el => el.tagName === 'LI' && el.querySelector('[class*="itemTile___"]'));
         const itemOrders = listItems.map(li => {
             const tile = li.querySelector('[class*="itemTile___"]');
             const bonus = tile ? extractMaxBonusFromTile(tile) : -1;
             return { li, bonus };
         });
-        
+
         if (sortState.active) {
             itemOrders.sort((a, b) => {
                 if (a.bonus === -1 && b.bonus === -1) return 0;
@@ -757,7 +825,7 @@
                 return sortState.ascending ? a.bonus - b.bonus : b.bonus - a.bonus;
             });
         }
-        
+
         itemOrders.forEach((item, index) => {
             item.li.style.order = sortState.active ? index : '';
         });
@@ -786,13 +854,13 @@
             if (!text.includes('price') && !text.includes('quality') && !text.includes('damage') && !text.includes('accuracy')) {
                 continue;
             }
-            
+
             if (menu.querySelector('[data-om-bonus-injected]')) continue;
-            
+
             const items = Array.from(menu.children);
             const isPDA = !items[0].textContent.toLowerCase().includes('sort by');
             const prefix = isPDA ? '' : 'Sort by: ';
-            
+
             const createBonusItem = (text, direction) => {
                 const item = document.createElement('li');
                 item.tabIndex = 0;
@@ -803,36 +871,36 @@
                 item.className = 'item t-overflow';
                 item.style.cursor = 'pointer';
                 item.textContent = `${prefix}${text}`;
-                
+
                 const handleInteraction = (e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    
+
                     sortState.active = true;
                     sortState.ascending = direction === 'asc';
                     applyBonusSort();
-                    
+
                     const allTogglers = document.querySelectorAll('button[data-testid="dropdown-toggler"]');
-                    const toggler = Array.from(allTogglers).find(btn => 
+                    const toggler = Array.from(allTogglers).find(btn =>
                         btn.textContent.includes('Sort by') || /ascending|descending/i.test(btn.textContent)
                     ) || allTogglers[0];
-                    
+
                     if (toggler) {
                         toggler.textContent = `${prefix}Bonus ${direction === 'asc' ? 'ascending' : 'descending'}`;
-                        
+
                         if (toggler.getAttribute('aria-expanded') === 'true') {
                             toggler.click();
                         }
                     }
                 };
-                
+
                 item.addEventListener('click', handleInteraction);
                 return item;
             };
-            
+
             const ascItem = createBonusItem('Bonus ascending', 'asc');
             const descItem = createBonusItem('Bonus descending', 'desc');
-            
+
             menu.appendChild(ascItem);
             menu.appendChild(descItem);
             break;
@@ -841,23 +909,23 @@
 
     function monitorDropdown() {
         if (dropdownObserver) dropdownObserver.disconnect();
-        
+
         dropdownObserver = new MutationObserver(() => {
             const openDropdown = document.querySelector('button[aria-expanded="true"]');
             const hasOpenMenu = document.querySelector('[role="listbox"]');
-            
+
             if (openDropdown || hasOpenMenu) {
                 setTimeout(() => {
                     injectIntoSortDropdown();
                 }, 100);
             }
         });
-        
-        dropdownObserver.observe(document.body, { 
-            childList: true, 
-            subtree: true, 
-            attributes: true, 
-            attributeFilter: ['aria-expanded'] 
+
+        dropdownObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['aria-expanded']
         });
     }
 
