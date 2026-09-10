@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.6.17
+// @version      1.6.19
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -16,6 +16,10 @@
 // @downloadURL  https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
 // @updateURL    https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 // ==/UserScript==
+
+// CHANGELOG 1.6.18:
+// - Fixed no quality badges ever appearing on Item Market's "Add Listing" / "View
+//   Listing" pages (#/addListing, #/viewListing). itemMarketSingle.
 
 (function () {
     'use strict';
@@ -268,6 +272,34 @@
         if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
         container.appendChild(box);
     }
+    // FIX (1.6.19): inline alternative to insertQualityBox, for rows where the item
+    // thumbnail is small enough that an absolute-positioned overlay covers most of the
+    // icon (Item Market's Add/View Listing rows). Inserts the badge as a normal sibling
+    // right after the given name element instead of overlaying anything, so it can
+    // never obscure the icon regardless of thumbnail size.
+    function insertQualityInline(nameEl, value, maxRange) {
+        if (!nameEl) return;
+        const titleContainer = nameEl.parentElement;
+        if (!titleContainer) return;
+        const existing = qs('.openmarket-quality-inline', titleContainer);
+        if (existing) existing.remove();
+        const clamped = Math.min(Math.max(parseFloat(value), 0), maxRange);
+        const badge = create('span', {
+            className: 'openmarket-quality-inline',
+            textContent: `Q ${clamped.toFixed(1)}%`,
+            style: {
+                marginLeft: '6px',
+                padding: '1px 4px',
+                borderRadius: '3px',
+                fontSize: '11px',
+                fontWeight: 'bold',
+                whiteSpace: 'nowrap',
+                background: getQualityBoxBg(),
+                color: getQualityColour(clamped, maxRange)
+            }
+        });
+        titleContainer.appendChild(badge);
+    }
     function insertBonusOverlay(container, bonuses) {
         if (!container || !bonuses || bonuses.length === 0) return;
         const existing = qs('.openmarket-bonus-box', container);
@@ -388,22 +420,42 @@
             if (!isPageActive()) return;
             const images = document.querySelectorAll('img[src*="/images/items/"]');
             images.forEach(img => {
-                if (img.parentElement && img.parentElement.querySelector('.openmarket-quality-box')) return;
+                const container = img.closest('div') || img.parentElement;
+                // FIX (1.6.19): dedupe check now targets the inline name badge
+                // (.openmarket-quality-inline) instead of the old image-overlay badge
+                // (.openmarket-quality-box), since that's what's actually inserted
+                // below now.
+                if (container && container.querySelector('.openmarket-quality-inline')) return;
                 const match = img.src.match(/\/images\/items\/(\d+)\//);
                 if (!match) return;
                 const itemID = parseInt(match[1], 10);
                 if (!BASE_STATS_MAP[itemID]) return;
 
-                const container = img.closest('div') || img.parentElement || document.body;
-
                 let stats = { damage: 0, accuracy: 0, armour: 0 };
                 container.querySelectorAll('span, div, p, b, strong, td').forEach(el => {
+                    // FIX: Torn's item-market row markup (e.g. "Add Listing" / "View
+                    // Listing") puts the stat keyword ("damage points", "accuracy
+                    // points", "armor points") only in the aria-label attribute, e.g.
+                    // <span aria-label="63.47 damage points"><span aria-hidden="true">
+                    // 63.47</span></span>. The visible number sits in a nested span
+                    // whose own textContent is just "63.47" -- the word "damage" never
+                    // appears anywhere in .textContent, only in the aria-label. The
+                    // previous check only ever looked at .textContent, so it always
+                    // missed the keyword here, stats stayed 0 for every item on this
+                    // page, and the resulting implausible quality value was silently
+                    // filtered out downstream -- no badges ever showed. Checking
+                    // aria-label alongside textContent (and reading the number from
+                    // whichever one actually has it) fixes this without touching any
+                    // other page's stat parsing.
+                    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
                     const text = (el.textContent || '').toLowerCase();
-                    const val = parseFloat(el.textContent);
+                    const combined = ariaLabel + ' ' + text;
+                    let val = parseFloat(el.textContent);
+                    if (isNaN(val)) val = parseFloat(ariaLabel);
                     if (!isNaN(val)) {
-                        if (text.includes('damage')) stats.damage = val;
-                        else if (text.includes('accuracy')) stats.accuracy = val;
-                        else if (text.includes('armor') || text.includes('armour') || text.includes('defence')) stats.armour = val;
+                        if (combined.includes('damage')) stats.damage = val;
+                        else if (combined.includes('accuracy')) stats.accuracy = val;
+                        else if (combined.includes('armor') || combined.includes('armour') || combined.includes('defence')) stats.armour = val;
                     }
                 });
 
@@ -412,10 +464,18 @@
                     const maxRange = stats.armour > 0 ? 100 : 300;
                     const numericQuality = parseFloat(quality);
                     if (numericQuality >= -10 && numericQuality <= maxRange + 10) {
-                        const wrapper = img.parentElement;
-                        if (wrapper && !wrapper.querySelector('.openmarket-quality-box')) {
-                            insertQualityBox(wrapper, quality, maxRange);
-                        }
+                        // FIX (1.6.19): was an absolutely-positioned overlay on the
+                        // item's thumbnail image (insertQualityBox), which on this
+                        // page's small row-icon size ended up covering most of the
+                        // icon itself. Moved to an inline badge appended right after
+                        // the item name text instead -- same information, doesn't
+                        // obscure the icon. Confirmed row markup: name lives in
+                        // [class*="title___"] [class*="name___"] (e.g.
+                        // .title___YiIA9 .name___nTF1n), sibling to the image wrapper,
+                        // both direct children of the row's <button>.
+                        const nameEl = container.querySelector('[class*="title___"] [class*="name___"]')
+                            || container.querySelector('[class*="name___"]');
+                        insertQualityInline(nameEl, quality, maxRange);
                     }
                 }
             });
