@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         OpenMarket
+// @name         OpenMarket 2.0
 // @namespace    https://greasyfork.org/users/cowboyup
 // @version      1.6.19
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
@@ -36,7 +36,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.6.17';
+    const HUB_VERSION = '1.6.19';
     const HUB_ICON = '';
 
     function registerWithHub() {
