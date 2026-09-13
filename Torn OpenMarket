@@ -15,41 +15,8 @@
 // @license      GNU GPLv3
 // @downloadURL  https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
 // @updateURL    https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
-// ==/UserScript==
 
-// CHANGELOG 1.7.5:
-// - Cleanup: removed vestigial insertAfter / anchor-chaining logic left over from the
-//   pre-1.7.3 sibling-insertion layout. All OpenMarket sliders now live exclusively
-//   in the dedicated second row; positioning is handled solely by appendChild order
-//   and the CSS grid. buildRangeSlider no longer accepts or uses an insertAfter
-//   parameter. Redundant inline sizing styles removed (CSS already owns layout).
-//
-// CHANGELOG 1.7.4:
-// - (no functional changes from 1.7.3; version bump for packaging)
-//
-// CHANGELOG 1.7.3:
-// - Layout-only change: Price / Damage / Accuracy remain in Torn's untouched native
-//   first row. Quality and any selected bonus-value sliders now live in a dedicated
-//   row directly underneath. No filter, matching, sorting, cache, or network logic changed.
-//
-// CHANGELOG 1.7.2:
-// - Fixed adjacent injected sliders (Quality, and each per-bonus slider) having zero
-//   visual gap between them. Injected sliders now get explicit spacing so they do not
-//   rely on Torn's native column gap mechanism.
-//
-// CHANGELOG 1.7.1:
-// - Fixed applyBonusSort() forcing its tile-list container to display:grid and never
-//   restoring it. Now records the original inline display and restores it on reset.
-// - Fixed injected filter sliders crashing into the native row and shrinking. Explicit
-//   min-width + dedicated second row (finalised in 1.7.3) forces predictable wrapping.
-// - Hard one-per-row stacking under 700px for PDA.
-//
-// CHANGELOG 1.7.0:
-// - New quality/bonus filter on the Item Market grid. Native-look quality range slider
-//   (0-300% weapons, 0-100% armour) + one value-range slider per checked bonus from
-//   Torn's native bonus-type dropdown. Matches are highlighted (outline + glow) only;
-//   nothing is hidden or reordered (protects infinite-scroll height). Requires the
-//   fetch-intercepted cache; skipped entirely in the DOM-reading fallback path.
+// ==/UserScript==
 
 (function () {
     'use strict';
