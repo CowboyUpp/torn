@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.4.1
-// @description  Safer Torn jail-busting helper. One custom key (Log + Personal Stats). Available bust estimate, total people busted on desktop, hardness scores, filtering, sorting, confirm skip. Script Hub + standalone. PDA shows available only (compact nav).
+// @version      1.4.2
+// @description  Safer Torn jail-busting helper. One custom key (Log + Personal Stats). Available bust estimate, total people busted on desktop, hardness scores, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA shows available only (compact nav).
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.4.1';
+  const VERSION = '1.4.2';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -512,11 +512,6 @@
       #bustr-plus-navitem .bustr-plus-navitem-iconwrap { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; }
       #bustr-plus-navitem .bustr-plus-navitem-iconwrap svg { display: block; fill: currentColor; }
       #bustr-plus-navitem .bustr-plus-navitem-label { white-space: nowrap; }
-      #bustr-plus-navitem.bustr-plus-navitem-fallback {
-        position: fixed; z-index: 99998; right: 10px; bottom: 14px; padding: 0;
-        background: rgba(24,24,24,.9); border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.4);
-      }
-      #bustr-plus-navitem.bustr-plus-navitem-fallback .bustr-plus-navitem-link { color: #eee; }
       #body .users-list-title { display: flex; justify-content: start; align-items: center; }
       #body .users-list-title .title { width: 269px; }
       #body .users-list-title .time { width: 50px; }
@@ -581,21 +576,23 @@
       removeToggleButton();
       return;
     }
+
+    // Do not create any standalone BUSTR+ UI until Torn's real sidebar exists.
+    // This prevents the button from appearing on Cloudflare/challenge pages,
+    // where /jailview.php may be the URL but Torn's page shell is not loaded.
+    const sidebar = document.getElementById('sidebar');
+    const sidebarVisible = !!sidebar &&
+      sidebar.offsetParent !== null &&
+      sidebar.getClientRects().length > 0;
+
+    if (!sidebarVisible) {
+      removeToggleButton();
+      return;
+    }
+
     let wrap = document.getElementById('bustr-plus-navitem');
     if (!wrap) wrap = buildToggleElement();
-    mountToggleButton(wrap);
-  }
-
-  function mountToggleButton(wrap) {
-    const sidebar = document.getElementById('sidebar');
-    const sidebarVisible = !!sidebar && sidebar.offsetParent !== null && sidebar.getClientRects().length > 0;
-    if (sidebarVisible) {
-      wrap.classList.remove('bustr-plus-navitem-fallback');
-      if (wrap.parentElement !== sidebar) sidebar.appendChild(wrap);
-    } else {
-      wrap.classList.add('bustr-plus-navitem-fallback');
-      if (wrap.parentElement !== document.body) document.body.appendChild(wrap);
-    }
+    if (wrap.parentElement !== sidebar) sidebar.appendChild(wrap);
   }
 
   function removeToggleButton() {
@@ -849,7 +846,7 @@
     window.open(url, '_blank', 'noopener');
   }
 
-  // Floating key-gen helper panel removed (v1.4.1). Generate button still opens Torn's API page with query params.
+  // Floating key-gen helper panel removed. Generate button still opens Torn's API page with query params.
   function renderApiKeyGenerator() {
     document.getElementById('bustr-plus-keygen')?.remove();
   }
