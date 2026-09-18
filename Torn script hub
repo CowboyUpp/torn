@@ -55,6 +55,7 @@
     const LIBRARY_SCRIPTS = [
         { id: 586532, name: 'Bustr+', description: 'Busting reminder with a jail-page UI and PDA support.' },
         { id: 587751, name: 'No Confirm Market & Bazaar', description: 'Skips the confirmation step when buying on the Item Market or Bazaar.' },
+        { id: 596397, name: 'Market Quick Buy', description: 'Moves TornW3B bazaar listings below the native Item Market seller row. Layout only — no purchase clicks.' },
         { id: 581347, name: 'HoF Battle Stat Rank', description: 'Shows your battle stat rank in the Hall of Fame.' },
         { id: 581948, name: 'Crime Chain Tracker', description: 'Tracks your Crimes 2.0 chain, critical fails, and resets.' },
         { id: 591579, name: 'Mobster & Cyclist Alert', description: 'Beeps when a Mobster or Cyclist crime becomes available.' },
