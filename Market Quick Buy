@@ -1,24 +1,25 @@
 // ==UserScript==
 // @name         Market Quick Buy
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      1.4.0
+// @version      1.4.2
 // @description  Moves TornW3B bazaar listings below Torn's native Item Market seller row. Does not click Buy, Yes, or cart. Hub-aware.
 // @author       cowboyup
-// @match        https://www.torn.com/page.php?sid=ItemMarket*
+// @match        https://www.torn.com/*
+// @match        https://*.torn.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @run-at       document-idle
 // @grant        none
 // @license      MIT
 // @homepageURL  https://greasyfork.org/en/scripts/596397-market-quick-buy
 // @supportURL   https://greasyfork.org/en/scripts/596397-market-quick-buy/feedback
-// @downloadURL  https://update.greasyfork.org/scripts/596397/TORN%3A%20Market%20Quick%20Buy.user.js
-// @updateURL    https://update.greasyfork.org/scripts/596397/TORN%3A%20Market%20Quick%20Buy.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/596397/Market%20Quick%20Buy.user.js
+// @updateURL    https://update.greasyfork.org/scripts/596397/Market%20Quick%20Buy.meta.js
 // ==/UserScript==
 
 (() => {
   "use strict";
 
-  const VERSION = "1.4.0";
+  const VERSION = "1.4.2";
   const HUB_ID = "market-quick-buy";
   const STORAGE_KEY = "torn-market-quick-buy-settings-v1";
   const SETTLE_WAIT_MS = 1000;
@@ -173,7 +174,7 @@
 
   function registerWithHub() {
     document.dispatchEvent(
-      new CustomEvent("torn-script-hub", {
+      new CustomEvent("torn-script-hub:register", {
         detail: {
           id: HUB_ID,
           name: "Market Quick Buy",
@@ -241,5 +242,5 @@
     init();
   }
 
-  document.addEventListener("torn-script-hub", registerWithHub);
+  document.addEventListener("torn-script-hub:ready", registerWithHub);
 })();
