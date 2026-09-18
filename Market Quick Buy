@@ -1,0 +1,245 @@
+// ==UserScript==
+// @name         Market Quick Buy
+// @namespace    https://greasyfork.org/en/users/1608691-cowboyup
+// @version      1.4.0
+// @description  Moves TornW3B bazaar listings below Torn's native Item Market seller row. Does not click Buy, Yes, or cart. Hub-aware.
+// @author       cowboyup
+// @match        https://www.torn.com/page.php?sid=ItemMarket*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
+// @run-at       document-idle
+// @grant        none
+// @license      MIT
+// @homepageURL  https://greasyfork.org/en/scripts/YOUR_SCRIPT_ID-torn-market-quick-buy
+// @supportURL   https://greasyfork.org/en/scripts/YOUR_SCRIPT_ID-torn-market-quick-buy/feedback
+// @downloadURL  https://update.greasyfork.org/scripts/YOUR_SCRIPT_ID/TORN%3A%20Market%20Quick%20Buy.user.js
+// @updateURL    https://update.greasyfork.org/scripts/YOUR_SCRIPT_ID/TORN%3A%20Market%20Quick%20Buy.meta.js
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  const VERSION = "1.4.0";
+  const HUB_ID = "market-quick-buy";
+  const STORAGE_KEY = "torn-market-quick-buy-settings-v1";
+  const SETTLE_WAIT_MS = 1000;
+  const PROCESS_DELAY_MS = 150;
+
+  const CONFIG = { enabled: true };
+
+  const BAZAAR_SELECTOR = ".bazaar-info-container";
+  const SELLER_LIST_SELECTOR =
+    '[class^="sellerList___"], [class*=" sellerList___"]';
+  const SELLER_WRAPPER_SELECTOR =
+    '[class^="sellerListWrapper___"], [class*=" sellerListWrapper___"]';
+
+  const seenAt = new WeakMap();
+
+  function loadConfig() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (typeof parsed.enabled === "boolean") CONFIG.enabled = parsed.enabled;
+    } catch (_) {}
+  }
+
+  function saveConfig() {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ enabled: CONFIG.enabled })
+      );
+    } catch (_) {}
+  }
+
+  function isAllowedPage() {
+    try {
+      const url = new URL(location.href);
+      if (
+        url.hostname !== "www.torn.com" &&
+        !url.hostname.endsWith(".torn.com")
+      ) {
+        return false;
+      }
+      const sid = (url.searchParams.get("sid") || "").toLowerCase();
+      return sid === "itemmarket" || sid.startsWith("itemmarket");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function findNativeSellerRow(parent) {
+    return Array.from(parent.children).find((element) =>
+      element.matches(SELLER_LIST_SELECTOR)
+    );
+  }
+
+  function tornW3bHasSettled(bazaar, nativeSellerList) {
+    const parent = bazaar.parentElement;
+    if (!parent) return false;
+    if (parent.hasAttribute("data-has-bazaar-info")) return true;
+    if (nativeSellerList.hasAttribute("data-has-bazaar-container")) return true;
+    if (parent.hasAttribute("data-bazaar-processed")) return true;
+    return false;
+  }
+
+  function fixBazaarOrder(bazaar) {
+    if (!(bazaar instanceof HTMLElement)) return;
+    if (!CONFIG.enabled) return;
+
+    const parent = bazaar.parentElement;
+    if (!parent) return;
+
+    const nativeSellerList = findNativeSellerRow(parent);
+    if (!nativeSellerList) return;
+
+    if (nativeSellerList.nextElementSibling === bazaar) return;
+
+    if (!tornW3bHasSettled(bazaar, nativeSellerList)) {
+      const firstSeen = seenAt.get(bazaar) || Date.now();
+      seenAt.set(bazaar, firstSeen);
+      if (Date.now() - firstSeen < SETTLE_WAIT_MS) {
+        scheduleProcess(PROCESS_DELAY_MS);
+        return;
+      }
+    }
+
+    nativeSellerList.insertAdjacentElement("afterend", bazaar);
+  }
+
+  function process() {
+    if (!isAllowedPage()) return;
+    if (!CONFIG.enabled) return;
+    document.querySelectorAll(BAZAAR_SELECTOR).forEach(fixBazaarOrder);
+  }
+
+  let timer = null;
+  function scheduleProcess(delay = PROCESS_DELAY_MS) {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      process();
+    }, delay);
+  }
+
+  function nodeLooksRelevant(node) {
+    if (!(node instanceof Element)) return false;
+    return (
+      node.matches(BAZAAR_SELECTOR) ||
+      node.matches(SELLER_LIST_SELECTOR) ||
+      node.matches(SELLER_WRAPPER_SELECTOR) ||
+      Boolean(node.querySelector(BAZAAR_SELECTOR)) ||
+      Boolean(node.querySelector(SELLER_LIST_SELECTOR))
+    );
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    if (!CONFIG.enabled || !isAllowedPage()) return;
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (nodeLooksRelevant(node)) {
+          scheduleProcess(PROCESS_DELAY_MS);
+          return;
+        }
+      }
+      for (const node of mutation.removedNodes) {
+        if (nodeLooksRelevant(node)) {
+          scheduleProcess(PROCESS_DELAY_MS);
+          return;
+        }
+      }
+    }
+  });
+
+  function showToast(msg) {
+    const toast = document.createElement("div");
+    toast.textContent = msg;
+    toast.style.cssText = [
+      "position:fixed",
+      "bottom:60px",
+      "left:50%",
+      "transform:translateX(-50%)",
+      "padding:10px 18px",
+      "background:rgba(0,0,0,.85)",
+      "color:#fff",
+      "border-radius:8px",
+      "font-size:13px",
+      "z-index:99999",
+      "pointer-events:none",
+    ].join(";");
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2500);
+  }
+
+  function registerWithHub() {
+    document.dispatchEvent(
+      new CustomEvent("torn-script-hub", {
+        detail: {
+          id: HUB_ID,
+          name: "Market Quick Buy",
+          version: VERSION,
+          order: 90,
+          open: () => {
+            if (!isAllowedPage()) {
+              showToast("Only active on Item Market");
+              return;
+            }
+            const status = CONFIG.enabled ? "ON" : "OFF";
+            showToast(
+              `Market Quick Buy is ${status} (layout only — no purchase clicks)`
+            );
+          },
+          status: () => {
+            if (!isAllowedPage()) return "Idle — Item Market only";
+            return CONFIG.enabled
+              ? "Bazaar below sellers ON"
+              : "Bazaar below sellers OFF";
+          },
+          prefs: {
+            fields: [
+              {
+                key: "enabled",
+                type: "toggle",
+                label: "Put TornW3B bazaar listings below native sellers",
+                default: true,
+                hint: "Item Market only. Does not click Buy or confirm. Pair with No Confirm Market & Bazaar for one-click purchases.",
+              },
+            ],
+            values: { enabled: CONFIG.enabled },
+            onSave: (values) => {
+              if (typeof values.enabled === "boolean") {
+                CONFIG.enabled = values.enabled;
+              }
+              saveConfig();
+              process();
+              console.info("[Market Quick Buy] Settings updated:", CONFIG);
+            },
+          },
+        },
+      })
+    );
+  }
+
+  function init() {
+    loadConfig();
+    scheduleProcess(250);
+    const root = document.documentElement || document.body;
+    if (root) {
+      observer.observe(root, { childList: true, subtree: true });
+    }
+    registerWithHub();
+    console.info(
+      "[Market Quick Buy]",
+      VERSION,
+      "— Item Market layout only (no purchase clicks)"
+    );
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  } else {
+    init();
+  }
+
+  document.addEventListener("torn-script-hub", registerWithHub);
+})();
