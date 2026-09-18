@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Market Quick Buy
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      1.4.2
+// @version      1.4.3
 // @description  Moves TornW3B bazaar listings below Torn's native Item Market seller row. Does not click Buy, Yes, or cart. Hub-aware.
 // @author       cowboyup
-// @match        https://www.torn.com/*
-// @match        https://*.torn.com/*
+// @match        https://www.torn.com/page.php?sid=ItemMarket*
+// @match        https://*.torn.com/page.php?sid=ItemMarket*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @run-at       document-idle
 // @grant        none
@@ -19,13 +19,43 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.2";
+  const VERSION = "1.4.3";
   const HUB_ID = "market-quick-buy";
   const STORAGE_KEY = "torn-market-quick-buy-settings-v1";
   const SETTLE_WAIT_MS = 1000;
   const PROCESS_DELAY_MS = 150;
 
-  const CONFIG = { enabled: true };
+  /*
+   * CURRENT TORN ITEM MARKET
+   *
+   * This script does NOT modify:
+   *   - .yes-buy
+   *   - BUY buttons
+   *   - cart buttons
+   *   - native Torn seller row contents
+   *
+   * "No Confirm Market & Bazaar" handles one-click
+   * purchase behaviour separately. Keep them as two scripts.
+   *
+   * Layout work is Item Market only. @match is Item Market only
+   * so the script does not load on unrelated Torn pages. Hub
+   * Settings/Active only appear while you are on Item Market —
+   * same pattern as No Confirm.
+   *
+   * TornW3B (v4.1.x) inserts .bazaar-info-container as the
+   * first child of sellerListWrapper (desktop) or immediately
+   * BEFORE ul.sellerList___ (mobile). On mobile it will
+   * re-insert ABOVE the list until it stamps
+   * data-has-bazaar-container; desktop stamps
+   * data-has-bazaar-info and then leaves the node alone.
+   *
+   * We wait for that stamp, then move ONLY the TornW3B
+   * container to sit after the native seller list.
+   */
+
+  const CONFIG = {
+    enabled: true,
+  };
 
   const BAZAAR_SELECTOR = ".bazaar-info-container";
   const SELLER_LIST_SELECTOR =
@@ -206,7 +236,9 @@
                 hint: "Item Market only. Does not click Buy or confirm. Pair with No Confirm Market & Bazaar for one-click purchases.",
               },
             ],
-            values: { enabled: CONFIG.enabled },
+            values: {
+              enabled: CONFIG.enabled,
+            },
             onSave: (values) => {
               if (typeof values.enabled === "boolean") {
                 CONFIG.enabled = values.enabled;
@@ -226,7 +258,10 @@
     scheduleProcess(250);
     const root = document.documentElement || document.body;
     if (root) {
-      observer.observe(root, { childList: true, subtree: true });
+      observer.observe(root, {
+        childList: true,
+        subtree: true,
+      });
     }
     registerWithHub();
     console.info(
