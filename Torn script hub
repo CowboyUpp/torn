@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
-// @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.3.0
+// @namespace    https://greasyfork.org/en/users/1608691-cowboyup
+// @version      4.3.1
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.3.0';
+    const HUB_VERSION = '4.3.1';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
