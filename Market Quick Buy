@@ -9,10 +9,10 @@
 // @run-at       document-idle
 // @grant        none
 // @license      MIT
-// @homepageURL  https://greasyfork.org/en/scripts/YOUR_SCRIPT_ID-torn-market-quick-buy
-// @supportURL   https://greasyfork.org/en/scripts/YOUR_SCRIPT_ID-torn-market-quick-buy/feedback
-// @downloadURL  https://update.greasyfork.org/scripts/YOUR_SCRIPT_ID/TORN%3A%20Market%20Quick%20Buy.user.js
-// @updateURL    https://update.greasyfork.org/scripts/YOUR_SCRIPT_ID/TORN%3A%20Market%20Quick%20Buy.meta.js
+// @homepageURL  https://greasyfork.org/en/scripts/596397-market-quick-buy
+// @supportURL   https://greasyfork.org/en/scripts/596397-market-quick-buy/feedback
+// @downloadURL  https://update.greasyfork.org/scripts/596397/TORN%3A%20Market%20Quick%20Buy.user.js
+// @updateURL    https://update.greasyfork.org/scripts/596397/TORN%3A%20Market%20Quick%20Buy.meta.js
 // ==/UserScript==
 
 (() => {
