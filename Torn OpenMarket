@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.5
+// @version      1.7.6
 // @description  Adds quality % and bonus values to Item Market, Auction House, Bazaars, Display Case & Inventory. Includes quality/bonus filters, bonus sorting, and Script Hub support.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -17,6 +17,16 @@
 // @updateURL    https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 
 // ==/UserScript==
+
+// CHANGELOG 1.7.6:
+// - Fixed the injected filter-slider row (Quality + any selected bonus sliders)
+//   running visibly wider than Torn's native Price/Damage/Accuracy row at narrow/PDA
+//   widths. The row's horizontal margin was a hardcoded guess at what Torn's own
+//   margin was; that guess held at one width but drifted at another, since Torn's
+//   actual margin is responsive. ensureFilterSliderRow() now inherits the native
+//   row's own class list first (our own class appended after), so it automatically
+//   picks up whatever margin Torn defines at every width, with no hardcoded value to
+//   drift. Confirmed via side-by-side screenshot at PDA width.
 
 (function () {
     'use strict';
@@ -946,7 +956,14 @@
 
         const nativeRow = nativeAnchor.parentElement;
         filterSliderRow = document.createElement('div');
-        filterSliderRow.className = 'openmarket-filter-slider-row';
+        // FIX (1.7.6): inherit the native row's own class list first, so this row
+        // automatically picks up whatever horizontal margin Torn defines for it --
+        // including anything responsive/breakpoint-specific -- instead of guessing a
+        // matching value ourselves. That guess (a hardcoded margin) was exactly what
+        // drifted: it looked right at one width and ran wider than native at another
+        // (confirmed via screenshot at PDA width). Our own class is appended after,
+        // so .openmarket-filter-slider-row's grid/gap rules still take effect.
+        filterSliderRow.className = nativeRow.className + ' openmarket-filter-slider-row';
         nativeRow.parentElement.insertBefore(filterSliderRow, nativeRow.nextSibling);
         return filterSliderRow;
     }
