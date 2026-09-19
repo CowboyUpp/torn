@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Market Quick Buy
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      1.4.3
-// @description  Moves TornW3B bazaar listings below Torn's native Item Market seller row. Does not click Buy, Yes, or cart. Hub-aware.
+// @version      1.4.14
+// @description  Moves TornW3B bazaar listings below Torn's native Item Market seller row. Does not click Buy, Yes, or cart. Hub-aware. Includes visible native toggle.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://*.torn.com/page.php?sid=ItemMarket*
@@ -19,39 +19,11 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.3";
+  const VERSION = "1.4.14";
   const HUB_ID = "market-quick-buy";
   const STORAGE_KEY = "torn-market-quick-buy-settings-v1";
   const SETTLE_WAIT_MS = 1000;
   const PROCESS_DELAY_MS = 150;
-
-  /*
-   * CURRENT TORN ITEM MARKET
-   *
-   * This script does NOT modify:
-   *   - .yes-buy
-   *   - BUY buttons
-   *   - cart buttons
-   *   - native Torn seller row contents
-   *
-   * "No Confirm Market & Bazaar" handles one-click
-   * purchase behaviour separately. Keep them as two scripts.
-   *
-   * Layout work is Item Market only. @match is Item Market only
-   * so the script does not load on unrelated Torn pages. Hub
-   * Settings/Active only appear while you are on Item Market —
-   * same pattern as No Confirm.
-   *
-   * TornW3B (v4.1.x) inserts .bazaar-info-container as the
-   * first child of sellerListWrapper (desktop) or immediately
-   * BEFORE ul.sellerList___ (mobile). On mobile it will
-   * re-insert ABOVE the list until it stamps
-   * data-has-bazaar-container; desktop stamps
-   * data-has-bazaar-info and then leaves the node alone.
-   *
-   * We wait for that stamp, then move ONLY the TornW3B
-   * container to sit after the native seller list.
-   */
 
   const CONFIG = {
     enabled: true,
@@ -64,6 +36,7 @@
     '[class^="sellerListWrapper___"], [class*=" sellerListWrapper___"]';
 
   const seenAt = new WeakMap();
+  let toggleElement = null;
 
   function loadConfig() {
     try {
@@ -97,6 +70,11 @@
     } catch (_) {
       return false;
     }
+  }
+
+  function isMarketPage() {
+    const hash = window.location.hash;
+    return hash === '' || hash === '#/market' || hash.startsWith('#/market/');
   }
 
   function findNativeSellerRow(parent) {
@@ -202,6 +180,151 @@
     setTimeout(() => toast.remove(), 2500);
   }
 
+  function injectStyles() {
+    if (document.getElementById('mqb-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'mqb-styles';
+    style.textContent = `
+      #mqb-market-fixed-toggle {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 12px;
+        padding: 0;
+        background: transparent;
+        border: none;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+        font-weight: normal;
+        color: #555;
+        cursor: pointer;
+        user-select: none;
+        vertical-align: middle;
+      }
+
+      #mqb-market-fixed-toggle:hover {
+        color: #222;
+      }
+
+      .mqb-switch {
+        position: relative;
+        display: inline-block;
+        width: 34px;
+        height: 18px;
+        margin-right: 8px;
+        vertical-align: middle;
+      }
+
+      .mqb-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .mqb-slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: .2s;
+        border-radius: 20px;
+      }
+
+      .mqb-slider:before {
+        position: absolute;
+        content: "";
+        height: 12px;
+        width: 12px;
+        left: 3px;
+        bottom: 3px;
+        background-color: #fff;
+        transition: .2s;
+        border-radius: 50%;
+      }
+
+      #mqb-toggle-checkbox:checked + .mqb-slider {
+        background-color: #4e97d9;
+      }
+
+      #mqb-toggle-checkbox:checked + .mqb-slider:before {
+        transform: translateX(16px);
+      }
+
+      .mqb-version {
+        margin-left: 6px;
+        font-size: 11px;
+        color: #888;
+        font-weight: normal;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function createToggleElement() {
+    if (toggleElement) return toggleElement;
+    
+    toggleElement = document.createElement('div');
+    toggleElement.id = 'mqb-market-fixed-toggle';
+    toggleElement.innerHTML = `
+      <label class="mqb-switch">
+        <input type="checkbox" id="mqb-toggle-checkbox" ${CONFIG.enabled ? 'checked' : ''}>
+        <span class="mqb-slider"></span>
+      </label>
+      <span>Market Quick Buy</span>
+      <span class="mqb-version">v${VERSION}</span>
+    `;
+
+    const checkbox = toggleElement.querySelector('#mqb-toggle-checkbox');
+    checkbox.addEventListener('change', function () {
+      CONFIG.enabled = this.checked;
+      saveConfig();
+      process();
+      showToast(`Market Quick Buy turned ${CONFIG.enabled ? 'ON' : 'OFF'}`);
+    });
+    
+    return toggleElement;
+  }
+
+  function insertToggleIntoHeader() {
+    if (!isMarketPage()) return;
+    
+    const headerContainers = document.querySelectorAll('[class*="containerHeader___"]');
+    
+    for (const container of headerContainers) {
+      const title = container.querySelector('[class*="title___"]');
+      if (title && title.textContent.trim() !== 'Most Popular') {
+        if (container.contains(toggleElement)) return;
+        
+        title.insertAdjacentElement('afterend', toggleElement);
+        return;
+      }
+    }
+  }
+
+  function setupHeaderWatcher() {
+    const headerObserver = new MutationObserver(() => {
+      if (isMarketPage() && toggleElement) {
+        setTimeout(() => {
+          insertToggleIntoHeader();
+        }, 50);
+      }
+    });
+    
+    headerObserver.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+    
+    insertToggleIntoHeader();
+    setInterval(() => {
+      if (isMarketPage()) {
+        insertToggleIntoHeader();
+      }
+    }, 2000);
+  }
+
   function registerWithHub() {
     document.dispatchEvent(
       new CustomEvent("torn-script-hub:register", {
@@ -246,6 +369,11 @@
               saveConfig();
               process();
               console.info("[Market Quick Buy] Settings updated:", CONFIG);
+              
+              const checkbox = document.getElementById('mqb-toggle-checkbox');
+              if (checkbox) {
+                checkbox.checked = CONFIG.enabled;
+              }
             },
           },
         },
@@ -255,6 +383,9 @@
 
   function init() {
     loadConfig();
+    injectStyles();
+    createToggleElement();
+    setupHeaderWatcher();
     scheduleProcess(250);
     const root = document.documentElement || document.body;
     if (root) {
@@ -277,5 +408,11 @@
     init();
   }
 
+  window.addEventListener('hashchange', () => {
+    if (isMarketPage()) {
+      setTimeout(insertToggleIntoHeader, 100);
+    }
+  });
+  
   document.addEventListener("torn-script-hub:ready", registerWithHub);
 })();
