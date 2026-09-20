@@ -1,0 +1,864 @@
+// ==UserScript==
+// @name         Chesticals
+// @namespace    https://greasyfork.org/en/users/1608691-cowboyup
+// @version      1.1.0
+// @description  Torn Christmas Town Chest Solver
+// @author       cowboyup
+// @match        https://www.torn.com/christmas_town.php*
+// @match        *.torn.com/christmas_town.php*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const STORAGE_KEY = 'chestical_state_v2';
+    const MAX_ATTEMPTS = 4;
+    const digits = '123456789';
+
+    const HUB_ID = 'chestical';
+    const HUB_NAME = 'Chestical';
+    const HUB_VERSION = '1.1.0';
+    const QUEUE_PROPERTY = '__tornScriptHubQueue';
+
+    let state = loadState();
+    let possibleCodes = [];
+    let uiContainer = null;
+    let bestGuessCacheKey = '';
+    let bestGuessCacheValue = null;
+    let bestGuessCacheWorstCase = null;
+
+    function defaultState() {
+        return {
+            history: [],
+            attemptsUsed: 0,
+            stats: { solved: 0, failed: 0 },
+            ui: { x: 20, y: 80, minimized: false, autoMode: true },
+            manualInput: '',
+            currentFeedback: '',
+            isFinished: false
+        };
+    }
+
+    function loadState() {
+        const fallback = defaultState();
+
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return fallback;
+
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return fallback;
+
+            const merged = {
+                ...fallback,
+                ...parsed,
+                ui: { ...fallback.ui, ...(parsed.ui || {}) },
+                stats: { ...fallback.stats, ...(parsed.stats || {}) }
+            };
+
+            if (!Array.isArray(merged.history)) merged.history = [];
+            merged.history = merged.history.filter(h =>
+                h &&
+                typeof h.guess === 'string' &&
+                /^[1-9]{3}$/.test(h.guess) &&
+                typeof h.feedback === 'string' &&
+                /^[gyr]{3}$/.test(h.feedback)
+            );
+
+            merged.attemptsUsed = Math.max(0, Math.min(
+                MAX_ATTEMPTS,
+                Number.isFinite(Number(merged.attemptsUsed)) ? Number(merged.attemptsUsed) : 0
+            ));
+
+            merged.stats.solved = Math.max(0, Number(merged.stats.solved) || 0);
+            merged.stats.failed = Math.max(0, Number(merged.stats.failed) || 0);
+            merged.ui.x = Number.isFinite(Number(merged.ui.x)) ? Number(merged.ui.x) : 20;
+            merged.ui.y = Number.isFinite(Number(merged.ui.y)) ? Number(merged.ui.y) : 80;
+            merged.ui.minimized = Boolean(merged.ui.minimized);
+            merged.ui.autoMode = merged.ui.autoMode !== false;
+
+            if (!/^[1-9]{0,3}$/.test(merged.manualInput)) merged.manualInput = '';
+            if (!/^[gyr]{0,3}$/.test(merged.currentFeedback)) merged.currentFeedback = '';
+
+            return merged;
+        } catch (e) {
+            try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+            return fallback;
+        }
+    }
+
+    function saveState() {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        } catch (_) {}
+    }
+
+    function generateCodes() {
+        const codes = [];
+
+        for (const a of digits) {
+            for (const b of digits) {
+                if (a === b) continue;
+
+                for (const c of digits) {
+                    if (a === c || b === c) continue;
+                    codes.push(a + b + c);
+                }
+            }
+        }
+
+        return codes;
+    }
+
+    /*
+     * Exact Mastermind-style scoring.
+     *
+     * Torn's answer space contains three different digits, but doing the
+     * scoring by counts makes the solver safe even if a malformed/manual
+     * duplicate-digit guess reaches this function.
+     */
+    function score(guess, code) {
+        let result = '';
+        const codeCounts = Object.create(null);
+        const guessCounts = Object.create(null);
+
+        for (let i = 0; i < 3; i++) {
+            if (guess[i] === code[i]) {
+                result += 'g';
+            } else {
+                codeCounts[code[i]] = (codeCounts[code[i]] || 0) + 1;
+                guessCounts[guess[i]] = (guessCounts[guess[i]] || 0) + 1;
+                result += '?';
+            }
+        }
+
+        for (let i = 0; i < 3; i++) {
+            if (result[i] === 'g') continue;
+
+            const d = guess[i];
+            if (codeCounts[d] > 0) {
+                result = result.substring(0, i) + 'y' + result.substring(i + 1);
+                codeCounts[d]--;
+            } else {
+                result = result.substring(0, i) + 'r' + result.substring(i + 1);
+            }
+        }
+
+        return result;
+    }
+
+    function initPossibleCodes() {
+        possibleCodes = generateCodes();
+
+        for (const h of state.history) {
+            possibleCodes = possibleCodes.filter(
+                code => score(h.guess, code) === h.feedback
+            );
+        }
+
+        invalidateGuessCache();
+    }
+
+    function invalidateGuessCache() {
+        bestGuessCacheKey = '';
+        bestGuessCacheValue = null;
+        bestGuessCacheWorstCase = null;
+    }
+
+    function getStateKey() {
+        return state.history
+            .map(h => `${h.guess}:${h.feedback}`)
+            .join('|') + `#${possibleCodes.join(',')}`;
+    }
+
+    /*
+     * Exact one-ply minimax:
+     * evaluate every legal 3-digit code as a possible next guess and choose
+     * the guess whose worst feedback bucket leaves the fewest candidates.
+     *
+     * This is deliberately described as "Best next move", not a fake
+     * multi-turn probability. A guess outside the remaining answer set is
+     * allowed because it can split the set more efficiently.
+     */
+    function getBestGuess() {
+        if (possibleCodes.length === 0) {
+            return '---';
+        }
+
+        if (possibleCodes.length === 1) {
+            bestGuessCacheWorstCase = 1;
+            return possibleCodes[0];
+        }
+
+        const cacheKey = getStateKey();
+        if (cacheKey === bestGuessCacheKey && bestGuessCacheValue) {
+            return bestGuessCacheValue;
+        }
+
+        const allCodes = generateCodes();
+        let bestCode = possibleCodes[0];
+        let bestWorstCase = Infinity;
+        let bestAverage = Infinity;
+        let bestIsCandidate = false;
+
+        for (const guess of allCodes) {
+            const groups = Object.create(null);
+
+            for (const code of possibleCodes) {
+                const result = score(guess, code);
+                groups[result] = (groups[result] || 0) + 1;
+            }
+
+            const sizes = Object.values(groups);
+            const worstCase = Math.max(...sizes);
+            const total = sizes.reduce((sum, n) => sum + n * n, 0);
+            const averageRemaining = total / possibleCodes.length;
+            const isCandidate = possibleCodes.includes(guess);
+
+            if (
+                worstCase < bestWorstCase ||
+                (
+                    worstCase === bestWorstCase &&
+                    (
+                        averageRemaining < bestAverage ||
+                        (
+                            averageRemaining === bestAverage &&
+                            isCandidate &&
+                            !bestIsCandidate
+                        )
+                    )
+                )
+            ) {
+                bestCode = guess;
+                bestWorstCase = worstCase;
+                bestAverage = averageRemaining;
+                bestIsCandidate = isCandidate;
+            }
+        }
+
+        bestGuessCacheKey = cacheKey;
+        bestGuessCacheValue = bestCode;
+        bestGuessCacheWorstCase = bestWorstCase;
+
+        return bestCode;
+    }
+
+    function getBestGuessWorstCase() {
+        if (possibleCodes.length <= 1) return possibleCodes.length;
+
+        getBestGuess();
+        return bestGuessCacheWorstCase ?? possibleCodes.length;
+    }
+
+    function getSuggestion() {
+        if (possibleCodes.length === 0) return '---';
+        if (possibleCodes.length === 1) return possibleCodes[0];
+        return getBestGuess();
+    }
+
+    function addFeedback(color) {
+        if (state.isFinished || state.currentFeedback.length >= 3) return;
+
+        state.currentFeedback += color;
+        saveState();
+        render();
+    }
+
+    function submitGuess() {
+        if (state.isFinished || state.currentFeedback.length !== 3) return;
+
+        let guess = state.manualInput;
+
+        if (!guess && state.ui.autoMode) {
+            guess = getSuggestion();
+        }
+
+        if (!/^[1-9]{3}$/.test(guess)) return;
+
+        // The answer space contains three different digits.
+        if (new Set(guess).size !== 3) {
+            showInputError('Use three different digits.');
+            return;
+        }
+
+        if (!possibleCodes.length) {
+            showInputError('No valid codes remain. Start a new game.');
+            return;
+        }
+
+        state.history.push({
+            guess,
+            feedback: state.currentFeedback
+        });
+
+        state.attemptsUsed++;
+
+        possibleCodes = possibleCodes.filter(
+            code => score(guess, code) === state.currentFeedback
+        );
+
+        invalidateGuessCache();
+
+        if (state.currentFeedback === 'ggg') {
+            state.isFinished = true;
+            state.stats.solved++;
+        } else if (state.attemptsUsed >= MAX_ATTEMPTS) {
+            state.isFinished = true;
+            state.stats.failed++;
+        } else if (possibleCodes.length === 0) {
+            // Invalid feedback combination: the recorded history contradicts
+            // every legal code. Do not silently continue with an impossible set.
+            state.isFinished = true;
+            state.stats.failed++;
+        }
+
+        state.manualInput = '';
+        state.currentFeedback = '';
+
+        saveState();
+        render();
+    }
+
+    let errorTimer = null;
+
+    function showInputError(message) {
+        const el = document.getElementById('ch-error');
+        if (!el) return;
+
+        el.textContent = message;
+        el.style.display = 'block';
+
+        clearTimeout(errorTimer);
+        errorTimer = setTimeout(() => {
+            if (el) el.style.display = 'none';
+        }, 2200);
+    }
+
+    function injectStyles() {
+        if (document.getElementById('chestical-styles')) return;
+
+        const style = document.createElement('style');
+        style.id = 'chestical-styles';
+        style.textContent = `
+            .ch-num {
+                background: #333;
+                color: #fff;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 16px;
+                cursor: pointer;
+                padding: 10px 0;
+                touch-action: manipulation;
+                transition: background 0.1s;
+            }
+            .ch-num:active { background: #555; }
+            .ch-solved-anim {
+                animation: ch-pulse 2s infinite ease-in-out;
+                border: 2px solid #FFD700 !important;
+                background: #2c2500 !important;
+            }
+            @keyframes ch-pulse {
+                0% { opacity: 1; transform: scale(1); }
+                50% { opacity: 0.8; transform: scale(1.02); }
+                100% { opacity: 1; transform: scale(1); }
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function createUI() {
+        if (document.getElementById('chestical-ui')) return;
+
+        injectStyles();
+
+        uiContainer = document.createElement('div');
+        uiContainer.id = 'chestical-ui';
+        uiContainer.style = `
+            position: fixed;
+            top: ${state.ui.y}px;
+            left: ${state.ui.x}px;
+            width: ${state.ui.minimized ? '160px' : '380px'};
+            background: #1e1e1e;
+            color: #fff;
+            border-radius: 8px;
+            border: 1px solid #444;
+            z-index: 999999;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+            font-family: 'Segoe UI', sans-serif;
+            user-select: none;
+            touch-action: none;
+        `;
+
+        uiContainer.innerHTML = `
+            <div id="ch-header" style="background:#2d2d2d;padding:8px 12px;cursor:move;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #444;touch-action:none;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-weight:bold;color:#ff4545;font-size:13px;">Chestical</span>
+                    <span style="font-size:10px;color:#888;">v${HUB_VERSION}</span>
+                </div>
+                <button id="ch-min" type="button" style="background:#555;color:white;border:none;border-radius:3px;width:25px;height:20px;cursor:pointer;font-weight:bold;">−</button>
+            </div>
+
+            <div id="ch-content" style="padding:12px;">
+                <div style="display:flex;gap:8px;margin-bottom:10px;">
+                    <div id="ch-suggestion-box" style="flex:1.5;background:#111;padding:8px;border-radius:6px;text-align:center;border:1px solid #333;cursor:pointer;">
+                        <div style="font-size:9px;color:#888;font-weight:bold;letter-spacing:1px;">BEST NEXT MOVE</div>
+                        <div id="ch-suggestion" style="font-size:24px;color:#4CAF50;font-weight:bold;letter-spacing:3px;margin:4px 0;">---</div>
+                        <div id="ch-win-prob" style="font-size:10px;color:#0af;">Worst case: —</div>
+                    </div>
+                    <div style="flex:1;display:flex;flex-direction:column;gap:8px;">
+                        <div style="background:#252525;padding:6px;border-radius:6px;text-align:center;border:1px solid #333;">
+                            <div style="font-size:9px;color:#888;">ATTEMPT</div>
+                            <div id="ch-attempt" style="font-size:16px;font-weight:bold;color:#fff;">1 / 4</div>
+                        </div>
+                        <div style="background:#252525;padding:6px;border-radius:6px;text-align:center;border:1px solid #333;">
+                            <div style="font-size:9px;color:#888;">REMAINING</div>
+                            <div id="ch-remaining" style="font-size:16px;font-weight:bold;color:#fff;">504</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="ch-error" style="display:none;background:#4a2020;color:#ffb0b0;border:1px solid #733;border-radius:4px;padding:6px 8px;margin-bottom:8px;font-size:10px;text-align:center;"></div>
+
+                <div id="ch-guess-display" style="display:flex;justify-content:center;gap:8px;margin-bottom:12px;"></div>
+
+                <div style="display:flex;gap:6px;margin-bottom:12px;">
+                    <button id="ch-btn-g" type="button" style="flex:1;background:#4CAF50;border:none;color:#fff;height:40px;border-radius:4px;font-weight:bold;cursor:pointer;">G</button>
+                    <button id="ch-btn-y" type="button" style="flex:1;background:#FFC107;border:none;color:#000;height:40px;border-radius:4px;font-weight:bold;cursor:pointer;">Y</button>
+                    <button id="ch-btn-r" type="button" style="flex:1;background:#F44336;border:none;color:#fff;height:40px;border-radius:4px;font-weight:bold;cursor:pointer;">R</button>
+                </div>
+
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:12px;">
+                    <button class="ch-num" type="button" data-v="1">1</button>
+                    <button class="ch-num" type="button" data-v="2">2</button>
+                    <button class="ch-num" type="button" data-v="3">3</button>
+                    <button class="ch-num" type="button" data-v="4">4</button>
+                    <button class="ch-num" type="button" data-v="5">5</button>
+                    <button class="ch-num" type="button" data-v="6">6</button>
+                    <button class="ch-num" type="button" data-v="7">7</button>
+                    <button class="ch-num" type="button" data-v="8">8</button>
+                    <button class="ch-num" type="button" data-v="9">9</button>
+                    <button class="ch-num" type="button" data-v="C" style="background:#555;color:#fff;">CLR</button>
+                    <button class="ch-num" type="button" data-v="B" style="background:#555;color:#fff;">⌫</button>
+                    <button class="ch-num" type="button" data-v="OK" style="background:#2a7cff;color:#fff;">SUBMIT</button>
+                </div>
+
+                <div style="display:flex;gap:10px;border-top:1px solid #333;padding-top:10px;">
+                    <div style="flex:1;">
+                        <div style="font-size:9px;color:#888;font-weight:bold;margin-bottom:6px;text-transform:uppercase;">History</div>
+                        <div id="ch-history" style="max-height:100px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;"></div>
+                    </div>
+                    <div style="width:100px;display:flex;flex-direction:column;gap:6px;">
+                        <div style="background:#252525;padding:6px;border-radius:4px;text-align:center;">
+                            <div style="font-size:9px;color:#888;">SOLVED</div>
+                            <div id="ch-stat-solved" style="font-size:14px;font-weight:bold;color:#4CAF50;">0</div>
+                        </div>
+                        <div style="background:#252525;padding:6px;border-radius:4px;text-align:center;">
+                            <div style="font-size:9px;color:#888;">WIN RATE</div>
+                            <div id="ch-stat-rate" style="font-size:14px;font-weight:bold;color:#fff;">0%</div>
+                        </div>
+                        <button id="ch-reset" type="button" style="background:#f44336;color:#fff;border:none;padding:6px;border-radius:4px;font-size:10px;font-weight:bold;cursor:pointer;">NEW GAME</button>
+                    </div>
+                </div>
+
+                <div style="text-align:center;margin-top:8px;font-size:9px;color:#666;border-top:1px solid #333;padding-top:6px;">
+                    Settings managed via Torn Script Hub
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(uiContainer);
+
+        let isDragging = false;
+        let startX = 0;
+        let startY = 0;
+
+        const header = document.getElementById('ch-header');
+
+        const dragStart = e => {
+            if (e.target.tagName === 'BUTTON') return;
+
+            isDragging = true;
+
+            const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+            const clientY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
+
+            startX = clientX - uiContainer.offsetLeft;
+            startY = clientY - uiContainer.offsetTop;
+            header.style.cursor = 'grabbing';
+        };
+
+        const dragMove = e => {
+            if (!isDragging) return;
+
+            e.preventDefault();
+
+            const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+            const clientY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
+
+            uiContainer.style.left = `${clientX - startX}px`;
+            uiContainer.style.top = `${clientY - startY}px`;
+        };
+
+        const dragEnd = () => {
+            if (!isDragging) return;
+
+            isDragging = false;
+            header.style.cursor = 'move';
+
+            state.ui.x = parseInt(uiContainer.style.left, 10) || state.ui.x;
+            state.ui.y = parseInt(uiContainer.style.top, 10) || state.ui.y;
+
+            saveState();
+        };
+
+        header.addEventListener('mousedown', dragStart);
+        header.addEventListener('touchstart', dragStart, { passive: false });
+        window.addEventListener('mousemove', dragMove);
+        window.addEventListener('touchmove', dragMove, { passive: false });
+        window.addEventListener('mouseup', dragEnd);
+        window.addEventListener('touchend', dragEnd);
+
+        uiContainer.querySelectorAll('.ch-num').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (state.isFinished) return;
+
+                const v = btn.getAttribute('data-v');
+
+                if (v >= '1' && v <= '9') {
+                    if (state.manualInput.length >= 3) return;
+
+                    if (state.manualInput.includes(v)) {
+                        showInputError('Each digit must be different.');
+                        return;
+                    }
+
+                    state.manualInput += v;
+                    saveState();
+                    render();
+                    return;
+                }
+
+                if (v === 'C') {
+                    state.manualInput = '';
+                    state.currentFeedback = '';
+                    saveState();
+                    render();
+                    return;
+                }
+
+                if (v === 'B') {
+                    state.manualInput = state.manualInput.slice(0, -1);
+                    saveState();
+                    render();
+                    return;
+                }
+
+                if (v === 'OK') {
+                    if (state.currentFeedback.length === 3) {
+                        submitGuess();
+                    }
+                }
+            });
+        });
+
+        document.getElementById('ch-btn-g').addEventListener('click', () => addFeedback('g'));
+        document.getElementById('ch-btn-y').addEventListener('click', () => addFeedback('y'));
+        document.getElementById('ch-btn-r').addEventListener('click', () => addFeedback('r'));
+
+        document.getElementById('ch-reset').addEventListener('click', () => {
+            if (!confirm('Start a new game? Current progress will be lost.')) return;
+
+            state.history = [];
+            state.attemptsUsed = 0;
+            state.manualInput = '';
+            state.currentFeedback = '';
+            state.isFinished = false;
+
+            initPossibleCodes();
+            saveState();
+            render();
+        });
+
+        document.getElementById('ch-min').addEventListener('click', () => {
+            state.ui.minimized = !state.ui.minimized;
+            saveState();
+            render();
+        });
+
+        document.addEventListener('keydown', handleKeyboard);
+    }
+
+    function handleKeyboard(e) {
+        if (state.isFinished || !uiContainer) return;
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+        if (e.key >= '1' && e.key <= '9') {
+            if (state.manualInput.length >= 3) return;
+
+            if (state.manualInput.includes(e.key)) {
+                showInputError('Each digit must be different.');
+                return;
+            }
+
+            state.manualInput += e.key;
+            saveState();
+            render();
+        } else if (e.key === 'Backspace') {
+            state.manualInput = state.manualInput.slice(0, -1);
+            saveState();
+            render();
+        } else if (e.key.toLowerCase() === 'g') {
+            addFeedback('g');
+        } else if (e.key.toLowerCase() === 'y') {
+            addFeedback('y');
+        } else if (e.key.toLowerCase() === 'r') {
+            addFeedback('r');
+        } else if (e.key === 'Enter') {
+            if (state.currentFeedback.length === 3) {
+                submitGuess();
+            }
+        }
+    }
+
+    function destroyUI() {
+        if (!uiContainer) return;
+
+        document.removeEventListener('keydown', handleKeyboard);
+        uiContainer.remove();
+        uiContainer = null;
+    }
+
+    function render() {
+        if (!uiContainer) return;
+
+        const content = document.getElementById('ch-content');
+
+        uiContainer.style.left = `${state.ui.x}px`;
+        uiContainer.style.top = `${state.ui.y}px`;
+        uiContainer.style.width = state.ui.minimized ? '160px' : '380px';
+
+        content.style.display = state.ui.minimized ? 'none' : 'block';
+
+        if (state.ui.minimized) return;
+
+        const suggestion = getSuggestion();
+        const displayGuess = state.manualInput.length === 3
+            ? state.manualInput
+            : suggestion;
+
+        const worstCase = getBestGuessWorstCase();
+
+        const suggBox = document.getElementById('ch-suggestion-box');
+        const suggText = document.getElementById('ch-suggestion');
+        const probText = document.getElementById('ch-win-prob');
+
+        if (state.isFinished) {
+            const won =
+                state.history.length > 0 &&
+                state.history[state.history.length - 1].feedback === 'ggg';
+
+            suggBox.className = won ? 'ch-solved-anim' : '';
+            suggText.textContent = won ? 'SOLVED' : 'FAILED';
+            suggText.style.color = won ? '#FFD700' : '#F44336';
+            probText.textContent = won
+                ? 'Chest solved'
+                : 'Start a new game';
+            probText.style.color = '#888';
+        } else {
+            suggBox.className = '';
+
+            if (state.manualInput.length === 3) {
+                suggText.textContent = displayGuess;
+                suggText.style.color = '#fff';
+                probText.textContent = 'Manual guess';
+            } else {
+                suggText.textContent = displayGuess;
+
+                if (state.ui.autoMode) {
+                    suggText.style.color = '#4CAF50';
+                    probText.textContent = possibleCodes.length > 1
+                        ? `Worst case: ${worstCase} left`
+                        : 'Certain answer';
+                } else {
+                    suggText.style.color = '#777';
+                    probText.textContent = 'Auto suggestion off';
+                }
+            }
+
+            probText.style.color = '#0af';
+        }
+
+        document.getElementById('ch-attempt').textContent =
+            `${Math.min(MAX_ATTEMPTS, state.attemptsUsed + 1)} / ${MAX_ATTEMPTS}`;
+
+        document.getElementById('ch-remaining').textContent =
+            possibleCodes.length;
+
+        const guessDisplay = document.getElementById('ch-guess-display');
+        let displayHtml = '';
+
+        for (let i = 0; i < 3; i++) {
+            const num = displayGuess[i] || '_';
+
+            const color =
+                state.currentFeedback[i] === 'g' ? '#4CAF50' :
+                state.currentFeedback[i] === 'y' ? '#FFC107' :
+                state.currentFeedback[i] === 'r' ? '#F44336' :
+                '#444';
+
+            const border = color === '#444' ? '#555' : color;
+
+            displayHtml += `
+                <div style="width:42px;height:42px;background:#111;border:1px solid ${border};border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:bold;color:${color};">
+                    ${num}
+                </div>
+            `;
+        }
+
+        guessDisplay.innerHTML = displayHtml;
+
+        const historyEl = document.getElementById('ch-history');
+
+        historyEl.innerHTML = state.history.map((h, idx) => {
+            let html = `
+                <div style="display:flex;align-items:center;gap:4px;background:#252525;padding:4px 8px;border-radius:4px;">
+                    <span style="font-size:10px;color:#666;width:12px;">${idx + 1}</span>
+            `;
+
+            for (let i = 0; i < 3; i++) {
+                const color =
+                    h.feedback[i] === 'g' ? '#4CAF50' :
+                    h.feedback[i] === 'y' ? '#FFC107' :
+                    '#F44336';
+
+                html += `
+                    <span style="color:${color};font-weight:bold;font-size:14px;width:16px;text-align:center;">
+                        ${h.guess[i]}
+                    </span>
+                `;
+            }
+
+            html += '</div>';
+            return html;
+        }).join('');
+
+        historyEl.scrollTop = historyEl.scrollHeight;
+
+        const total = state.stats.solved + state.stats.failed;
+        const rate = total === 0
+            ? 0
+            : Math.round((state.stats.solved / total) * 100);
+
+        document.getElementById('ch-stat-solved').textContent =
+            state.stats.solved;
+
+        document.getElementById('ch-stat-rate').textContent =
+            `${rate}%`;
+
+        document.getElementById('ch-stat-rate').style.color =
+            rate >= 80 ? '#4CAF50' :
+            rate >= 50 ? '#FFC107' :
+            '#F44336';
+    }
+
+    // =========================================================================
+    // TORN SCRIPT HUB INTEGRATION
+    // =========================================================================
+
+    function buildHubRegistration() {
+        return {
+            id: HUB_ID,
+            name: HUB_NAME,
+            version: HUB_VERSION,
+            order: 50,
+
+            open: () => {
+                if (!document.getElementById('chestical-ui')) {
+                    createUI();
+                    render();
+                }
+            },
+
+            close: () => {
+                destroyUI();
+            },
+
+            prefs: {
+                fields: [
+                    {
+                        key: 'autoMode',
+                        label: 'Use Best-Move Suggestion',
+                        type: 'boolean',
+                        default: true,
+                        description: 'Use the solver suggestion automatically when submitting without a manual guess.'
+                    }
+                ],
+
+                values: {
+                    autoMode: state.ui.autoMode
+                },
+
+                onSave: newValues => {
+                    state.ui.autoMode = newValues.autoMode !== false;
+                    saveState();
+
+                    if (uiContainer) render();
+                }
+            },
+
+            status: () => {
+                if (state.isFinished) {
+                    const won =
+                        state.history.length > 0 &&
+                        state.history[state.history.length - 1].feedback === 'ggg';
+
+                    return won ? 'Solved' : 'Failed';
+                }
+
+                return `Attempt ${state.attemptsUsed + 1}/4 | ${possibleCodes.length} possibilities`;
+            }
+        };
+    }
+
+    function registerWithHub() {
+        const registration = buildHubRegistration();
+
+        // Queue first: this is the load-order-safe path used by Script Hub.
+        try {
+            (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
+        } catch (_) {}
+
+        // Event path: works when the Hub is already listening.
+        document.dispatchEvent(
+            new CustomEvent('torn-script-hub:register', {
+                detail: registration
+            })
+        );
+    }
+
+    function init() {
+        if (!document.body) {
+            setTimeout(init, 100);
+            return;
+        }
+
+        initPossibleCodes();
+
+        // Register immediately, and register again whenever the Hub announces
+        // readiness. The Hub registry de-duplicates by script id.
+        registerWithHub();
+        document.addEventListener(
+            'torn-script-hub:ready',
+            registerWithHub
+        );
+    }
+
+    if (document.readyState === 'complete') {
+        init();
+    } else {
+        window.addEventListener('load', init, { once: true });
+    }
+})();
