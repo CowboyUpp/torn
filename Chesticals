@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Chesticals
+// @name         Chestical
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
 // @version      1.1.0
 // @description  Torn Christmas Town Chest Solver
@@ -7,6 +7,8 @@
 // @match        https://www.torn.com/christmas_town.php*
 // @match        *.torn.com/christmas_town.php*
 // @grant        none
+// @license      GNU GPLv3
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // ==/UserScript==
 
 (function () {
@@ -111,13 +113,6 @@
         return codes;
     }
 
-    /*
-     * Exact Mastermind-style scoring.
-     *
-     * Torn's answer space contains three different digits, but doing the
-     * scoring by counts makes the solver safe even if a malformed/manual
-     * duplicate-digit guess reaches this function.
-     */
     function score(guess, code) {
         let result = '';
         const codeCounts = Object.create(null);
@@ -172,15 +167,6 @@
             .join('|') + `#${possibleCodes.join(',')}`;
     }
 
-    /*
-     * Exact one-ply minimax:
-     * evaluate every legal 3-digit code as a possible next guess and choose
-     * the guess whose worst feedback bucket leaves the fewest candidates.
-     *
-     * This is deliberately described as "Best next move", not a fake
-     * multi-turn probability. A guess outside the remaining answer set is
-     * allowed because it can split the set more efficiently.
-     */
     function getBestGuess() {
         if (possibleCodes.length === 0) {
             return '---';
@@ -668,6 +654,11 @@
                 : 'Start a new game';
             probText.style.color = '#888';
         } else {
+        // Only calculate solver data while the game is active.
+        const suggestion = getSuggestion();
+        const displayGuess = state.manualInput.length === 3 ? state.manualInput : suggestion;
+        const worstCase = getBestGuessWorstCase();
+
             suggBox.className = '';
 
             if (state.manualInput.length === 3) {
