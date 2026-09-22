@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.6
+// @version      1.7.7
 // @description  Adds quality % and bonus values to Item Market, Auction House, Bazaars, Display Case & Inventory. Includes quality/bonus filters, bonus sorting, and Script Hub support.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
