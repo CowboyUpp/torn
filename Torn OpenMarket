@@ -18,6 +18,9 @@
 
 // ==/UserScript==
 
+// CHANGELOG 1.7.7:
+//  Fixed filter slider layout after Torn UI changes.
+//  Injected sliders now keep a consistent three-column layout without affecting the native Price, Damage and Accuracy sliders.
 // CHANGELOG 1.7.6:
 // - Fixed the injected filter-slider row (Quality + any selected bonus sliders)
 //   running visibly wider than Torn's native Price/Damage/Accuracy row at narrow/PDA
@@ -43,7 +46,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.7.5';
+    const HUB_VERSION = '1.7.7';
     const HUB_ICON = '';
 
     function registerWithHub() {
@@ -816,16 +819,20 @@
 .openmarket-inventory-meta { display: inline-flex; align-items: center; flex-wrap: nowrap; overflow: hidden; }
 .openmarket-filter-hit { outline: 2px solid #00c8ff !important; outline-offset: -2px; box-shadow: 0 0 6px rgba(0,200,255,0.7) !important; border-radius: 4px; }
 .openmarket-filter-slider-row {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
     column-gap: 14px;
     row-gap: 10px;
-    width: auto;
-    margin: 10px 14px 0;
+    width: 100%;
+    margin-top: 10px;
     box-sizing: border-box;
 }
+
 .openmarket-filter-slider-row > [data-om-filter-slider] {
+    grid-column: auto !important;
+    grid-row: auto !important;
     width: 100% !important;
+    max-width: 100% !important;
     min-width: 0 !important;
     margin: 0 !important;
     box-sizing: border-box !important;
@@ -963,7 +970,7 @@
         // drifted: it looked right at one width and ran wider than native at another
         // (confirmed via screenshot at PDA width). Our own class is appended after,
         // so .openmarket-filter-slider-row's grid/gap rules still take effect.
-        filterSliderRow.className = nativeRow.className + ' openmarket-filter-slider-row';
+        filterSliderRow.className = 'openmarket-filter-slider-row';
         nativeRow.parentElement.insertBefore(filterSliderRow, nativeRow.nextSibling);
         return filterSliderRow;
     }
