@@ -13,6 +13,7 @@
 // @grant        none
 // @run-at       document-start
 // @license      GNU GPLv3
+
 // @downloadURL https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
 // @updateURL https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 // ==/UserScript==
@@ -862,6 +863,7 @@
         border-left: 0 !important;
     }
 }
+`;
         const style = document.createElement('style');
         style.textContent = css;
         (document.head || document.documentElement).appendChild(style);
