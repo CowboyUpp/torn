@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.7
+// @version      1.7.8
 // @description  Adds quality % and bonus values to Item Market, Auction House, Bazaars, Display Case & Inventory. Includes quality/bonus filters, bonus sorting, and Script Hub support.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -13,11 +13,13 @@
 // @grant        none
 // @run-at       document-start
 // @license      GNU GPLv3
-// @downloadURL  https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
-// @updateURL    https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 
+// @downloadURL https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
+// @updateURL https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 // ==/UserScript==
 
+// CHANGELOG 1.7.8:
+//  Refined filter slider layout to better match Torn’s native three-column spacing and dividers.
 // CHANGELOG 1.7.7:
 //  Fixed filter slider layout after Torn UI changes.
 //  Injected sliders now keep a consistent three-column layout without affecting the native Price, Damage and Accuracy sliders.
@@ -46,7 +48,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.7.7';
+    const HUB_VERSION = '1.7.8';
     const HUB_ICON = '';
 
     function registerWithHub() {
@@ -821,21 +823,25 @@
 .openmarket-filter-slider-row {
     display: grid !important;
     grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-    column-gap: 14px;
-    row-gap: 10px;
-    width: 100%;
-    margin-top: 10px;
-    box-sizing: border-box;
+    width: 100% !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .openmarket-filter-slider-row > [data-om-filter-slider] {
     grid-column: auto !important;
     grid-row: auto !important;
     width: 100% !important;
-    max-width: 100% !important;
+    max-width: none !important;
     min-width: 0 !important;
     margin: 0 !important;
+    padding: 10px 12px 8px !important;
     box-sizing: border-box !important;
+}
+
+.openmarket-filter-slider-row > [data-om-filter-slider]:not(:first-child) {
+    border-left: 1px solid rgba(0, 0, 0, 0.08);
 }
 @media (max-width: 700px) {
     .openmarket-filter-slider-row { grid-template-columns: 1fr; }
