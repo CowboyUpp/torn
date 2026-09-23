@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.8
+// @version      1.7.9
 // @description  Adds quality % and bonus values to Item Market, Auction House, Bazaars, Display Case & Inventory. Includes quality/bonus filters, bonus sorting, and Script Hub support.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -13,18 +13,19 @@
 // @grant        none
 // @run-at       document-start
 // @license      GNU GPLv3
-
 // @downloadURL https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
 // @updateURL https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 // ==/UserScript==
 
+// CHANGELOG 1.7.9
+//   Improved PDA layout so OpenMarket filter sliders stack like Torn's native sliders.
 // CHANGELOG 1.7.8:
-//  Refined filter slider layout to better match Torn’s native three-column spacing and dividers.
+//   Refined filter slider layout to better match Torn’s native three-column spacing and dividers.
 // CHANGELOG 1.7.7:
-//  Fixed filter slider layout after Torn UI changes.
-//  Injected sliders now keep a consistent three-column layout without affecting the native Price, Damage and Accuracy sliders.
+//   Fixed filter slider layout after Torn UI changes.
+//   Injected sliders now keep a consistent three-column layout without affecting the native Price, Damage and Accuracy sliders.
 // CHANGELOG 1.7.6:
-// - Fixed the injected filter-slider row (Quality + any selected bonus sliders)
+//   Fixed the injected filter-slider row (Quality + any selected bonus sliders)
 //   running visibly wider than Torn's native Price/Damage/Accuracy row at narrow/PDA
 //   widths. The row's horizontal margin was a hardcoded guess at what Torn's own
 //   margin was; that guess held at one width but drifted at another, since Torn's
@@ -48,7 +49,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.7.8';
+    const HUB_VERSION = '1.7.9';
     const HUB_ICON = '';
 
     function registerWithHub() {
@@ -844,8 +845,23 @@
     border-left: 1px solid rgba(0, 0, 0, 0.08);
 }
 @media (max-width: 700px) {
-    .openmarket-filter-slider-row { grid-template-columns: 1fr; }
-}`;
+    .openmarket-filter-slider-row {
+        display: grid !important;
+        grid-template-columns: 1fr !important;
+        width: 100% !important;
+        margin: 0 !important;
+    }
+
+    .openmarket-filter-slider-row > [data-om-filter-slider] {
+        grid-column: 1 !important;
+        width: 100% !important;
+        max-width: none !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        padding: 10px 12px 8px !important;
+        border-left: 0 !important;
+    }
+}
         const style = document.createElement('style');
         style.textContent = css;
         (document.head || document.documentElement).appendChild(style);
