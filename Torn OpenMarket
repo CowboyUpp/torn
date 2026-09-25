@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.9
-// @description  Adds quality % and bonus values to Item Market, Auction House, Bazaars, Display Case & Inventory. Includes quality/bonus filters, bonus sorting, and Script Hub support.
+// @version      1.7.10
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
@@ -13,27 +13,38 @@
 // @grant        none
 // @run-at       document-start
 // @license      GNU GPLv3
-
-// @downloadURL https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
-// @updateURL https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
+// @updateURL    https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 // ==/UserScript==
 
-// CHANGELOG 1.7.9
-//   Improved PDA layout so OpenMarket filter sliders stack like Torn's native sliders.
+// CHANGELOG 1.7.10:
+// - PDA layout refinement: removed the device-specific width/margin guess for
+//   injected Quality and bonus sliders. On PDA, each injected slider now measures
+//   Torn's actual native slider geometry and mirrors its horizontal position and
+//   width. A ResizeObserver keeps the alignment current when the PDA layout changes
+//   because of resizing, orientation changes, or other responsive reflow.
+// - Desktop layout is unchanged. No filtering, matching, sorting, cache, or network
+//   logic changed.
+
+// CHANGELOG 1.7.9:
+// - PDA layout refinement: OpenMarket's injected Quality and bonus sliders now
+//   stack one per row while matching the exact horizontal width of Torn's native
+//   Price / Damage / Accuracy sliders. The injected row copies the native row's
+//   horizontal padding instead of using an independent width/padding guess.
+// - No filtering, matching, sorting, cache, or network logic changed.
+//
 // CHANGELOG 1.7.8:
-//   Refined filter slider layout to better match Torn’s native three-column spacing and dividers.
+// - Refined the dedicated OpenMarket filter-slider row to match Torn's native
+//   three-column spacing and divider treatment on wider layouts.
+//
 // CHANGELOG 1.7.7:
-//   Fixed filter slider layout after Torn UI changes.
-//   Injected sliders now keep a consistent three-column layout without affecting the native Price, Damage and Accuracy sliders.
+// - Fixed the OpenMarket filter-slider layout after Torn UI changes. Injected
+//   sliders remain in their own dedicated row without affecting native
+//   Price / Damage / Accuracy sliders.
+//
 // CHANGELOG 1.7.6:
-//   Fixed the injected filter-slider row (Quality + any selected bonus sliders)
-//   running visibly wider than Torn's native Price/Damage/Accuracy row at narrow/PDA
-//   widths. The row's horizontal margin was a hardcoded guess at what Torn's own
-//   margin was; that guess held at one width but drifted at another, since Torn's
-//   actual margin is responsive. ensureFilterSliderRow() now inherits the native
-//   row's own class list first (our own class appended after), so it automatically
-//   picks up whatever margin Torn defines at every width, with no hardcoded value to
-//   drift. Confirmed via side-by-side screenshot at PDA width.
+// - Kept the injected filter-slider row independent of Torn's native slider-row
+//   classes so its layout can be controlled reliably by OpenMarket CSS.
 
 (function () {
     'use strict';
@@ -286,6 +297,7 @@
         if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
         container.appendChild(box);
     }
+    
     function insertQualityInline(nameEl, value, maxRange) {
         if (!nameEl) return;
         const titleContainer = nameEl.parentElement;
@@ -371,6 +383,7 @@
                         selectors: this.selectors
                     });
                 });
+                
                 return;
             }
 
@@ -402,6 +415,7 @@
                 observer.observe(root, { childList: true, subtree: true });
                 self.observer = observer;
                 self.processAll();
+
                 initDropdownIntegration();
             }, 10, (timeoutId) => { self.pendingTimeoutId = timeoutId; });
         },
@@ -413,12 +427,17 @@
         }
     };
 
+    // =========================================================================
+    // SINGLE ITEM MARKET VIEW (Add/View Listing)
+    // =========================================================================
     const itemMarketSingle = {
         observer: null,
         init() {
             const self = this;
             const root = document.querySelector('#mainContainer') || document.body;
-            const observer = new MutationObserver(() => { self.processAll(); });
+            const observer = new MutationObserver(() => {
+                self.processAll();
+            });
             observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class'] });
             self.observer = observer;
             self.processAll();
@@ -718,6 +737,7 @@
         if (typeof currentHandler.teardown === 'function') currentHandler.teardown();
         else ['observer', 'outerObserver', 'innerObserver'].forEach(key => { if (currentHandler[key]) { currentHandler[key].disconnect(); currentHandler[key] = null; } });
         if (currentHandler.pendingTimeoutId) { clearTimeout(currentHandler.pendingTimeoutId); currentHandler.pendingTimeoutId = null; }
+
         resetBonusSort();
     }
 
@@ -822,6 +842,7 @@
 .openmarket-inventory-bonuses div { display: inline; font-size: 11px !important; }
 .openmarket-inventory-meta { display: inline-flex; align-items: center; flex-wrap: nowrap; overflow: hidden; }
 .openmarket-filter-hit { outline: 2px solid #00c8ff !important; outline-offset: -2px; box-shadow: 0 0 6px rgba(0,200,255,0.7) !important; border-radius: 4px; }
+
 .openmarket-filter-slider-row {
     display: grid !important;
     grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
@@ -845,6 +866,7 @@
 .openmarket-filter-slider-row > [data-om-filter-slider]:not(:first-child) {
     border-left: 1px solid rgba(0, 0, 0, 0.08);
 }
+
 @media (max-width: 700px) {
     .openmarket-filter-slider-row {
         display: grid !important;
@@ -855,10 +877,8 @@
 
     .openmarket-filter-slider-row > [data-om-filter-slider] {
         grid-column: 1 !important;
-        width: 100% !important;
         max-width: none !important;
         min-width: 0 !important;
-        margin: 0 !important;
         padding: 10px 12px 8px !important;
         border-left: 0 !important;
     }
@@ -873,8 +893,6 @@
     // BONUS SORTING FEATURE
     // =========================================================================
     const sortState = { active: false, ascending: true, sortTimeout: null };
-    let forcedGridContainer = null;
-    let forcedGridOriginalDisplay = null;
 
     function extractMaxBonusFromTile(tile) {
         const bonusContainer = tile.querySelector('.openmarket-bonuses');
@@ -886,6 +904,9 @@
         });
         return maxBonus;
     }
+
+    let forcedGridContainer = null;
+    let forcedGridOriginalDisplay = null;
 
     function applyBonusSort() {
         const root = document.querySelector('#item-market-root');
@@ -902,7 +923,7 @@
         if (display !== 'grid' && display !== 'flex') {
             if (forcedGridContainer !== container) {
                 forcedGridContainer = container;
-                forcedGridOriginalDisplay = container.style.display;
+                forcedGridOriginalDisplay = container.style.display; // '' if unset inline
             }
             container.style.display = 'grid';
         }
@@ -947,16 +968,21 @@
     // =========================================================================
     // QUALITY & BONUS FILTER
     // =========================================================================
+
     const filterState = {
         qualityLo: 0,
         qualityHi: 300,
-        qualityMaxRange: 300,
-        bonuses: new Map()
+        qualityMaxRange: 300, // rescaled to 100 for an armour category, see detectQualityMaxRange()
+        bonuses: new Map()    // bonusID (string) -> { name, lo, hi, maxSeen }
     };
 
     let qualitySliderUI = null;
     let filterSliderRow = null;
-    const bonusSliderUIs = new Map();
+    let filterSliderNativeRow = null;
+    let filterSliderPdaObserver = null;
+    let filterSliderPdaResizeHandler = null;
+    let filterSliderPdaFrame = 0;
+    const bonusSliderUIs = new Map(); // bonusID -> slider refs from buildRangeSlider()
 
     const BONUS_FILTER_AGGREGATE_TITLES = new Set([
         'Bonus filter off', 'Any bonuses', 'Double bonuses',
@@ -981,36 +1007,111 @@
         return sliderNode;
     }
 
+    function syncFilterSliderPdaGeometry() {
+        filterSliderPdaFrame = 0;
+        if (!filterSliderRow || !filterSliderNativeRow || !document.contains(filterSliderRow)) return;
+
+        const isPda = window.matchMedia('(max-width: 700px)').matches;
+        const nativeHost = filterSliderNativeRow.querySelector('[class*="rangeSlider"]:not([data-om-filter-slider])');
+        if (!nativeHost) return;
+
+        const injectedRowRect = filterSliderRow.getBoundingClientRect();
+        const nativeRect = nativeHost.getBoundingClientRect();
+        if (!injectedRowRect.width || !nativeRect.width) return;
+
+        if (isPda) {
+            
+            const nativeStyle = getComputedStyle(nativeHost);
+            const left = Math.max(0, nativeRect.left - injectedRowRect.left);
+            const width = Math.max(0, nativeRect.width);
+            const paddingLeft = nativeStyle.paddingLeft;
+            const paddingRight = nativeStyle.paddingRight;
+
+            filterSliderRow.querySelectorAll('[data-om-filter-slider]').forEach(el => {
+                el.style.setProperty('width', `${width}px`, 'important');
+                el.style.setProperty('margin-left', `${left}px`, 'important');
+                el.style.setProperty('margin-right', '0px', 'important');
+                el.style.setProperty('padding-left', paddingLeft, 'important');
+                el.style.setProperty('padding-right', paddingRight, 'important');
+            });
+        } else {
+            // Desktop remains entirely controlled by the normal 3-column CSS.
+            filterSliderRow.querySelectorAll('[data-om-filter-slider]').forEach(el => {
+                el.style.removeProperty('width');
+                el.style.removeProperty('margin-left');
+                el.style.removeProperty('margin-right');
+                el.style.removeProperty('padding-left');
+                el.style.removeProperty('padding-right');
+            });
+        }
+    }
+
+    function scheduleFilterSliderPdaSync() {
+        if (filterSliderPdaFrame) return;
+        filterSliderPdaFrame = requestAnimationFrame(syncFilterSliderPdaGeometry);
+    }
+
+    function stopFilterSliderPdaSync() {
+        if (filterSliderPdaObserver) {
+            filterSliderPdaObserver.disconnect();
+            filterSliderPdaObserver = null;
+        }
+        if (filterSliderPdaResizeHandler) {
+            window.removeEventListener('resize', filterSliderPdaResizeHandler);
+            filterSliderPdaResizeHandler = null;
+        }
+        if (filterSliderPdaFrame) {
+            cancelAnimationFrame(filterSliderPdaFrame);
+            filterSliderPdaFrame = 0;
+        }
+    }
+
+    function startFilterSliderPdaSync() {
+        stopFilterSliderPdaSync();
+        if (!filterSliderRow || !filterSliderNativeRow) return;
+
+        if (typeof ResizeObserver === 'function') {
+            filterSliderPdaObserver = new ResizeObserver(scheduleFilterSliderPdaSync);
+            filterSliderPdaObserver.observe(filterSliderNativeRow);
+            const nativeHost = filterSliderNativeRow.querySelector('[class*="rangeSlider"]:not([data-om-filter-slider])');
+            if (nativeHost) filterSliderPdaObserver.observe(nativeHost);
+            filterSliderPdaObserver.observe(filterSliderRow);
+        }
+
+        filterSliderPdaResizeHandler = scheduleFilterSliderPdaSync;
+        window.addEventListener('resize', filterSliderPdaResizeHandler, { passive: true });
+        scheduleFilterSliderPdaSync();
+    }
+
     function ensureFilterSliderRow(nativeAnchor) {
-        if (filterSliderRow && document.contains(filterSliderRow)) return filterSliderRow;
+        if (filterSliderRow && document.contains(filterSliderRow)) {
+            startFilterSliderPdaSync();
+            return filterSliderRow;
+        }
         if (!nativeAnchor || !nativeAnchor.parentElement) return null;
 
         const nativeRow = nativeAnchor.parentElement;
+        filterSliderNativeRow = nativeRow;
         filterSliderRow = document.createElement('div');
-        // FIX (1.7.6): inherit the native row's own class list first, so this row
-        // automatically picks up whatever horizontal margin Torn defines for it --
-        // including anything responsive/breakpoint-specific -- instead of guessing a
-        // matching value ourselves. That guess (a hardcoded margin) was exactly what
-        // drifted: it looked right at one width and ran wider than native at another
-        // (confirmed via screenshot at PDA width). Our own class is appended after,
-        // so .openmarket-filter-slider-row's grid/gap rules still take effect.
         filterSliderRow.className = 'openmarket-filter-slider-row';
+
         nativeRow.parentElement.insertBefore(filterSliderRow, nativeRow.nextSibling);
+        startFilterSliderPdaSync();
         return filterSliderRow;
     }
 
-    function buildRangeSlider({ key, label, min, max, initialLo, initialHi, onChange }) {
+    function buildRangeSlider({ key, label, min, max, initialLo, initialHi, onChange, insertAfter }) {
         const hosts = findNativeSliderHosts();
-        if (!hosts.length) return null;
-
-        const sliderRow = ensureFilterSliderRow(findSliderRowAnchor(hosts[hosts.length - 1]));
-        if (!sliderRow) return null;
-
+        if (!hosts.length || !insertAfter || !insertAfter.parentElement) return null;
         const donor = hosts[hosts.length - 1];
+
         const clone = donor.cloneNode(true);
         clone.setAttribute('data-om-filter-slider', key);
-
-        // Sizing is owned exclusively by the CSS rule on .openmarket-filter-slider-row
+        clone.style.flex = '';
+        clone.style.minWidth = '0';
+        clone.style.width = '100%';
+        clone.style.boxSizing = 'border-box';
+        clone.style.margin = '0';
 
         const left = clone.querySelector('[class*="leftText"]');
         if (left) {
@@ -1036,9 +1137,7 @@
         let inRangeCls = '';
         if (segs.length) {
             const parts = String(segs[0].className).split(/\s+/);
-            for (const p of parts) {
-                if (p.indexOf('inRange') === 0) { inRangeCls = p; break; }
-            }
+            for (const p of parts) { if (p.indexOf('inRange') === 0) { inRangeCls = p; break; } }
         }
 
         function paint(lo, hi) {
@@ -1067,7 +1166,10 @@
             });
         });
 
+        const sliderRow = ensureFilterSliderRow(findSliderRowAnchor(insertAfter));
+        if (!sliderRow) return null;
         sliderRow.appendChild(clone);
+        scheduleFilterSliderPdaSync();
 
         return {
             el: clone, loInput, hiInput, valueEl, paint,
@@ -1086,12 +1188,10 @@
         if (qualitySliderUI && document.contains(qualitySliderUI.el)) return;
         const hosts = findNativeSliderHosts();
         if (!hosts.length) return;
-
         filterState.qualityMaxRange = detectQualityMaxRange();
         if (filterState.qualityHi > filterState.qualityMaxRange || filterState.qualityHi === 300) {
             filterState.qualityHi = filterState.qualityMaxRange;
         }
-
         qualitySliderUI = buildRangeSlider({
             key: 'quality',
             label: 'Quality',
@@ -1099,11 +1199,8 @@
             max: filterState.qualityMaxRange,
             initialLo: filterState.qualityLo,
             initialHi: filterState.qualityHi,
-            onChange: (lo, hi) => {
-                filterState.qualityLo = lo;
-                filterState.qualityHi = hi;
-                applyFilter();
-            }
+            onChange: (lo, hi) => { filterState.qualityLo = lo; filterState.qualityHi = hi; applyFilter(); },
+            insertAfter: findSliderRowAnchor(hosts[hosts.length - 1])
         });
     }
 
@@ -1113,6 +1210,13 @@
         }
         bonusSliderUIs.clear();
 
+        let anchor = qualitySliderUI ? qualitySliderUI.el : null;
+        if (!anchor) {
+            const hosts = findNativeSliderHosts();
+            anchor = hosts.length ? findSliderRowAnchor(hosts[hosts.length - 1]) : null;
+        }
+        if (!anchor) return;
+
         for (const [bonusID, f] of filterState.bonuses) {
             const ui = buildRangeSlider({
                 key: `bonus-${bonusID}`,
@@ -1121,13 +1225,10 @@
                 max: f.maxSeen,
                 initialLo: f.lo,
                 initialHi: f.hi,
-                onChange: (lo, hi) => {
-                    f.lo = lo;
-                    f.hi = hi;
-                    applyFilter();
-                }
+                onChange: (lo, hi) => { f.lo = lo; f.hi = hi; applyFilter(); },
+                insertAfter: anchor
             });
-            if (ui) bonusSliderUIs.set(bonusID, ui);
+            if (ui) { bonusSliderUIs.set(bonusID, ui); anchor = ui.el; }
         }
         applyFilter();
     }
@@ -1156,7 +1257,7 @@
             if (!anyActive) { markFilterHit(tile, false); return; }
 
             const cached = itemMarket.matchToCache(tile);
-            if (!cached) { markFilterHit(tile, false); return; }
+            if (!cached) { markFilterHit(tile, false); return; } // unresolved -> abstain, never guess
 
             let ok = true;
 
@@ -1195,8 +1296,10 @@
             if (ui.el && ui.el.parentElement) ui.el.remove();
         }
         bonusSliderUIs.clear();
+        stopFilterSliderPdaSync();
         if (filterSliderRow && filterSliderRow.parentElement) filterSliderRow.remove();
         filterSliderRow = null;
+        filterSliderNativeRow = null;
 
         document.querySelectorAll('.openmarket-filter-hit').forEach(t => t.classList.remove('openmarket-filter-hit'));
     }
@@ -1249,7 +1352,7 @@
             if (bonusMenuObserver) { bonusMenuObserver.disconnect(); bonusMenuObserver = null; bonusMenuObserverTarget = null; }
             return;
         }
-        if (bonusMenuObserverTarget === menu) return;
+        if (bonusMenuObserverTarget === menu) return; // already watching this exact open menu
 
         if (bonusMenuObserver) bonusMenuObserver.disconnect();
         scanBonusFilterSelection(menu);
@@ -1264,7 +1367,7 @@
     }
 
     // =========================================================================
-    // NATIVE DROPDOWN INTEGRATION
+    // NATIVE DROPDOWN INTEGRATION (PROPERLY SCOPED)
     // =========================================================================
     let dropdownObserver = null;
 
@@ -1308,6 +1411,7 @@
 
                     if (toggler) {
                         toggler.textContent = `${prefix}Bonus ${direction === 'asc' ? 'ascending' : 'descending'}`;
+
                         if (toggler.getAttribute('aria-expanded') === 'true') {
                             toggler.click();
                         }
@@ -1340,6 +1444,7 @@
                     watchBonusMenu();
                 }, 100);
             } else {
+                // No dropdown open at all -- if we were watching one, it just closed.
                 watchBonusMenu();
             }
         });
