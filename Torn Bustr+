@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.1
+// @version      1.5.2
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,14 +22,15 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.0';
+  const VERSION = '1.5.2';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
+  // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
   const API_KEY_PERMISSION = 'User / Log + Personal Stats';
   const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlus&user=log,personalstats';
   const BUST_LOG_ID = 5360;
   const HUB_ID = 'bustr-plus';
-  const CACHE_TTL_TOTAL = 6 * 60 * 60 * 1000;
+  const CACHE_TTL_TOTAL = 6 * 60 * 60 * 1000; // 6 hours — total changes slowly
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -52,7 +53,7 @@
     theme: 'dark',
     redLimit: 0,
     greenLimit: 3,
-    manualTotalBusts: ''
+    manualTotalBusts: '' // NEW: Manual fallback
   };
 
   let state = {
@@ -148,6 +149,7 @@
   // TOTAL BUSTS VIA GM (With Manual Fallback)
   // =========================================================================
   function getCachedTotalBusts() {
+    // If user set a manual value, always use it
     if (state.settings.manualTotalBusts) {
       return parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
     }
@@ -164,9 +166,15 @@
     state.totalBusts = count;
   }
 
+  /**
+   * Total "People busted" from Torn API personalstats.peoplebusted.
+   * Requires the API key to include user → personalstats (Generate key button
+   * is pre-filled for log + personalstats). Falls back to page scrape, then manual.
+   */
   async function fetchTotalBustsViaAPI() {
     if (!state.apiKey) return null;
     try {
+      // Narrow request keeps payload small; key must include user → personalstats
       const url =
         `https://api.torn.com/v2/user/personalstats?cat=jail` +
         `&comment=BustrPlus&key=${encodeURIComponent(state.apiKey)}`;
@@ -193,11 +201,13 @@
     if (!data) return null;
     const ps = data.personalstats;
     if (ps == null) return null;
+    // v2: personalstats.jail.busts.success
     const v2Success = ps?.jail?.busts?.success;
     if (Number.isFinite(Number(v2Success))) return Number(v2Success);
     if (typeof ps === 'number' && Number.isFinite(ps)) return ps;
     if (typeof ps === 'object' && !Array.isArray(ps)) {
       if (Number.isFinite(Number(ps.peoplebusted))) return Number(ps.peoplebusted);
+      // nested category bags
       for (const val of Object.values(ps)) {
         if (val && typeof val === 'object' && Number.isFinite(Number(val.peoplebusted))) {
           return Number(val.peoplebusted);
@@ -272,6 +282,7 @@
     if (!state.apiKey) {
       return 'No API key — generate one custom key (Log + Personal Stats)';
     }
+    // Hub panel has room for full avail/total on all devices
     return `Busts ${formatAvailableWithTotal()} · score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
   }
 
@@ -369,6 +380,7 @@
             state.settings.redLimit = Math.max(0, Number(values.redLimit) || 0);
             state.settings.manualTotalBusts = String(values.manualTotalBusts || '').trim();
 
+            // Only accept a real 16-char key; ignore blank Hub snapshots (never wipe key)
             if (typeof values.apiKey === 'string') {
               const key = values.apiKey.trim();
               if (key && /^[A-Za-z0-9]{16}$/.test(key) && key !== state.apiKey) {
@@ -384,6 +396,7 @@
             recalcStats();
             saveStats();
 
+            // Manual total always wins; otherwise refresh from API when needed
             if (state.settings.manualTotalBusts) {
               state.totalBusts = parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
             } else if (!keyPromise) {
@@ -598,6 +611,9 @@
       return;
     }
 
+    // Do not create any standalone BUSTR+ UI until Torn's real sidebar exists.
+    // This prevents the button from appearing on Cloudflare/challenge pages,
+    // where /jailview.php may be the URL but Torn's page shell is not loaded.
     const sidebar = document.getElementById('sidebar');
     const sidebarVisible = !!sidebar &&
       sidebar.offsetParent !== null &&
@@ -714,7 +730,7 @@
           <button type="button" class="danger" data-action="forget-key">Forget key</button>
           <button type="button" class="primary" data-action="save-settings">Save settings</button>
         </div>
-        <div class="hint">Hardness: level × (hours + 3). Success % is a community-derived estimate using your level, selected bust-skill bonuses and the same decay settings. It is not an official Torn probability.</div>
+        <div class="hint">Hardness: level × (hours + 3). Success % is a community-derived estimate using your level, selected bust-skill bonuses and the same decay settings. The display now keeps more resolution between easy targets instead of flattening them to one value. It is not an official Torn probability.</div>
         <div class="version">Version ${VERSION}</div>
       </div>
     `;
@@ -858,7 +874,8 @@
     state.settings.showSuccessChance = panel.querySelector('#bustr-plus-showSuccessChance').checked;
     state.settings.factionBustSkill = panel.querySelector('#bustr-plus-factionBustSkill').checked;
     state.settings.educationBustSkill = panel.querySelector('#bustr-plus-educationBustSkill').checked;
-
+    
+    // Read manual total busts
     const manualInput = panel.querySelector('#bustr-plus-manual-total');
     if (manualInput) {
       state.settings.manualTotalBusts = manualInput.value.trim();
@@ -875,6 +892,7 @@
     window.open(url, '_blank', 'noopener');
   }
 
+  // Floating key-gen helper panel removed. Generate button still opens Torn's API page with query params.
   function renderApiKeyGenerator() {
     document.getElementById('bustr-plus-keygen')?.remove();
   }
@@ -889,17 +907,20 @@
     return state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
   }
 
+  /** Desktop / Hub: "3 / 8,500". Never use on PDA nav pill. */
   function formatAvailableWithTotal() {
     const avail = formatAvailable();
     const total = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
     return `${avail} / ${total}`;
   }
 
+  /** Compact counter for small mobile/PDA jail slider. */
   function formatNavCounter() {
     return isCompactNav() ? String(formatAvailable()) : formatAvailableWithTotal();
   }
 
   function isCompactNav() {
+    // PDA / mobile sidebar and Torn PDA — total does not fit the pill
     if (getViewportType() !== 'desktop') return true;
     if (typeof window.PDA_httpGet === 'function') return true;
     const ua = String(navigator.userAgent || '');
@@ -1139,6 +1160,7 @@
           stats.className = 'bustr-plus-nav';
           anchor.appendChild(stats);
         }
+        // Remove mobile pill if we flipped to desktop
         jailNav.querySelector('.bustr-plus-pill')?.remove();
         stats.textContent = label;
         stats.title = tip;
@@ -1149,11 +1171,13 @@
           pill.className = 'bustr-plus-pill';
           jailNav.appendChild(pill);
         }
+        // Remove desktop span on compact
         anchor.querySelector('.bustr-plus-nav')?.remove();
         pill.textContent = label;
         pill.title = tip;
       }
     } catch (err) {
+      // Silent fail for nav stats
     } finally {
       state.navStatsPending = false;
     }
@@ -1173,7 +1197,8 @@
 
   // -------------------------------------------------------------------------
   // Community-derived success estimate. This is intentionally an estimate, not
-  // an official Torn percentage.
+  // an official Torn percentage. It follows the model used by the reference
+  // BUSTR script: success = A - (B * 60 / skill) * hardness - penalty.
   // We use Bustr+'s own configurable hardness and decay settings.
   // -------------------------------------------------------------------------
   const SUCCESS_A = 266.6;
@@ -1182,8 +1207,22 @@
   const FULL_BUST_SKILL_BONUS = 115;
   const PENALTY_WEIGHT = 2.0;
   const PENALTY_SATURATION_PCT = 95;
-  const PRED_SHRINK_K = 0.40;
-  const PRED_SHRINK_CENTER = 45;
+  // v1.5.2: replace the old clamp + linear shrink display transform.
+  // The reference model first clamps raw values above 100%, which meant that
+  // a strong/low-penalty player could see the same displayed percentage for a
+  // very wide range of easy targets (e.g. 141..430 -> 70%). The underlying
+  // hardness ordering was correct; the display transform was throwing away
+  // the useful part of the curve.
+  //
+  // Keep the same community-derived raw model and penalty weighting, but map
+  // the raw score through a soft logistic ceiling. This preserves target-to-
+  // target resolution without pretending that an easy target is 100% certain.
+  // The 27..67 band follows the current BUSTR community model's conservative
+  // displayed range; the curve itself is deliberately a smooth display fit.
+  const SUCCESS_DISPLAY_FLOOR = 27;
+  const SUCCESS_DISPLAY_CEILING = 67;
+  const SUCCESS_DISPLAY_MID = 150;
+  const SUCCESS_DISPLAY_SCALE = 35;
   const SUCCESS_LIFT_K = 18;
   const SUCCESS_LIFT_PIVOT = 0.85;
 
@@ -1220,10 +1259,24 @@
     const skill = level * calibration;
     const effectivePenalty = PENALTY_WEIGHT * Math.min(penaltyPct, PENALTY_SATURATION_PCT);
     const raw = SUCCESS_A - (SUCCESS_B * 60 / skill) * hardness - effectivePenalty;
-    const clamped = Math.max(1, Math.min(100, raw));
-    const shrunk = PRED_SHRINK_CENTER + PRED_SHRINK_K * (clamped - PRED_SHRINK_CENTER);
+
+    // Do NOT clamp raw to 100 before transforming it. That was the source of
+    // the old "everything easy is 70%" behaviour: raw values of 194, 220 and
+    // 243 were all flattened to 100 before the shrink step.
+    //
+    // Logistic soft-cap: high raw scores approach the conservative ceiling,
+    // low raw scores approach the floor, and the useful middle remains smooth.
+    const exponent = (SUCCESS_DISPLAY_MID - raw) / SUCCESS_DISPLAY_SCALE;
+    const curve = SUCCESS_DISPLAY_FLOOR
+      + (SUCCESS_DISPLAY_CEILING - SUCCESS_DISPLAY_FLOOR) / (1 + Math.exp(exponent));
+
+    // Keep the calibrated-perk lift from the reference model, but apply it
+    // after the curve so it cannot re-introduce an artificial 100% reading.
     const lift = SUCCESS_LIFT_K * (calibration - SUCCESS_LIFT_PIVOT);
-    return Math.max(1, Math.min(100, Math.round(shrunk + lift)));
+    return Math.max(
+      SUCCESS_DISPLAY_FLOOR,
+      Math.min(SUCCESS_DISPLAY_CEILING, Math.round(curve + lift))
+    );
   }
 
   function successChanceColor(chance) {
@@ -1241,6 +1294,8 @@
     };
     markRefreshing(true);
     try {
+      // Torn's own hash loader re-fetches and re-renders the inmate list. This
+      // avoids a full page reload and does not touch any bust/bail control.
       window.location.hash = '#bustr-plus-refresh';
       setTimeout(() => {
         window.location.hash = '#start=' + start;
@@ -1501,6 +1556,7 @@
     state.availableBusts = state.penaltyThreshold > 0
       ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
       : null;
+    // Optimistic total bump (API personalstats can lag until next day for some views)
     if (Number.isFinite(state.totalBusts)) {
       state.totalBusts += 1;
       if (!state.settings.manualTotalBusts) saveTotalBusts(state.totalBusts);
@@ -1557,33 +1613,33 @@
   async function init() {
     loadState();
     registerWithHub();
-
+    
     armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
-
+    
     injectStyles();
     updateToggleVisibility();
     renderApiKeyGenerator();
-
+    
     if (!state.settings.enabled) {
       cleanupModifications();
       return;
     }
-
+    
     await refreshTotalBusts(false);
     await loadBustData(false);
     renderAll();
     scanExistingBustSuccesses();
-
+    
     if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
       renderPanel(true);
     }
-
+    
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
     startPathWatcher();
-
+    
     window.addEventListener('resize', renderAll, { passive: true });
     window.addEventListener('hashchange', () => {
       renderApiKeyGenerator();
