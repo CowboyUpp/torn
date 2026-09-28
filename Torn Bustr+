@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.4.2
-// @description  Safer Torn jail-busting helper. One custom key (Log + Personal Stats). Available bust estimate, total people busted on desktop, hardness scores, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA shows available only (compact nav).
+// @version      1.5.1
+// @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -22,15 +22,14 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.4.2';
+  const VERSION = '1.5.0';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
-  // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
   const API_KEY_PERMISSION = 'User / Log + Personal Stats';
   const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlus&user=log,personalstats';
   const BUST_LOG_ID = 5360;
   const HUB_ID = 'bustr-plus';
-  const CACHE_TTL_TOTAL = 6 * 60 * 60 * 1000; // 6 hours — total changes slowly
+  const CACHE_TTL_TOTAL = 6 * 60 * 60 * 1000;
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -43,11 +42,17 @@
     hideHardTargets: true,
     sortByHardness: true,
     showHardness: true,
+    showSuccessChance: true,
+    playerLevel: 100,
+    usePerkCalibration: true,
+    factionBustSkill: false,
+    educationBustSkill: false,
+    otherBustSkillBonus: 0,
     skipBustConfirm: true,
     theme: 'dark',
     redLimit: 0,
     greenLimit: 3,
-    manualTotalBusts: '' // NEW: Manual fallback
+    manualTotalBusts: ''
   };
 
   let state = {
@@ -143,7 +148,6 @@
   // TOTAL BUSTS VIA GM (With Manual Fallback)
   // =========================================================================
   function getCachedTotalBusts() {
-    // If user set a manual value, always use it
     if (state.settings.manualTotalBusts) {
       return parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
     }
@@ -160,17 +164,11 @@
     state.totalBusts = count;
   }
 
-  /**
-   * Total "People busted" from Torn API personalstats.peoplebusted.
-   * Requires the API key to include user → personalstats (Generate key button
-   * is pre-filled for log + personalstats). Falls back to page scrape, then manual.
-   */
   async function fetchTotalBustsViaAPI() {
     if (!state.apiKey) return null;
     try {
-      // Narrow request keeps payload small; key must include user → personalstats
       const url =
-        `https://api.torn.com/user/?selections=personalstats&stat=peoplebusted` +
+        `https://api.torn.com/v2/user/personalstats?cat=jail` +
         `&comment=BustrPlus&key=${encodeURIComponent(state.apiKey)}`;
       const data = await requestJson(url);
       if (data && data.error) {
@@ -195,10 +193,11 @@
     if (!data) return null;
     const ps = data.personalstats;
     if (ps == null) return null;
+    const v2Success = ps?.jail?.busts?.success;
+    if (Number.isFinite(Number(v2Success))) return Number(v2Success);
     if (typeof ps === 'number' && Number.isFinite(ps)) return ps;
     if (typeof ps === 'object' && !Array.isArray(ps)) {
       if (Number.isFinite(Number(ps.peoplebusted))) return Number(ps.peoplebusted);
-      // nested category bags
       for (const val of Object.values(ps)) {
         if (val && typeof val === 'object' && Number.isFinite(Number(val.peoplebusted))) {
           return Number(val.peoplebusted);
@@ -273,7 +272,6 @@
     if (!state.apiKey) {
       return 'No API key — generate one custom key (Log + Personal Stats)';
     }
-    // Hub panel has room for full avail/total on all devices
     return `Busts ${formatAvailableWithTotal()} · score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
   }
 
@@ -313,6 +311,11 @@
             { key: 'hideHardTargets', type: 'toggle', label: 'Hide hard targets', default: true, hint: 'Completely hide targets above the hardness ceiling' },
             { key: 'sortByHardness', type: 'toggle', label: 'Sort easiest first', default: true, hint: 'Sort jail list by hardness score ascending' },
             { key: 'showHardness', type: 'toggle', label: 'Show hardness scores', default: true, hint: 'Display the hardness score column on the jail list' },
+            { key: 'showSuccessChance', type: 'toggle', label: 'Show success %', default: true, hint: 'Show an estimated bust success percentage beside each hardness score' },
+            { key: 'playerLevel', type: 'number', label: 'Your level', default: 100, min: 1, hint: 'Your Torn player level. Used as the skill denominator in the community-derived success estimate.' },
+            { key: 'factionBustSkill', type: 'toggle', label: 'Faction +50% bust skill', default: false, hint: 'Tick if your faction gives the full +50% busting-skill bonus used by the reference model.' },
+            { key: 'educationBustSkill', type: 'toggle', label: 'Education +65% bust skill', default: false, hint: 'Tick if you have the full +65% busting-skill education bonus used by the reference model.' },
+            { key: 'otherBustSkillBonus', type: 'number', label: 'Other bust skill %', default: 0, min: 0, hint: 'Any additional busting-skill/success bonus not covered by the two checkboxes above.' },
             { key: 'hardnessLimit', type: 'number', label: 'Hardness ceiling', default: 460, min: 0, hint: 'Maximum jail target score shown as safe. Lower is stricter.' },
             { key: 'customPenaltyThreshold', type: 'number', label: 'Manual penalty cap', default: 0, min: 0, hint: 'Optional manual cap for bust budget. Leave 0 to auto-estimate from history.' },
             { key: 'refreshSeconds', type: 'number', label: 'Refresh seconds', default: 60, min: 15, hint: 'How often to check user/log for new busts. 60 is calm and API-friendly.' },
@@ -328,6 +331,11 @@
             hideHardTargets: state.settings.hideHardTargets,
             sortByHardness: state.settings.sortByHardness,
             showHardness: state.settings.showHardness,
+            showSuccessChance: state.settings.showSuccessChance,
+            playerLevel: state.settings.playerLevel,
+            factionBustSkill: state.settings.factionBustSkill,
+            educationBustSkill: state.settings.educationBustSkill,
+            otherBustSkillBonus: state.settings.otherBustSkillBonus,
             hardnessLimit: state.settings.hardnessLimit,
             customPenaltyThreshold: state.settings.customPenaltyThreshold,
             refreshSeconds: state.settings.refreshSeconds,
@@ -347,6 +355,11 @@
             state.settings.hideHardTargets = !!values.hideHardTargets;
             state.settings.sortByHardness = !!values.sortByHardness;
             state.settings.showHardness = values.showHardness !== false;
+            state.settings.showSuccessChance = values.showSuccessChance !== false;
+            state.settings.playerLevel = Math.max(1, Number(values.playerLevel) || 100);
+            state.settings.factionBustSkill = !!values.factionBustSkill;
+            state.settings.educationBustSkill = !!values.educationBustSkill;
+            state.settings.otherBustSkillBonus = Math.max(0, Number(values.otherBustSkillBonus) || 0);
             state.settings.hardnessLimit = Math.max(0, Number(values.hardnessLimit) || 0);
             state.settings.customPenaltyThreshold = Math.max(0, Number(values.customPenaltyThreshold) || 0);
             state.settings.refreshSeconds = Math.max(15, Number(values.refreshSeconds) || 60);
@@ -356,7 +369,6 @@
             state.settings.redLimit = Math.max(0, Number(values.redLimit) || 0);
             state.settings.manualTotalBusts = String(values.manualTotalBusts || '').trim();
 
-            // Only accept a real 16-char key; ignore blank Hub snapshots (never wipe key)
             if (typeof values.apiKey === 'string') {
               const key = values.apiKey.trim();
               if (key && /^[A-Za-z0-9]{16}$/.test(key) && key !== state.apiKey) {
@@ -372,7 +384,6 @@
             recalcStats();
             saveStats();
 
-            // Manual total always wins; otherwise refresh from API when needed
             if (state.settings.manualTotalBusts) {
               state.totalBusts = parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
             } else if (!keyPromise) {
@@ -518,6 +529,15 @@
       #body .users-list-title .level { width: 53px; }
       #body .users-list-title .reason { width: 205px; }
       #body .users-list-title .hardness { display: block; width: 79px; text-align: center; }
+      #body .users-list-title .bustr-plus-score-label { vertical-align: middle; }
+      #body .users-list-title .bustr-plus-jail-refresh {
+        display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+        min-width: 18px; margin-left: 3px; padding: 0; border: 0; background: transparent;
+        color: inherit; font: 700 16px/1 Arial, sans-serif; cursor: pointer; vertical-align: middle;
+      }
+      #body .users-list-title .bustr-plus-jail-refresh:hover { color: #fff; }
+      #body .users-list-title .bustr-plus-jail-refresh.is-refreshing { animation: bustr-plus-spin .65s linear infinite; }
+      @keyframes bustr-plus-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       #body .user-info-list-wrap { display: flex; flex-direction: column; justify-content: start; align-items: center; }
       #body .user-info-list-wrap > li { display: flex; flex-wrap: wrap; justify-content: start; align-items: center; }
       #body .user-info-list-wrap > li .info-wrap { display: flex; flex-wrap: wrap; justify-content: start; align-items: center; }
@@ -527,19 +547,20 @@
       #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 50px; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
       .bustr-plus-hardness { display: inline-block; width: 46px; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
+      .bustr-plus-success-chance { display: block; width: 100%; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
       .bustr-plus-hard-row { opacity: .32; }
       .bustr-plus-hidden-hard { display: none !important; }
       @media screen and (max-width: 784px) {
         #body .users-list-title .hardness { display: none; }
         #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: block; }
         #body .user-info-list-wrap > li .info-wrap .reason { width: 164px; border-right: 1px solid rgb(34, 34, 34); }
-        #body .user-info-list-wrap > li .info-wrap .hardness { width: 64px; }
+        #body .user-info-list-wrap > li .info-wrap .hardness { width: 86px; }
       }
       @media screen and (max-width: 386px) {
         #body .user-info-list-wrap > li .info-wrap .time { width: 98px; height: 37px; }
         #body .user-info-list-wrap > li .info-wrap .level { width: 91px; height: 37px; }
         #body .user-info-list-wrap > li .info-wrap .reason { width: 171px; height: 24px; border-right: 1px solid rgb(34, 34, 34); }
-        #body .user-info-list-wrap > li .info-wrap .hardness { width: 107px; }
+        #body .user-info-list-wrap > li .info-wrap .hardness { width: 128px; }
       }
     `;
     document.head.appendChild(style);
@@ -577,9 +598,6 @@
       return;
     }
 
-    // Do not create any standalone BUSTR+ UI until Torn's real sidebar exists.
-    // This prevents the button from appearing on Cloudflare/challenge pages,
-    // where /jailview.php may be the URL but Torn's page shell is not loaded.
     const sidebar = document.getElementById('sidebar');
     const sidebarVisible = !!sidebar &&
       sidebar.offsetParent !== null &&
@@ -677,10 +695,15 @@
           ${numberField('decayDivisorHours', 'Decay rate hrs', s.decayDivisorHours)}
           ${numberField('decayWindowHours', 'Decay window hrs', s.decayWindowHours)}
           ${numberField('greenLimit', 'Green at busts', s.greenLimit)}
+          ${numberField('playerLevel', 'Your level', s.playerLevel)}
+          ${numberField('otherBustSkillBonus', 'Other bust skill %', s.otherBustSkillBonus)}
         </div>
         <div class="toggles">
           <label><span>Hide hard</span><input id="bustr-plus-hideHardTargets" type="checkbox" ${s.hideHardTargets ? 'checked' : ''}></label>
           <label><span>Sort easiest</span><input id="bustr-plus-sortByHardness" type="checkbox" ${s.sortByHardness ? 'checked' : ''}></label>
+          <label><span>Show success %</span><input id="bustr-plus-showSuccessChance" type="checkbox" ${s.showSuccessChance ? 'checked' : ''}></label>
+          <label><span>Faction +50%</span><input id="bustr-plus-factionBustSkill" type="checkbox" ${s.factionBustSkill ? 'checked' : ''}></label>
+          <label><span>Education +65%</span><input id="bustr-plus-educationBustSkill" type="checkbox" ${s.educationBustSkill ? 'checked' : ''}></label>
           <label><span>Skip confirm</span><input id="bustr-plus-skipBustConfirm" type="checkbox" ${s.skipBustConfirm ? 'checked' : ''}></label>
         </div>
         <label>
@@ -691,7 +714,7 @@
           <button type="button" class="danger" data-action="forget-key">Forget key</button>
           <button type="button" class="primary" data-action="save-settings">Save settings</button>
         </div>
-        <div class="hint">Hardness: level x (hours + 3). Bust budget is an estimate from recent user/log entries, not an official Torn value.</div>
+        <div class="hint">Hardness: level × (hours + 3). Success % is a community-derived estimate using your level, selected bust-skill bonuses and the same decay settings. It is not an official Torn probability.</div>
         <div class="version">Version ${VERSION}</div>
       </div>
     `;
@@ -707,6 +730,8 @@
       decayDivisorHours: 'How quickly old busts cool off in the estimate. Smaller means the script forgives old busts faster. Larger means old busts keep weighing on the counter longer.',
       decayWindowHours: 'How far back Bustr+ looks when estimating bust fatigue. 72 hours is conservative. Shorter windows react faster; longer windows play safer.',
       greenLimit: 'When the jail menu counter turns green. This is just a comfort color threshold, not a Torn rule.',
+      playerLevel: 'Your current Torn player level. The estimate uses level as the main bust-skill factor.',
+      otherBustSkillBonus: 'Additional busting-skill/success bonus percentage not covered by the faction and education checkboxes.',
     }[name];
     const info = help
       ? `<span class="help-dot" tabindex="0" role="note" aria-label="${escapeAttr(help)}" data-tip="${escapeAttr(help)}">ⓘ</span>`
@@ -819,6 +844,8 @@
       decayDivisorHours: { min: 1 },
       decayWindowHours: { min: 1 },
       greenLimit: { min: 0 },
+      playerLevel: { min: 1 },
+      otherBustSkillBonus: { min: 0 },
     };
     for (const [key, rule] of Object.entries(numberRules)) {
       const el = panel.querySelector(`#bustr-plus-${key}`);
@@ -828,8 +855,10 @@
     state.settings.hideHardTargets = panel.querySelector('#bustr-plus-hideHardTargets').checked;
     state.settings.sortByHardness = panel.querySelector('#bustr-plus-sortByHardness').checked;
     state.settings.skipBustConfirm = panel.querySelector('#bustr-plus-skipBustConfirm').checked;
-    
-    // Read manual total busts
+    state.settings.showSuccessChance = panel.querySelector('#bustr-plus-showSuccessChance').checked;
+    state.settings.factionBustSkill = panel.querySelector('#bustr-plus-factionBustSkill').checked;
+    state.settings.educationBustSkill = panel.querySelector('#bustr-plus-educationBustSkill').checked;
+
     const manualInput = panel.querySelector('#bustr-plus-manual-total');
     if (manualInput) {
       state.settings.manualTotalBusts = manualInput.value.trim();
@@ -846,7 +875,6 @@
     window.open(url, '_blank', 'noopener');
   }
 
-  // Floating key-gen helper panel removed. Generate button still opens Torn's API page with query params.
   function renderApiKeyGenerator() {
     document.getElementById('bustr-plus-keygen')?.remove();
   }
@@ -861,20 +889,17 @@
     return state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
   }
 
-  /** Desktop / Hub: "3 / 8,500". Never use on PDA nav pill. */
   function formatAvailableWithTotal() {
     const avail = formatAvailable();
     const total = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
     return `${avail} / ${total}`;
   }
 
-  /** Compact counter for small mobile/PDA jail slider. */
   function formatNavCounter() {
     return isCompactNav() ? String(formatAvailable()) : formatAvailableWithTotal();
   }
 
   function isCompactNav() {
-    // PDA / mobile sidebar and Torn PDA — total does not fit the pill
     if (getViewportType() !== 'desktop') return true;
     if (typeof window.PDA_httpGet === 'function') return true;
     const ua = String(navigator.userAgent || '');
@@ -1114,7 +1139,6 @@
           stats.className = 'bustr-plus-nav';
           anchor.appendChild(stats);
         }
-        // Remove mobile pill if we flipped to desktop
         jailNav.querySelector('.bustr-plus-pill')?.remove();
         stats.textContent = label;
         stats.title = tip;
@@ -1125,13 +1149,11 @@
           pill.className = 'bustr-plus-pill';
           jailNav.appendChild(pill);
         }
-        // Remove desktop span on compact
         anchor.querySelector('.bustr-plus-nav')?.remove();
         pill.textContent = label;
         pill.title = tip;
       }
     } catch (err) {
-      // Silent fail for nav stats
     } finally {
       state.navStatsPending = false;
     }
@@ -1146,6 +1168,90 @@
       document.body.classList.add('bustr-plus-green');
     } else {
       document.body.classList.add('bustr-plus-orange');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Community-derived success estimate. This is intentionally an estimate, not
+  // an official Torn percentage.
+  // We use Bustr+'s own configurable hardness and decay settings.
+  // -------------------------------------------------------------------------
+  const SUCCESS_A = 266.6;
+  const SUCCESS_B = 0.28;
+  const PENALTY_PCT_ANCHOR = 1037;
+  const FULL_BUST_SKILL_BONUS = 115;
+  const PENALTY_WEIGHT = 2.0;
+  const PENALTY_SATURATION_PCT = 95;
+  const PRED_SHRINK_K = 0.40;
+  const PRED_SHRINK_CENTER = 45;
+  const SUCCESS_LIFT_K = 18;
+  const SUCCESS_LIFT_PIVOT = 0.85;
+
+  function getBustSkillCalibration() {
+    if (!state.settings.usePerkCalibration) return 0.85;
+    const bonus = (state.settings.factionBustSkill ? 50 : 0)
+      + (state.settings.educationBustSkill ? 65 : 0)
+      + Math.max(0, Number(state.settings.otherBustSkillBonus) || 0);
+    if (bonus <= 0) return 0.85;
+    return Math.max(0.4, Math.min(1.0, (100 + bonus) / (100 + FULL_BUST_SKILL_BONUS)));
+  }
+
+  function calcSuccessPenaltyPct(timestamps) {
+    if (!Array.isArray(timestamps) || !timestamps.length) return 0;
+    const now = Date.now() / 1000;
+    const windowHours = Math.max(1, Number(state.settings.decayWindowHours) || 72);
+    const divisor = Math.max(1, Number(state.settings.decayDivisorHours) || 10);
+    const level = Math.max(1, Number(state.settings.playerLevel) || 100);
+    const calibration = getBustSkillCalibration();
+    const skill = level * calibration;
+    const p0 = PENALTY_PCT_ANCHOR / skill;
+    let pct = 0;
+    for (const ts of timestamps) {
+      const ageHours = (now - ts) / 3600;
+      if (ageHours < 0 || ageHours > windowHours) continue;
+      pct += p0 / (1 + ageHours / divisor);
+    }
+    return pct;
+  }
+
+  function calcSuccessChance(hardness, penaltyPct) {
+    const level = Math.max(1, Number(state.settings.playerLevel) || 100);
+    const calibration = getBustSkillCalibration();
+    const skill = level * calibration;
+    const effectivePenalty = PENALTY_WEIGHT * Math.min(penaltyPct, PENALTY_SATURATION_PCT);
+    const raw = SUCCESS_A - (SUCCESS_B * 60 / skill) * hardness - effectivePenalty;
+    const clamped = Math.max(1, Math.min(100, raw));
+    const shrunk = PRED_SHRINK_CENTER + PRED_SHRINK_K * (clamped - PRED_SHRINK_CENTER);
+    const lift = SUCCESS_LIFT_K * (calibration - SUCCESS_LIFT_PIVOT);
+    return Math.max(1, Math.min(100, Math.round(shrunk + lift)));
+  }
+
+  function successChanceColor(chance) {
+    if (chance >= 60) return '#85b200';
+    if (chance < 40) return '#e64d1a';
+    return '#d08000';
+  }
+
+  function refreshJailList() {
+    if (window.location.pathname !== '/jailview.php') return;
+    const current = window.location.hash.match(/start=(\d+)/);
+    const start = current ? current[1] : '0';
+    const markRefreshing = (on) => {
+      document.querySelectorAll('.bustr-plus-jail-refresh').forEach((el) => el.classList.toggle('is-refreshing', on));
+    };
+    markRefreshing(true);
+    try {
+      window.location.hash = '#bustr-plus-refresh';
+      setTimeout(() => {
+        window.location.hash = '#start=' + start;
+        setTimeout(() => {
+          markRefreshing(false);
+          scheduleHardnessRender();
+        }, 250);
+      }, 35);
+    } catch (err) {
+      markRefreshing(false);
+      console.warn('[Bustr+] Could not refresh jail list in place:', err);
     }
   }
 
@@ -1169,7 +1275,8 @@
           continue;
         }
         const score = calcHardnessScore(parsed.level, parsed.hours);
-        renderHardnessScore(info, score);
+        const chance = state.settings.showSuccessChance ? calcSuccessChance(score, calcSuccessPenaltyPct(state.timestamps)) : null;
+        renderHardnessScore(info, score, chance);
         applyHardnessTreatment(row, score);
       }
     } finally {
@@ -1221,26 +1328,38 @@
     if (!title || title.querySelector('.bustr-plus-hardness-col')) return;
     const header = document.createElement('span');
     header.className = 'hardness bustr-plus-hardness-col title-divider divider-spiky';
-    header.textContent = 'Score';
+    header.innerHTML = '<span class="bustr-plus-score-label">Score</span>';
+    const refresh = document.createElement('button');
+    refresh.type = 'button';
+    refresh.className = 'bustr-plus-jail-refresh';
+    refresh.textContent = '↻';
+    refresh.title = 'Refresh inmates';
+    refresh.setAttribute('aria-label', 'Refresh inmates');
+    refresh.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      refreshJailList();
+    });
+    header.appendChild(refresh);
     const anchor = findJailColumnAnchor(title, 3);
     if (anchor) anchor.insertAdjacentElement('afterend', header);
     else title.appendChild(header);
   }
 
-  function renderHardnessScore(info, score) {
+  function renderHardnessScore(info, score, chance = null) {
     let wrap = info.querySelector('.bustr-plus-hardness-wrap');
     for (const extra of [...info.querySelectorAll('.bustr-plus-hardness-wrap')].slice(1)) extra.remove();
     if (!wrap) {
       wrap = document.createElement('span');
       wrap.className = 'hardness reason bustr-plus-hardness-wrap';
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span>';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span>';
       const reason = findJailColumnAnchor(info, 2);
       if (reason) reason.insertAdjacentElement('afterend', wrap);
       else info.appendChild(wrap);
     }
     let value = wrap.querySelector('.bustr-plus-hardness');
     if (!value) {
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span>';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span>';
       value = wrap.querySelector('.bustr-plus-hardness');
     }
     const nextText = Number.isFinite(score) ? String(score) : '-';
@@ -1248,6 +1367,13 @@
     const nextColor = !Number.isFinite(score) ? '#999' : score > state.settings.hardnessLimit ? '#e64d1a' : '#85b200';
     if (value.style.getPropertyValue('--bustr-plus-hardness-color') !== nextColor) {
       value.style.setProperty('--bustr-plus-hardness-color', nextColor);
+    }
+    const pct = wrap.querySelector('.bustr-plus-success-chance');
+    if (pct) {
+      const pctText = Number.isFinite(chance) && state.settings.showSuccessChance ? `${chance}%` : '';
+      if (pct.textContent !== pctText) pct.textContent = pctText;
+      if (pctText) pct.style.setProperty('--bustr-plus-success-color', successChanceColor(chance));
+      else pct.style.removeProperty('--bustr-plus-success-color');
     }
   }
 
@@ -1375,7 +1501,6 @@
     state.availableBusts = state.penaltyThreshold > 0
       ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
       : null;
-    // Optimistic total bump (API personalstats can lag until next day for some views)
     if (Number.isFinite(state.totalBusts)) {
       state.totalBusts += 1;
       if (!state.settings.manualTotalBusts) saveTotalBusts(state.totalBusts);
@@ -1432,33 +1557,33 @@
   async function init() {
     loadState();
     registerWithHub();
-    
+
     armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
-    
+
     injectStyles();
     updateToggleVisibility();
     renderApiKeyGenerator();
-    
+
     if (!state.settings.enabled) {
       cleanupModifications();
       return;
     }
-    
+
     await refreshTotalBusts(false);
     await loadBustData(false);
     renderAll();
     scanExistingBustSuccesses();
-    
+
     if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
       renderPanel(true);
     }
-    
+
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
     startPathWatcher();
-    
+
     window.addEventListener('resize', renderAll, { passive: true });
     window.addEventListener('hashchange', () => {
       renderApiKeyGenerator();
