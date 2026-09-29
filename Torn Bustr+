@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.3
+// @version      1.5.4
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.3';
+  const VERSION = '1.5.4';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -201,13 +201,11 @@
     if (!data) return null;
     const ps = data.personalstats;
     if (ps == null) return null;
-    // v2: personalstats.jail.busts.success
     const v2Success = ps?.jail?.busts?.success;
     if (Number.isFinite(Number(v2Success))) return Number(v2Success);
     if (typeof ps === 'number' && Number.isFinite(ps)) return ps;
     if (typeof ps === 'object' && !Array.isArray(ps)) {
       if (Number.isFinite(Number(ps.peoplebusted))) return Number(ps.peoplebusted);
-      // nested category bags
       for (const val of Object.values(ps)) {
         if (val && typeof val === 'object' && Number.isFinite(Number(val.peoplebusted))) {
           return Number(val.peoplebusted);
@@ -282,7 +280,6 @@
     if (!state.apiKey) {
       return 'No API key — generate one custom key (Log + Personal Stats)';
     }
-    // Hub panel has room for full avail/total on all devices
     return `Busts ${formatAvailableWithTotal()} · score ${state.penaltyScore}/${state.penaltyThreshold || '?'}`;
   }
 
@@ -396,7 +393,6 @@
             recalcStats();
             saveStats();
 
-            // Manual total always wins; otherwise refresh from API when needed
             if (state.settings.manualTotalBusts) {
               state.totalBusts = parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
             } else if (!keyPromise) {
@@ -566,14 +562,41 @@
       @media screen and (max-width: 784px) {
         #body .users-list-title .hardness { display: none; }
         #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: block; }
-        #body .user-info-list-wrap > li .info-wrap .reason { width: 164px; border-right: 1px solid rgb(34, 34, 34); }
-        #body .user-info-list-wrap > li .info-wrap .hardness { width: 86px; }
+        /* PDA: give the native Reason cell a little less width so its text wraps
+           naturally and the injected Score cell can use the far-right column. */
+        #body .user-info-list-wrap > li .info-wrap .reason:not(.bustr-plus-hardness-wrap) {
+          width: 148px;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          border-right: 1px solid rgb(34, 34, 34);
+        }
+        #body .user-info-list-wrap > li .info-wrap .bustr-plus-hardness-wrap {
+          width: 86px;
+          min-width: 86px;
+          flex: 0 0 86px;
+          box-sizing: border-box;
+          text-align: center;
+          border-left: 1px solid rgb(34, 34, 34);
+        }
       }
       @media screen and (max-width: 386px) {
         #body .user-info-list-wrap > li .info-wrap .time { width: 98px; height: 37px; }
         #body .user-info-list-wrap > li .info-wrap .level { width: 91px; height: 37px; }
-        #body .user-info-list-wrap > li .info-wrap .reason { width: 171px; height: 24px; border-right: 1px solid rgb(34, 34, 34); }
-        #body .user-info-list-wrap > li .info-wrap .hardness { width: 128px; }
+        #body .user-info-list-wrap > li .info-wrap .reason:not(.bustr-plus-hardness-wrap) {
+          width: 132px;
+          height: auto;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          border-right: 1px solid rgb(34, 34, 34);
+        }
+        #body .user-info-list-wrap > li .info-wrap .bustr-plus-hardness-wrap {
+          width: 120px;
+          min-width: 120px;
+          flex: 0 0 120px;
+          box-sizing: border-box;
+          text-align: center;
+          border-left: 1px solid rgb(34, 34, 34);
+        }
       }
     `;
     document.head.appendChild(style);
@@ -611,9 +634,6 @@
       return;
     }
 
-    // Do not create any standalone BUSTR+ UI until Torn's real sidebar exists.
-    // This prevents the button from appearing on Cloudflare/challenge pages,
-    // where /jailview.php may be the URL but Torn's page shell is not loaded.
     const sidebar = document.getElementById('sidebar');
     const sidebarVisible = !!sidebar &&
       sidebar.offsetParent !== null &&
@@ -875,7 +895,6 @@
     state.settings.factionBustSkill = panel.querySelector('#bustr-plus-factionBustSkill').checked;
     state.settings.educationBustSkill = panel.querySelector('#bustr-plus-educationBustSkill').checked;
     
-    // Read manual total busts
     const manualInput = panel.querySelector('#bustr-plus-manual-total');
     if (manualInput) {
       state.settings.manualTotalBusts = manualInput.value.trim();
@@ -892,7 +911,6 @@
     window.open(url, '_blank', 'noopener');
   }
 
-  // Floating key-gen helper panel removed. Generate button still opens Torn's API page with query params.
   function renderApiKeyGenerator() {
     document.getElementById('bustr-plus-keygen')?.remove();
   }
@@ -907,7 +925,6 @@
     return state.availableBusts == null ? '?' : Math.max(0, state.availableBusts);
   }
 
-  /** Desktop / Hub: "3 / 8,500". Never use on PDA nav pill. */
   function formatAvailableWithTotal() {
     const avail = formatAvailable();
     const total = state.totalBusts != null ? state.totalBusts.toLocaleString() : '?';
@@ -1197,9 +1214,8 @@
 
   // -------------------------------------------------------------------------
   // Community-derived success estimate. This is intentionally an estimate, not
-  // an official Torn percentage. It follows the model used by the reference
-  // BUSTR script: success = A - (B * 60 / skill) * hardness - penalty.
-  // We use Bustr+'s own configurable hardness and decay settings.
+  // an official Torn percentage.
+  // Bustr+'s own configurable hardness and decay settings.
   // -------------------------------------------------------------------------
   const SUCCESS_A = 266.6;
   const SUCCESS_B = 0.28;
@@ -1207,18 +1223,6 @@
   const FULL_BUST_SKILL_BONUS = 115;
   const PENALTY_WEIGHT = 2.0;
   const PENALTY_SATURATION_PCT = 95;
-  // v1.5.2: replace the old clamp + linear shrink display transform.
-  // The reference model first clamps raw values above 100%, which meant that
-  // a strong/low-penalty player could see the same displayed percentage for a
-  // very wide range of easy targets (e.g. 141..430 -> 70%). The underlying
-  // hardness ordering was correct; the display transform was throwing away
-  // the useful part of the curve.
-  //
-  // Keep the same community-derived raw model and penalty weighting, but map
-  // the raw score through a soft logistic ceiling. This preserves target-to-
-  // target resolution without pretending that an easy target is 100% certain.
-  // The 27..67 band follows the current BUSTR community model's conservative
-  // displayed range; the curve itself is deliberately a smooth display fit.
   const SUCCESS_DISPLAY_FLOOR = 27;
   const SUCCESS_DISPLAY_CEILING = 67;
   const SUCCESS_DISPLAY_MID = 150;
@@ -1259,13 +1263,6 @@
     const skill = level * calibration;
     const effectivePenalty = PENALTY_WEIGHT * Math.min(penaltyPct, PENALTY_SATURATION_PCT);
     const raw = SUCCESS_A - (SUCCESS_B * 60 / skill) * hardness - effectivePenalty;
-
-    // Do NOT clamp raw to 100 before transforming it. That was the source of
-    // the old "everything easy is 70%" behaviour: raw values of 194, 220 and
-    // 243 were all flattened to 100 before the shrink step.
-    //
-    // Logistic soft-cap: high raw scores approach the conservative ceiling,
-    // low raw scores approach the floor, and the useful middle remains smooth.
     const exponent = (SUCCESS_DISPLAY_MID - raw) / SUCCESS_DISPLAY_SCALE;
     const curve = SUCCESS_DISPLAY_FLOOR
       + (SUCCESS_DISPLAY_CEILING - SUCCESS_DISPLAY_FLOOR) / (1 + Math.exp(exponent));
@@ -1294,8 +1291,6 @@
     };
     markRefreshing(true);
     try {
-      // Torn's own hash loader re-fetches and re-renders the inmate list. This
-      // avoids a full page reload and does not touch any bust/bail control.
       window.location.hash = '#bustr-plus-refresh';
       setTimeout(() => {
         window.location.hash = '#start=' + start;
@@ -1425,12 +1420,8 @@
     }
     const pct = wrap.querySelector('.bustr-plus-success-chance');
     if (pct) {
-      // PDA/mobile has very little horizontal/vertical room. Keep the desktop
-      // percentage exactly as before, but remove it completely on compact views
-      // so the Score cell stays a single clean line and does not stretch the row.
-      const compact = isCompactNav();
-      const pctText = !compact && Number.isFinite(chance) && state.settings.showSuccessChance ? `${chance}%` : '';
-      pct.style.display = compact ? 'none' : 'block';
+      const pctText = Number.isFinite(chance) && state.settings.showSuccessChance ? `${chance}%` : '';
+      pct.style.display = pctText ? 'block' : 'none';
       if (pct.textContent !== pctText) pct.textContent = pctText;
       if (pctText) pct.style.setProperty('--bustr-plus-success-color', successChanceColor(chance));
       else pct.style.removeProperty('--bustr-plus-success-color');
