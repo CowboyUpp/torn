@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.7
+// @version      1.5.8
 // @description  Acoustical + green highlight alerts for skinny pickpocket targets (Mobster, Cyclist, Classy Lady walking, Police Officer running, Postal Worker walking). Standalone or Script Hub.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.5.7';
+    const SCRIPT_VERSION = '1.5.8';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TARGETS = {
@@ -65,6 +65,8 @@
     const BEEP_DURATION = 0.15;
     const BEEP_GAP = 0.12;
     const HIGHLIGHT_COLOR = '#00ff00';
+    const HIGHLIGHT_RETRY_MS = 300;
+    const HIGHLIGHT_RETRY_COUNT = 12;
 
     const STORAGE_KEY = (type, suffix) => `mca-${type}-${suffix}`;
 
@@ -234,43 +236,37 @@
     }
 
     // -------------------------------------------------------------------------
-    // Bright green highlight on available crime tiles (legacy behaviour)
+    // Green highlight on available crime tiles
+    // Matches unlocked .crime-option tiles by title. Retries briefly because
+    // Torn's UI re-renders shortly after the crimesData response arrives.
     // -------------------------------------------------------------------------
-    function highlightAvailable() {
-        const $ = window.jQuery || window.$;
-        if ($) {
-            try {
-                $('.CircularProgressbar').nextAll().each(function () {
-                    if ($(this).css('background-position-y') == '0px') {
-                        $(this).parent().parent().parent().parent().css('background-color', HIGHLIGHT_COLOR);
-                    }
-                });
-            } catch (e) { /* ignore */ }
-            return;
-        }
+    function applyHighlightOnce(titleMatch) {
+        const needle = String(titleMatch || '').toLowerCase();
+        if (!needle) return;
+        document.querySelectorAll('.crime-option').forEach(tile => {
+            if (tile.className.includes('locked')) return;
+            if (!tile.textContent.toLowerCase().includes(needle)) return;
+            tile.style.setProperty('background-color', HIGHLIGHT_COLOR, 'important');
+        });
+    }
 
-        try {
-            document.querySelectorAll('.CircularProgressbar').forEach(bar => {
-                let el = bar.nextElementSibling;
-                while (el) {
-                    const y = window.getComputedStyle(el).backgroundPositionY;
-                    if (y === '0px') {
-                        let tile = el.parentElement;
-                        for (let i = 0; i < 3 && tile; i++) tile = tile.parentElement;
-                        if (tile) tile.style.backgroundColor = HIGHLIGHT_COLOR;
-                        break;
-                    }
-                    el = el.nextElementSibling;
-                }
-            });
-        } catch (e) { /* ignore */ }
+    function highlightAvailable(type) {
+        const titleMatch = TARGETS[type].titleMatch;
+        let tries = 0;
+        const timer = setInterval(() => {
+            tries++;
+            try {
+                applyHighlightOnce(titleMatch);
+            } catch (e) { /* ignore */ }
+            if (tries >= HIGHLIGHT_RETRY_COUNT) clearInterval(timer);
+        }, HIGHLIGHT_RETRY_MS);
     }
 
     function checkType(type, crimes) {
         const available = isCrimeAvailable(crimes, type);
         if (available && !lastAvailable[type] && settings[type] && settings[type].enabled) {
             playAlert(type);
-            highlightAvailable();
+            highlightAvailable(type);
         }
         lastAvailable[type] = available;
     }
