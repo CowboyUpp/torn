@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      4.3.1
+// @version      4.3.3
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.3.1';
+    const HUB_VERSION = '4.3.3';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -947,12 +947,58 @@
         body.className = 'tsh-prefs-detail-body';
 
         const fields = script.prefs.fields || [];
+        const fieldByKey = new Map(fields.map(f => [f.key, f]));
+        const sections = Array.isArray(script.prefs.sections) ? script.prefs.sections : null;
+
+        if (sections && sections.length) {
+            // Sectioned layout: each section is a titled row of its fields (in order).
+            // Fields not listed in any section fall back to legacy type groups below.
+            const usedKeys = new Set();
+            sections.forEach(section => {
+                if (!section) return;
+                const keys = Array.isArray(section.keys) ? section.keys
+                    : (Array.isArray(section.fields) ? section.fields : []);
+                const secFields = keys.map(k => fieldByKey.get(k)).filter(Boolean);
+                if (!secFields.length) return;
+                secFields.forEach(f => usedKeys.add(f.key));
+
+                const sec = document.createElement('div');
+                sec.className = 'tsh-pref-section tsh-pref-section-row';
+                if (section.title) {
+                    const title = document.createElement('div');
+                    title.className = 'tsh-pref-section-title';
+                    title.textContent = section.title;
+                    sec.appendChild(title);
+                }
+                const row = document.createElement('div');
+                row.className = 'tsh-pref-row';
+                secFields.forEach(f => row.appendChild(createPrefField(script, f, refreshStatus)));
+                sec.appendChild(row);
+                body.appendChild(sec);
+            });
+
+            const leftover = fields.filter(f => !usedKeys.has(f.key));
+            if (leftover.length) {
+                appendLegacyPrefGroups(body, leftover, script, refreshStatus);
+            }
+        } else {
+            appendLegacyPrefGroups(body, fields, script, refreshStatus);
+        }
+
+        container.appendChild(body);
+
+        const footer = document.createElement('div');
+        footer.className = 'tsh-prefs-footer';
+        footer.textContent = 'Changes are saved automatically.';
+        container.appendChild(footer);
+    }
+
+    function appendLegacyPrefGroups(body, fields, script, refreshStatus) {
         const toggles = fields.filter(f => f.type === 'toggle' || f.type === 'checkbox');
         const numbers = fields.filter(f => f.type === 'number');
         const buttons = fields.filter(f => f.type === 'button');
         const others  = fields.filter(f => f.type !== 'toggle' && f.type !== 'checkbox' && f.type !== 'number' && f.type !== 'button');
 
-        // API key / text fields first
         if (others.length) {
             const sec = document.createElement('div');
             sec.className = 'tsh-pref-section';
@@ -963,7 +1009,6 @@
             body.appendChild(sec);
         }
 
-        // Action buttons (e.g. Generate key)
         if (buttons.length) {
             const sec = document.createElement('div');
             sec.className = 'tsh-pref-section';
@@ -993,13 +1038,6 @@
             sec.appendChild(grid);
             body.appendChild(sec);
         }
-
-        container.appendChild(body);
-
-        const footer = document.createElement('div');
-        footer.className = 'tsh-prefs-footer';
-        footer.textContent = 'Changes are saved automatically.';
-        container.appendChild(footer);
     }
 
     function createPrefField(script, field, onAfterSave) {
@@ -1882,6 +1920,18 @@
             }
             .tsh-pref-stack { display:flex; flex-direction:column; gap:6px; }
             .tsh-pref-btn-row { display:flex; flex-wrap:wrap; gap:6px; }
+            .tsh-pref-section-row {
+                padding:8px 10px; border:1px solid var(--tsh-border,#bbb); border-radius:4px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02));
+            }
+            .tsh-pref-section-title {
+                font-size:12px; font-weight:700; margin-bottom:6px; opacity:.9;
+            }
+            .tsh-pref-row {
+                display:grid;
+                grid-template-columns:minmax(64px,auto) minmax(80px,1fr) minmax(80px,1fr) minmax(110px,1.2fr) minmax(64px,auto);
+                gap:8px; align-items:end;
+            }
             .tsh-pref-field { display:flex; flex-direction:column; gap:2px; min-width:0; }
             .tsh-pref-label-row { display:flex; align-items:center; gap:3px; min-height:16px; }
             .tsh-pref-label { font-size:11px; opacity:.85; }
@@ -2062,11 +2112,13 @@
             @media (max-width: 480px) {
                 .tsh-dash-panel { width:100%; }
                 .tsh-pref-grid, .tsh-pref-toggles { grid-template-columns:1fr 1fr; }
+                .tsh-pref-row { grid-template-columns:1fr 1fr; }
                 .tsh-lib-row { flex-direction:column; align-items:flex-start; }
                 .tsh-lib-install { align-self:flex-end; }
             }
             @media (max-width: 360px) {
                 .tsh-pref-grid, .tsh-pref-toggles { grid-template-columns:1fr; }
+                .tsh-pref-row { grid-template-columns:1fr; }
             }
         `;
         (document.head || document.documentElement).appendChild(style);
