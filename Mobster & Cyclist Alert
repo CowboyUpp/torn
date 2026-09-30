@@ -1,118 +1,115 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.3.2
-// @description  Mobster & Cyclist Acoustical Alert — standalone, or managed by Torn Script Hub when installed
+// @version      1.5.7
+// @description  Acoustical + green highlight alerts for skinny pickpocket targets (Mobster, Cyclist, Classy Lady walking, Police Officer running, Postal Worker walking). Standalone or Script Hub.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/591579/Mobster%20%20Cyclist%20Alert.user.js
+// @updateURL https://update.greasyfork.org/scripts/591579/Mobster%20%20Cyclist%20Alert.meta.js
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.3.2';
+    const SCRIPT_VERSION = '1.5.7';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
-    const TYPES = ['mobster', 'cyclist'];
-    const BEEP_COUNTS = { mobster: 3, cyclist: 1 };
-    const CRIME_TITLES = { mobster: 'Mobster', cyclist: 'Cyclist' };
-
-    // System beep is the reliable path. Custom URL remains optional.
-    const PRESET_SOUNDS = {
-        beep: { label: 'System beep (Web Audio)', url: '' },
-        custom: { label: 'Custom URL…', url: '' }
+    const TARGETS = {
+        classyLadyWalking: {
+            titleMatch: 'classy lady',
+            activity: 'walking',
+            label: 'Classy Lady (Skinny + Walking)',
+            defaultBeeps: 2
+        },
+        cyclist: {
+            titleMatch: 'cyclist',
+            activity: null,
+            label: 'Cyclist (Skinny)',
+            defaultBeeps: 1
+        },
+        mobster: {
+            titleMatch: 'mobster',
+            activity: null,
+            label: 'Mobster (Skinny)',
+            defaultBeeps: 3
+        },
+        policeOfficerRunning: {
+            titleMatch: 'police officer',
+            activity: 'running',
+            label: 'Police Officer (Skinny + Running)',
+            defaultBeeps: 4
+        },
+        postalWorkerWalking: {
+            titleMatch: 'postal worker',
+            activity: 'walking',
+            label: 'Postal Worker (Skinny + Walking)',
+            defaultBeeps: 1
+        }
     };
-    const SOUND_OPTIONS = Object.keys(PRESET_SOUNDS).map(key => ({
-        value: key,
-        label: PRESET_SOUNDS[key].label
-    }));
-    const RETIRED_SOUNDS = new Set(['gunshot', 'bell', 'siren']);
+
+    const TYPES = Object.keys(TARGETS).sort((a, b) =>
+        TARGETS[a].label.localeCompare(TARGETS[b].label)
+    );
+
+    const REQUIRED_MUSCULAR = 'skinny';
+
+    const DEFAULT_WAVEFORM = 'sine';
+    const DEFAULT_VOLUME = 75;
+    const BEEP_DURATION = 0.15;
+    const BEEP_GAP = 0.12;
+    const HIGHLIGHT_COLOR = '#00ff00';
 
     const STORAGE_KEY = (type, suffix) => `mca-${type}-${suffix}`;
-    const lastAvailable = { mobster: false, cyclist: false };
 
-    // NOTE: window.__tornScriptHubQueue is NOT a reliable signal on its own.
-    // The Hub now uses @grant GM_xmlhttpRequest (added for its Watching
-    // feature), which forces Tampermonkey to run it in an isolated JS world
-    // separate from this @grant-none script's real page window — so a
-    // window-property check can permanently see nothing even though the Hub
-    // is genuinely mounted and working. The Hub's actual DOM element is
-    // shared across both worlds regardless, so check that first.
+    const lastAvailable = {};
+    TYPES.forEach(t => { lastAvailable[t] = false; });
+
+    // -------------------------------------------------------------------------
+    // Hub detection
+    // -------------------------------------------------------------------------
     function isHubPresent() {
         if (document.getElementById('tsh-sidebar-row')) return true;
         const q = window[QUEUE_PROPERTY];
         return !!(q && q.__tshPatched);
     }
 
-    // Detected once synchronously at load as a fast path, then re-confirmed
-    // asynchronously — see watchForHub()/adoptHubMode(). The Hub may not have
-    // initialized yet at this exact point even on a fully-loaded page, so this
-    // initial value is a best guess, not a final answer. settings.enabled's
-    // hub-mode default below uses this same initial guess, which is fine —
-    // that only affects the very first run before any preference is saved.
     let hubPresent = isHubPresent();
 
-    const DEFAULT_WAVEFORM = 'sine';
-    const DEFAULT_VOLUME = 75;
-    const DEFAULT_SOUND = 'beep';
-
+    // -------------------------------------------------------------------------
+    // Settings
+    // -------------------------------------------------------------------------
     function loadSettings() {
         const settings = {};
-        let migrated = false;
+
         TYPES.forEach(type => {
             const enabledRaw = localStorage.getItem(STORAGE_KEY(type, 'enabled'));
             const waveformRaw = localStorage.getItem(STORAGE_KEY(type, 'waveform'));
             const volumeRaw = localStorage.getItem(STORAGE_KEY(type, 'volume'));
-            const audioUrlRaw = localStorage.getItem(STORAGE_KEY(type, 'audiourl'));
-            const soundRaw = localStorage.getItem(STORAGE_KEY(type, 'sound'));
-
-            let sound = soundRaw || '';
-            if (!sound) {
-                sound = audioUrlRaw ? 'custom' : DEFAULT_SOUND;
-            }
-            if (RETIRED_SOUNDS.has(sound) || !PRESET_SOUNDS[sound]) {
-                sound = DEFAULT_SOUND;
-                migrated = true;
-            }
-
-            // Custom only if explicitly chosen and a URL exists; otherwise beep
-            let audioUrl = (audioUrlRaw || '').trim();
-            if (sound === 'custom' && !audioUrl) {
-                sound = DEFAULT_SOUND;
-                migrated = true;
-            }
-            if (sound !== 'custom') audioUrl = '';
+            const beepsRaw = localStorage.getItem(STORAGE_KEY(type, 'beeps'));
 
             let volume = volumeRaw !== null ? Number(volumeRaw) : DEFAULT_VOLUME;
             if (!Number.isFinite(volume)) volume = DEFAULT_VOLUME;
-            volume = Math.max(0, Math.min(100, volume));
-            if (volume === 0) {
-                volume = DEFAULT_VOLUME;
-                migrated = true;
-            }
+            volume = Math.max(1, Math.min(100, volume));
+
+            let beeps = beepsRaw !== null ? Number(beepsRaw) : TARGETS[type].defaultBeeps;
+            if (!Number.isFinite(beeps) || beeps < 1) beeps = TARGETS[type].defaultBeeps;
+            beeps = Math.max(1, Math.min(10, beeps));
 
             settings[type] = {
                 enabled: enabledRaw !== null ? enabledRaw === 'true' : hubPresent,
                 waveform: waveformRaw || DEFAULT_WAVEFORM,
                 volume,
-                sound,
-                audioUrl
+                beeps
             };
         });
-        if (migrated) {
-            TYPES.forEach(type => {
-                const s = settings[type];
-                localStorage.setItem(STORAGE_KEY(type, 'sound'), s.sound);
-                localStorage.setItem(STORAGE_KEY(type, 'audiourl'), s.audioUrl);
-                localStorage.setItem(STORAGE_KEY(type, 'volume'), String(s.volume));
-            });
-        }
+
         return settings;
     }
 
@@ -123,17 +120,13 @@
         localStorage.setItem(STORAGE_KEY(type, 'enabled'), String(!!s.enabled));
         localStorage.setItem(STORAGE_KEY(type, 'waveform'), s.waveform);
         localStorage.setItem(STORAGE_KEY(type, 'volume'), String(s.volume));
-        localStorage.setItem(STORAGE_KEY(type, 'sound'), s.sound);
-        localStorage.setItem(STORAGE_KEY(type, 'audiourl'), s.audioUrl || '');
+        localStorage.setItem(STORAGE_KEY(type, 'beeps'), String(s.beeps));
     }
 
     // -------------------------------------------------------------------------
-    // SOUND — unlock AudioContext on first user gesture (required by browsers)
+    // Audio
     // -------------------------------------------------------------------------
     let audioCtx = null;
-    let audioUnlocked = false;
-    const BEEP_DURATION = 0.15;
-    const BEEP_GAP = 0.12;
 
     function getAudioCtx() {
         if (!audioCtx) {
@@ -148,16 +141,11 @@
         const ctx = getAudioCtx();
         if (!ctx) return Promise.resolve(null);
         if (ctx.state === 'suspended') {
-            return ctx.resume().then(() => {
-                audioUnlocked = true;
-                return ctx;
-            }).catch(() => ctx);
+            return ctx.resume().then(() => ctx).catch(() => ctx);
         }
-        audioUnlocked = true;
         return Promise.resolve(ctx);
     }
 
-    // Any click/tap/key unlocks audio for later automatic alerts
     ['pointerdown', 'keydown', 'touchstart'].forEach(evt => {
         document.addEventListener(evt, () => { unlockAudio(); }, { once: true, passive: true, capture: true });
     });
@@ -174,59 +162,29 @@
             gain.gain.setValueAtTime(0.0001, startTime);
             gain.gain.exponentialRampToValueAtTime(peak, startTime + 0.01);
             gain.gain.exponentialRampToValueAtTime(0.0001, startTime + BEEP_DURATION);
-            osc.connect(gain).connect(ctx.destination);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
             osc.start(startTime);
             osc.stop(startTime + BEEP_DURATION + 0.02);
-        }
-    }
-
-    function beep(count, waveform, volumePercent) {
-        unlockAudio().then(ctx => {
-            if (!ctx) {
-                console.log('[MobsterCyclistAlert] No AudioContext available');
-                return;
-            }
-            try {
-                scheduleBeeps(ctx, count, waveform, volumePercent);
-            } catch (err) {
-                console.log('[MobsterCyclistAlert] Beep failed', err);
-            }
-        });
-    }
-
-    function playExternal(url, count, volumePercent) {
-        const vol = Math.max(0, Math.min(1, (volumePercent || 0) / 100));
-        for (let i = 0; i < count; i++) {
-            setTimeout(() => {
-                try {
-                    const audio = new Audio(url);
-                    audio.volume = vol;
-                    audio.play().catch(err => {
-                        console.log('[MobsterCyclistAlert] Custom audio failed, falling back to beep.', err);
-                        beep(1, DEFAULT_WAVEFORM, volumePercent);
-                    });
-                } catch (err) {
-                    console.log('[MobsterCyclistAlert] Invalid custom audio URL, falling back to beep.', err);
-                    beep(1, DEFAULT_WAVEFORM, volumePercent);
-                }
-            }, i * (BEEP_DURATION + BEEP_GAP) * 1000);
         }
     }
 
     function playAlert(type) {
         const s = settings[type];
         if (!s) return;
-        const count = BEEP_COUNTS[type] || 1;
-        // Only use external audio when explicitly on custom + non-empty URL
-        if (s.sound === 'custom' && s.audioUrl) {
-            playExternal(s.audioUrl, count, s.volume);
-        } else {
-            beep(count, s.waveform, s.volume);
-        }
+        const count = s.beeps || 1;
+        unlockAudio().then(ctx => {
+            if (!ctx) return;
+            try {
+                scheduleBeeps(ctx, count, s.waveform, s.volume);
+            } catch (err) {
+                console.log('[MCA] Beep failed', err);
+            }
+        });
     }
 
     // -------------------------------------------------------------------------
-    // CRIME DETECTION
+    // Crime detection
     // -------------------------------------------------------------------------
     function crimesListFromPayload(response) {
         const raw = response && response.DB && response.DB.crimesByType;
@@ -236,32 +194,81 @@
         return [];
     }
 
-    function isCrimeAvailable(crimes, title) {
+    function crimeActivity(c) {
+        const status = c && c.crimeInfo && c.crimeInfo.status;
+        if (!status) return '';
+        return String(status.icon || status.title || '').toLowerCase();
+    }
+
+    function crimeMuscular(c) {
+        const m = c && c.crimeInfo && c.crimeInfo.muscular;
+        return String(m || '').trim().toLowerCase();
+    }
+
+    function isAvailableFlag(c) {
+        return c && (c.available === true || c.available === 1 || c.available === '1');
+    }
+
+    function titlesMatch(crimeTitle, targetTitle) {
+        return String(crimeTitle || '').trim().toLowerCase() === String(targetTitle || '').trim().toLowerCase();
+    }
+
+    function isCrimeAvailable(crimes, type) {
+        const target = TARGETS[type];
+        if (!target) return false;
+
         for (let i = 0; i < crimes.length; i++) {
             const c = crimes[i];
-            if (!c) continue;
-            if (c.title === title && (c.available === true || c.available === 1 || c.available === '1')) {
+            if (!c || !isAvailableFlag(c)) continue;
+            if (!titlesMatch(c.title, target.titleMatch)) continue;
+
+            if (crimeMuscular(c) !== REQUIRED_MUSCULAR) continue;
+
+            if (target.activity) {
+                if (crimeActivity(c).includes(target.activity)) return true;
+            } else {
                 return true;
             }
         }
         return false;
     }
 
+    // -------------------------------------------------------------------------
+    // Bright green highlight on available crime tiles (legacy behaviour)
+    // -------------------------------------------------------------------------
     function highlightAvailable() {
         const $ = window.jQuery || window.$;
-        if (!$) return;
+        if ($) {
+            try {
+                $('.CircularProgressbar').nextAll().each(function () {
+                    if ($(this).css('background-position-y') == '0px') {
+                        $(this).parent().parent().parent().parent().css('background-color', HIGHLIGHT_COLOR);
+                    }
+                });
+            } catch (e) { /* ignore */ }
+            return;
+        }
+
         try {
-            $('.CircularProgressbar').nextAll().each(function() {
-                if ($(this).css('background-position-y') == '0px') {
-                    $(this).parent().parent().parent().parent().css('background-color', '#00ff00');
+            document.querySelectorAll('.CircularProgressbar').forEach(bar => {
+                let el = bar.nextElementSibling;
+                while (el) {
+                    const y = window.getComputedStyle(el).backgroundPositionY;
+                    if (y === '0px') {
+                        let tile = el.parentElement;
+                        for (let i = 0; i < 3 && tile; i++) tile = tile.parentElement;
+                        if (tile) tile.style.backgroundColor = HIGHLIGHT_COLOR;
+                        break;
+                    }
+                    el = el.nextElementSibling;
                 }
             });
-        } catch (_) {}
+        } catch (e) { /* ignore */ }
     }
 
     function checkType(type, crimes) {
-        const available = isCrimeAvailable(crimes, CRIME_TITLES[type]);
-        if (available && !lastAvailable[type] && settings[type].enabled) {
+        const available = isCrimeAvailable(crimes, type);
+        if (available && !lastAvailable[type] && settings[type] && settings[type].enabled) {
             playAlert(type);
             highlightAvailable();
         }
@@ -271,11 +278,42 @@
     function handleCrimesPayload(response) {
         const crimes = crimesListFromPayload(response);
         if (!crimes.length) return;
-        checkType('cyclist', crimes);
-        checkType('mobster', crimes);
+        TYPES.forEach(type => checkType(type, crimes));
     }
 
+    // -------------------------------------------------------------------------
+    // Fetch intercept
+    // -------------------------------------------------------------------------
     let watching = false;
+
+    function interceptFetch(pathNeedles, onJson) {
+        const needles = Array.isArray(pathNeedles) ? pathNeedles : [pathNeedles];
+        const originalFetch = window.fetch;
+        if (typeof originalFetch !== 'function') return;
+
+        window.fetch = function () {
+            const args = arguments;
+            return originalFetch.apply(this, args).then(response => {
+                try {
+                    let url = '';
+                    const arg0 = args[0];
+                    if (typeof arg0 === 'string') url = arg0;
+                    else if (arg0 && typeof arg0.url === 'string') url = arg0.url;
+                    else url = String(arg0 || '');
+
+                    if (needles.some(n => url.includes(n))) {
+                        response.clone().json().then(data => {
+                            try { onJson(data); } catch (e) {
+                                console.log('[MCA] handler error', e);
+                            }
+                        }).catch(() => {});
+                    }
+                } catch (e) { /* ignore */ }
+                return response;
+            });
+        };
+    }
+
     function startWatching() {
         if (watching) return;
         watching = true;
@@ -283,30 +321,30 @@
     }
 
     // -------------------------------------------------------------------------
-    // STANDALONE UI
+    // Standalone UI (when Hub is not present)
     // -------------------------------------------------------------------------
-    function initStandaloneUI() {
-        waitForElementToExist('.pickpocketing-root').then(() => {
-            if (hubPresent) return; // Hub was confirmed while we were waiting on the DOM
-            const $ = window.jQuery || window.$;
-            if (!$) return;
-            if (document.getElementById('crime-alert-div')) return;
-            $('.pickpocketing-root').append(
-                '<div id="crime-alert-div">' +
-                '<a id="mobster-toggle-btn" class="torn-btn btn-big"></a>&nbsp;' +
-                '<a id="cyclist-toggle-btn" class="torn-btn btn-big"></a><br/><br/>' +
-                '</div>'
-            );
-            updateButtonLabel('mobster');
-            updateButtonLabel('cyclist');
-            $('#mobster-toggle-btn').on('click', () => toggleAlert('mobster'));
-            $('#cyclist-toggle-btn').on('click', () => toggleAlert('cyclist'));
+    function waitForElementToExist(selector) {
+        return new Promise(resolve => {
+            const el = document.querySelector(selector);
+            if (el) return resolve(el);
+            const obs = new MutationObserver(() => {
+                const found = document.querySelector(selector);
+                if (found) {
+                    obs.disconnect();
+                    resolve(found);
+                }
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
         });
     }
 
-    function removeStandaloneUI() {
-        const div = document.getElementById('crime-alert-div');
-        if (div) div.remove();
+    function updateButtonLabel(type) {
+        const $ = window.jQuery || window.$;
+        if (!$) return;
+        const $btn = $('#' + type + '-toggle-btn');
+        if (!$btn.length) return;
+        $btn.text((settings[type].enabled ? 'Disable' : 'Enable') + ' ' + TARGETS[type].label);
+        $btn.css('background-color', settings[type].enabled ? '#2e7d32' : '');
     }
 
     function toggleAlert(type) {
@@ -318,17 +356,34 @@
         });
     }
 
-    function updateButtonLabel(type) {
-        const $ = window.jQuery || window.$;
-        if (!$) return;
-        const label = type === 'mobster' ? 'Mobster' : 'Cyclist';
-        const $btn = $('#' + type + '-toggle-btn');
-        $btn.text((settings[type].enabled ? 'Disable' : 'Enable') + ' ' + label + ' Alert');
-        $btn.css('background-color', settings[type].enabled ? '#2e7d32' : '');
+    function initStandaloneUI() {
+        waitForElementToExist('.pickpocketing-root').then(() => {
+            if (hubPresent) return;
+            const $ = window.jQuery || window.$;
+            if (!$) return;
+            if (document.getElementById('crime-alert-div')) return;
+
+            let html = '<div id="crime-alert-div" style="margin-bottom:10px;">';
+            TYPES.forEach(type => {
+                html += '<a id="' + type + '-toggle-btn" class="torn-btn btn-big" style="margin-right:5px;margin-bottom:5px;display:inline-block;"></a>';
+            });
+            html += '</div>';
+            $('.pickpocketing-root').append(html);
+
+            TYPES.forEach(type => {
+                updateButtonLabel(type);
+                $('#' + type + '-toggle-btn').on('click', () => toggleAlert(type));
+            });
+        });
+    }
+
+    function removeStandaloneUI() {
+        const div = document.getElementById('crime-alert-div');
+        if (div) div.remove();
     }
 
     // -------------------------------------------------------------------------
-    // HUB
+    // Script Hub prefs — lean: enable, beeps, tone, volume, test
     // -------------------------------------------------------------------------
     const WAVEFORM_OPTIONS = [
         { value: 'sine', label: 'Sine (soft)' },
@@ -339,54 +394,69 @@
 
     function buildPrefFields() {
         const fields = [];
-        TYPES.forEach(type => {
-            const label = type === 'mobster' ? 'Mobster' : 'Cyclist';
-            const countLabel = type === 'mobster' ? '3 beeps' : '1 beep';
 
-            fields.push({ key: type + 'Enabled', label: label + ' Alert (' + countLabel + ')', type: 'toggle', default: settings[type].enabled });
+        TYPES.forEach(type => {
             fields.push({
-                key: type + 'Sound',
-                label: label + ' Sound',
-                type: 'select',
-                options: SOUND_OPTIONS,
-                default: settings[type].sound,
-                hint: 'Use System beep. Custom URL is optional and often blocked.'
+                key: type + 'Enabled',
+                label: 'On/Off',
+                type: 'toggle',
+                default: settings[type].enabled
             });
             fields.push({
-                key: type + 'AudioUrl',
-                label: label + ' Custom Sound URL',
-                type: 'text',
-                placeholder: 'Only if Sound = Custom URL…',
-                hint: 'Direct .mp3/.ogg link; leave empty to use system beep'
+                key: type + 'Beeps',
+                label: 'Beep count',
+                type: 'number',
+                min: 1,
+                max: 10,
+                step: 1,
+                hint: 'Beeps when a matching skinny target is available (1–10)'
+            });
+            fields.push({
+                key: type + 'Volume',
+                label: 'Volume (%)',
+                type: 'number',
+                min: 1,
+                max: 100,
+                step: 5
             });
             fields.push({
                 key: type + 'Waveform',
-                label: label + ' Beep tone',
+                label: 'Tone',
                 type: 'select',
                 options: WAVEFORM_OPTIONS,
-                hint: 'Used for system beep'
+                hint: 'System beep waveform'
             });
-            fields.push({ key: type + 'Volume', label: label + ' Volume (%)', type: 'number', min: 1, max: 100, step: 5 });
             fields.push({
                 key: type + 'Test',
-                label: 'Test ' + label + ' Alert',
+                label: 'Test',
                 type: 'button',
-                onClick: () => {
-                    unlockAudio().then(() => playAlert(type));
-                }
+                onClick: () => unlockAudio().then(() => playAlert(type))
             });
         });
+
         return fields;
+    }
+
+    function buildPrefSections() {
+        return TYPES.map(type => ({
+            title: TARGETS[type].label,
+            keys: [
+                type + 'Enabled',
+                type + 'Beeps',
+                type + 'Volume',
+                type + 'Waveform',
+                type + 'Test'
+            ]
+        }));
     }
 
     function buildPrefValues() {
         const values = {};
         TYPES.forEach(type => {
             values[type + 'Enabled'] = settings[type].enabled;
-            values[type + 'Sound'] = settings[type].sound;
+            values[type + 'Beeps'] = settings[type].beeps;
             values[type + 'Waveform'] = settings[type].waveform;
             values[type + 'Volume'] = settings[type].volume;
-            values[type + 'AudioUrl'] = settings[type].audioUrl;
         });
         return values;
     }
@@ -399,18 +469,13 @@
             settings[type].enabled = nowEnabled;
             settings[type].waveform = values[type + 'Waveform'] || DEFAULT_WAVEFORM;
 
-            let sound = values[type + 'Sound'] || DEFAULT_SOUND;
-            if (RETIRED_SOUNDS.has(sound) || !PRESET_SOUNDS[sound]) sound = DEFAULT_SOUND;
-            settings[type].sound = sound;
+            let beeps = Number(values[type + 'Beeps']);
+            if (!Number.isFinite(beeps) || beeps < 1) beeps = TARGETS[type].defaultBeeps;
+            settings[type].beeps = Math.max(1, Math.min(10, beeps));
 
             let vol = Number(values[type + 'Volume']);
             if (!Number.isFinite(vol) || vol <= 0) vol = DEFAULT_VOLUME;
             settings[type].volume = Math.max(1, Math.min(100, vol));
-
-            settings[type].audioUrl = sound === 'custom' ? (values[type + 'AudioUrl'] || '').trim() : '';
-            if (sound === 'custom' && !settings[type].audioUrl) {
-                settings[type].sound = DEFAULT_SOUND;
-            }
 
             persistType(type);
 
@@ -431,15 +496,12 @@
                     detail: { scriptId: HUB_ID }
                 }));
             },
-            status: () => {
-                const soundLabel = (t) => (PRESET_SOUNDS[settings[t].sound] || {}).label || settings[t].sound;
-                return 'Mobster: ' + (settings.mobster.enabled ? 'On (' + soundLabel('mobster') + ')' : 'Off') +
-                    ' · Cyclist: ' + (settings.cyclist.enabled ? 'On (' + soundLabel('cyclist') + ')' : 'Off');
-            },
+            status: () => '',
             prefs: {
                 fields: buildPrefFields(),
+                sections: buildPrefSections(),
                 values: buildPrefValues(),
-                onSave: (values) => applyPrefValues(values)
+                onSave: values => applyPrefValues(values)
             }
         };
 
@@ -447,95 +509,38 @@
         document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail: registration }));
     }
 
+    function adoptHubMode() {
+        hubPresent = true;
+        removeStandaloneUI();
+        registerWithHub();
+    }
+
     function watchForHub() {
         if (hubPresent) return;
-
-        // No cutoff — Hub's own mount routine can legitimately take up to
-        // ~24s on a heavily-loaded page (it's waiting on Torn's header DOM,
-        // competing with every other userscript also loading). This is a
-        // cheap, purely cosmetic check, so there's no real cost to just
-        // continuing to look rather than giving up early.
         const poll = setInterval(() => {
             if (isHubPresent()) {
                 clearInterval(poll);
                 adoptHubMode();
             }
         }, 500);
-
-        // Belt-and-suspenders: the Hub also announces itself once it mounts.
         document.addEventListener('torn-script-hub:ready', () => {
             clearInterval(poll);
             if (!hubPresent) adoptHubMode();
         }, { once: true });
     }
 
-    // Called either immediately (fast path, hub already present at load) or
-    // later once watchForHub() confirms the Hub actually initialized.
-    // Registration itself doesn't depend on this — see registerWithHub(),
-    // called unconditionally at boot — this only removes the now-redundant
-    // standalone buttons.
-    function adoptHubMode() {
-        hubPresent = true;
-        removeStandaloneUI();
-        registerWithHub(); // re-register in case the Hub reloaded/reset its registry
-    }
-
-    function waitForElementToExist(selector) {
-        return new Promise(resolve => {
-            const el = document.querySelector(selector);
-            if (el) return resolve(el);
-            const obs = new MutationObserver(() => {
-                const found = document.querySelector(selector);
-                if (found) {
-                    obs.disconnect();
-                    resolve(found);
-                }
-            });
-            obs.observe(document.documentElement, { childList: true, subtree: true });
-        });
-    }
-
-    function interceptFetch(pathNeedles, onJson) {
-        const needles = Array.isArray(pathNeedles) ? pathNeedles : [pathNeedles];
-        const originalFetch = window.fetch;
-        if (typeof originalFetch !== 'function') return;
-
-        window.fetch = async function() {
-            const response = await originalFetch.apply(this, arguments);
-            try {
-                let url = '';
-                const arg0 = arguments[0];
-                if (typeof arg0 === 'string') url = arg0;
-                else if (arg0 && typeof arg0.url === 'string') url = arg0.url;
-                else url = String(arg0 || '');
-
-                if (needles.some(n => url.includes(n))) {
-                    const clone = response.clone();
-                    clone.json().then(data => {
-                        try { onJson(data); } catch (e) {
-                            console.log('[MobsterCyclistAlert] handler error', e);
-                        }
-                    }).catch(() => {});
-                }
-            } catch (_) {}
-            return response;
-        };
-    }
-
-    // Boot — always start watching for crimes and register with the Hub
-    // unconditionally (the queue tolerates any arrival order). The standalone
-    // buttons are the safe default and are only removed once the Hub is
-    // actually confirmed present, either immediately or via watchForHub().
+    // -------------------------------------------------------------------------
+    // Start
+    // -------------------------------------------------------------------------
     startWatching();
     initStandaloneUI();
     registerWithHub();
+
     if (hubPresent) {
         adoptHubMode();
     } else {
         watchForHub();
     }
 
-    console.log('[MobsterCyclistAlert] v' + SCRIPT_VERSION + ' started · hub=' + hubPresent +
-        ' · mobster=' + settings.mobster.enabled + '/' + settings.mobster.sound +
-        ' · cyclist=' + settings.cyclist.enabled + '/' + settings.cyclist.sound);
+    console.log('[MCA] v' + SCRIPT_VERSION + ' started · hub=' + hubPresent + ' · skinny-only');
 })();
