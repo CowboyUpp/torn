@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.0
+// @version      1.7.1
 // @description  Acoustical + green highlight alerts for pickpocket targets (Mobster, Cyclist, Classy Lady walking, Police Officer running, Postal Worker walking), filterable by gender and build. Standalone or Script Hub.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.7.0';
+    const SCRIPT_VERSION = '1.7.1';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TARGETS = {
@@ -397,7 +397,24 @@
                 padding:8px 10px; border:1px solid var(--mca-border); border-radius:4px;
                 background:var(--mca-row-bg);
             }
-            .mca-section-title { font-size:12px; font-weight:700; margin-bottom:6px; }
+            .mca-section-head {
+                display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;
+            }
+            .mca-section-title { font-size:12px; font-weight:700; }
+            .mca-scroll-hint {
+                display:inline-flex; align-items:center; justify-content:center;
+                width:24px; height:22px; padding:0; border:1px solid var(--mca-border);
+                border-radius:3px; background:var(--mca-input-bg); color:inherit;
+                font-size:12px; line-height:1; cursor:pointer;
+            }
+            .mca-scroll-hint:hover { background:var(--mca-hover); }
+            .mca-scroll-hint[hidden] { display:none; }
+            .mca-table-outer { position:relative; }
+            .mca-table-outer.mca-more::after {
+                content:''; position:absolute; top:0; right:0; bottom:0; width:28px;
+                pointer-events:none;
+                background:linear-gradient(to right, transparent, var(--mca-bg));
+            }
             .mca-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
             .mca-table { min-width:500px; display:flex; flex-direction:column; gap:6px; }
             .mca-row { display:grid; gap:6px; align-items:center; }
@@ -519,6 +536,30 @@
         return wrap;
     }
 
+    // Shows a small arrow (and an edge fade) only while columns are hidden to the right.
+    function attachScrollHint(wrap, outer, btn) {
+        const atEnd = () => wrap.scrollLeft >= (wrap.scrollWidth - wrap.clientWidth) - 2;
+        const update = () => {
+            const overflow = (wrap.scrollWidth - wrap.clientWidth) > 2;
+            const end = atEnd();
+            btn.hidden = !overflow;
+            outer.classList.toggle('mca-more', overflow && !end);
+            btn.textContent = end ? '\u25C2' : '\u25B8';
+            btn.title = end ? 'Scroll back left' : 'Scroll right for more settings';
+            btn.setAttribute('aria-label', btn.title);
+        };
+        btn.addEventListener('click', () => {
+            const max = wrap.scrollWidth - wrap.clientWidth;
+            const left = atEnd() ? 0 : Math.min(max, wrap.scrollLeft + wrap.clientWidth * 0.8);
+            if (typeof wrap.scrollTo === 'function') wrap.scrollTo({ left, behavior: 'smooth' });
+            else wrap.scrollLeft = left;
+        });
+        wrap.addEventListener('scroll', update, { passive: true });
+        if (typeof ResizeObserver === 'function') new ResizeObserver(update).observe(wrap);
+        else window.addEventListener('resize', update);
+        requestAnimationFrame(update);
+    }
+
     // Same field / section definitions the Hub renders, drawn here without the Hub.
     function renderSetupTable(body) {
         const fields = buildPrefFields();
@@ -528,11 +569,20 @@
 
         const sec = document.createElement('div');
         sec.className = 'mca-section';
+        const head0 = document.createElement('div');
+        head0.className = 'mca-section-head';
         const title = document.createElement('div');
         title.className = 'mca-section-title';
         title.textContent = section.title;
-        sec.appendChild(title);
+        const hint = document.createElement('button');
+        hint.type = 'button';
+        hint.className = 'mca-scroll-hint';
+        hint.hidden = true;
+        head0.append(title, hint);
+        sec.appendChild(head0);
 
+        const outer = document.createElement('div');
+        outer.className = 'mca-table-outer';
         const wrap = document.createElement('div');
         wrap.className = 'mca-table-wrap';
         const table = document.createElement('div');
@@ -560,8 +610,10 @@
         });
 
         wrap.appendChild(table);
-        sec.appendChild(wrap);
+        outer.appendChild(wrap);
+        sec.appendChild(outer);
         body.appendChild(sec);
+        attachScrollHint(wrap, outer, hint);
     }
 
     function onSetupKeydown(e) {
