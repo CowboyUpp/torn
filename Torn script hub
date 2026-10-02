@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      4.4.2
+// @version      4.5.0
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -19,7 +19,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.4.2';
+    const HUB_VERSION = '4.5.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -63,7 +63,7 @@
         { id: 596397, name: 'Market Quick Buy', description: 'Moves TornW3B bazaar listings below the native Item Market seller row. Layout only — no purchase clicks.' },
         { id: 581347, name: 'HoF Battle Stat Rank', description: 'Shows your battle stat rank in the Hall of Fame.' },
         { id: 581948, name: 'Crime Chain Tracker', description: 'Tracks your Crimes 2.0 chain, critical fails, and resets.' },
-        { id: 591579, name: 'Mobster & Cyclist Alert', description: 'Beeps when a Mobster or Cyclist crime becomes available.' },
+        { id: 591579, name: 'Mobster & Cyclist Alert', description: 'Beeps when a pickpocketing target you choose becomes available, filtered by gender, status and build.' },
         { id: 589775, name: 'OpenMarket', description: 'Overlays item quality % and bonus info on the Item Market, Auction House, and Bazaar.' },
         { id: 587089, name: 'Cracking Heat Badge', description: 'Shows a live heat badge while cracking.' },
         { id: 585434, name: 'Item Market Portfolio', description: 'Tracks the value of your Item Market listings over time.' },
@@ -1038,17 +1038,17 @@
         else window.addEventListener('resize', update);
         requestAnimationFrame(update);
     }
- 
+
     // Table section: { table:true, title, columns:[labels], widths:'css grid template',
     //                  rows:[[fieldKey, fieldKey, ...], ...] }  one key per column.
     function renderPrefsTable(body, script, section, fieldByKey, usedKeys, refreshStatus) {
         const rows = Array.isArray(section.rows) ? section.rows : [];
         const cols = Array.isArray(section.columns) ? section.columns : [];
         const template = section.widths || cols.map(() => '1fr').join(' ');
- 
+
         const sec = document.createElement('div');
         sec.className = 'tsh-pref-section tsh-pref-section-row';
- 
+
         const headRow = document.createElement('div');
         headRow.className = 'tsh-pref-section-head';
         const title = document.createElement('div');
@@ -1060,14 +1060,15 @@
         hint.hidden = true;
         headRow.append(title, hint);
         sec.appendChild(headRow);
- 
+
         const outer = document.createElement('div');
         outer.className = 'tsh-table-outer';
         const wrap = document.createElement('div');
         wrap.className = 'tsh-table-wrap';
         const table = document.createElement('div');
         table.className = 'tsh-table';
- 
+        if (section.minWidth) table.style.minWidth = section.minWidth;
+
         const head = document.createElement('div');
         head.className = 'tsh-table-row tsh-table-head';
         head.style.gridTemplateColumns = template;
@@ -1077,7 +1078,7 @@
             head.appendChild(cell);
         });
         table.appendChild(head);
- 
+
         rows.forEach(keys => {
             if (!Array.isArray(keys)) return;
             const row = document.createElement('div');
@@ -1091,7 +1092,7 @@
             });
             table.appendChild(row);
         });
- 
+
         wrap.appendChild(table);
         outer.appendChild(wrap);
         sec.appendChild(outer);
@@ -1144,6 +1145,62 @@
             sec.appendChild(grid);
             body.appendChild(sec);
         }
+    }
+
+function closeMultiPopover() {
+        const p = document.getElementById('tsh-multi-pop');
+        if (p) {
+            if (p._cleanup) p._cleanup();
+            p.remove();
+        }
+    }
+
+    // Checkbox list popover anchored under a button (the "multi" field type).
+    function openMultiPopover(anchor, options, getSelected, onToggle) {
+        closeMultiPopover();
+        const pop = document.createElement('div');
+        pop.id = 'tsh-multi-pop';
+        pop.className = 'tsh-multi-pop';
+        const sel = new Set(getSelected());
+        options.forEach(opt => {
+            const row = document.createElement('label');
+            row.className = 'tsh-multi-row';
+            const text = document.createElement('span');
+            text.textContent = opt.label;
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = sel.has(opt.value);
+            cb.addEventListener('change', () => onToggle(opt.value, cb.checked));
+            row.append(text, cb);
+            pop.appendChild(row);
+        });
+        (anchor.closest('.tsh-dashboard') || document.body).appendChild(pop);
+
+        const r = anchor.getBoundingClientRect();
+        const w = Math.max(190, r.width);
+        const left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - w - 8));
+        let top = r.bottom + 4;
+        const h = pop.offsetHeight;
+        if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
+        pop.style.minWidth = w + 'px';
+        pop.style.left = left + 'px';
+        pop.style.top = top + 'px';
+
+        const onDown = e => {
+            if (!pop.contains(e.target) && !anchor.contains(e.target)) closeMultiPopover();
+        };
+        const onKey = e => {
+            if (e.key === 'Escape') {
+                e.stopPropagation();
+                closeMultiPopover();
+            }
+        };
+        pop._cleanup = () => {
+            document.removeEventListener('pointerdown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+        };
+        document.addEventListener('pointerdown', onDown, true);
+        document.addEventListener('keydown', onKey, true);
     }
 
     function createPrefField(script, field, onAfterSave, compact) {
@@ -1236,9 +1293,41 @@
                 input.setAttribute('aria-pressed', script.prefs.values[field.key] ? 'true' : 'false');
                 triggerSave();
             });
+        } else if (field.type === 'multi' && Array.isArray(field.options)) {
+            input = document.createElement('button');
+            input.type = 'button';
+            input.className = 'tsh-pref-multi';
+            const getSel = () => (Array.isArray(script.prefs.values[field.key]) ? script.prefs.values[field.key] : []);
+            const paint = () => {
+                const sel = getSel().filter(v => field.options.some(o => o.value === v));
+                let text = field.emptyLabel || 'Any';
+                if (sel.length === 1) {
+                    const o = field.options.find(x => x.value === sel[0]);
+                    text = o ? o.label : sel[0];
+                } else if (sel.length > 1) {
+                    text = sel.length + ' selected';
+                }
+                input.textContent = text + ' \u25BE';
+                input.title = field.hint || '';
+            };
+            paint();
+            input.addEventListener('click', () => {
+                if (document.getElementById('tsh-multi-pop')) { closeMultiPopover(); return; }
+                openMultiPopover(input, field.options, getSel, (value, on) => {
+                    const next = getSel().filter(v => v !== value);
+                    if (on) next.push(value);
+                    script.prefs.values[field.key] = next;
+                    paint();
+                    triggerSave();
+                });
+            });
         } else if (field.type === 'select' && Array.isArray(field.options)) {
             input = document.createElement('select');
             input.className = 'tsh-pref-select';
+            if (field.disabled) {
+                input.disabled = true;
+                if (field.hint) input.title = field.hint;
+            }
             field.options.forEach(opt => {
                 const o = document.createElement('option');
                 o.value = opt.value !== undefined ? opt.value : opt;
@@ -2085,7 +2174,7 @@
                 font-size:10px; opacity:.5; text-align:center;
             }
 
-            .tsh-dash-panel.tsh-dash-wide { width:min(100%, 600px); }
+            .tsh-dash-panel.tsh-dash-wide { width:min(100%, 720px); }
             .tsh-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
             .tsh-pref-section-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
             .tsh-pref-section-head .tsh-pref-section-title { margin-bottom:0; }
@@ -2095,7 +2184,8 @@
                 border-radius:3px; background:var(--tsh-input-bg,#fff); color:inherit;
                 font-size:12px; line-height:1; cursor:pointer;
             }
-            .tsh-scroll-hint:hover { background:var(--tsh-hover,rgba(0,0,0,.06)); }
+            .tsh-scroll-hint { background:#4e8ac7; border-color:#4e8ac7; color:#fff; }
+            .tsh-scroll-hint:hover { filter:brightness(.92); } }
             .tsh-scroll-hint[hidden] { display:none; }
             .tsh-table-outer { position:relative; }
             .tsh-table-outer.tsh-more::after {
@@ -2104,7 +2194,7 @@
                 background:linear-gradient(to right, transparent, var(--tsh-bg,#f5f5f5));
             }
             .tsh-table { min-width:500px; display:flex; flex-direction:column; gap:6px; }
-            .tsh-table-row { display:grid; gap:6px; align-items:center; }
+            .tsh-table-row { display:grid; gap:4px; align-items:center; }
             .tsh-table-head {
                 font-size:10px; font-weight:700; opacity:.6;
                 padding-bottom:4px; border-bottom:1px solid var(--tsh-border,#bbb);
@@ -2118,6 +2208,27 @@
             .tsh-table input[type=number] { -moz-appearance:textfield; }
             .tsh-table input[type=number]::-webkit-inner-spin-button,
             .tsh-table input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+
+            .tsh-pref-multi {
+                width:100%; box-sizing:border-box; padding:3px 4px; min-height:26px;
+                text-align:left; border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-input-bg,#fff); color:var(--tsh-text,#222); font-size:12px;
+                cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+            }
+            .tsh-pref-select:disabled { opacity:.6; cursor:default; }
+            .tsh-multi-pop {
+                position:fixed; z-index:2147483647; padding:4px;
+                background:var(--tsh-bg,#f5f5f5); color:var(--tsh-text,#222);
+                border:1px solid var(--tsh-border,#bbb); border-radius:6px;
+                box-shadow:0 8px 24px rgba(0,0,0,.35);
+                font-family:Arial,Helvetica,sans-serif; font-size:12px;
+            }
+            .tsh-multi-row {
+                display:flex; align-items:center; justify-content:space-between; gap:12px;
+                padding:7px 8px; border-radius:4px; cursor:pointer;
+            }
+            .tsh-multi-row:hover { background:var(--tsh-hover,rgba(0,0,0,.08)); }
+            .tsh-multi-row input { width:16px; height:16px; margin:0; cursor:pointer; }
 
             .tsh-lib-wrap { display:flex; flex-direction:column; gap:10px; }
             .tsh-lib-section-title {
