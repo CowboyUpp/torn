@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      4.4.2
+// @version      4.4.1
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -19,7 +19,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.4.2';
+    const HUB_VERSION = '4.4.0';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -894,4 +894,1585 @@
         scripts.forEach(script => {
             const row = document.createElement('button');
             row.type = 'button';
-            row.className = 'tsh-prefs
+            row.className = 'tsh-prefs-row';
+            row.innerHTML = `
+                <span class="tsh-prefs-row-name">${escapeHtml(script.name)}</span>
+                <span class="tsh-prefs-row-action">Configure</span>
+            `;
+            row.addEventListener('click', () => {
+                currentPrefsScriptId = script.id;
+                renderPrefsPanel(container);
+            });
+            list.appendChild(row);
+        });
+
+        container.appendChild(list);
+    }
+
+    function renderScriptPrefsDetail(container, scriptId) {
+        const script = registry.get(scriptId);
+        if (!script || !script.prefs) {
+            currentPrefsScriptId = null;
+            renderPrefsPanel(container);
+            return;
+        }
+
+        container.innerHTML = '';
+
+        const widePanel = container.closest('.tsh-dash-panel');
+        if (widePanel) {
+            widePanel.classList.toggle('tsh-dash-wide',
+                Array.isArray(script.prefs.sections) && script.prefs.sections.some(s => s && s.table));
+        }
+
+        const header = document.createElement('div');
+        header.className = 'tsh-prefs-detail-header';
+        header.innerHTML = `
+            <button type="button" class="tsh-prefs-back">← Back</button>
+            <span class="tsh-prefs-detail-title">${escapeHtml(script.name)}</span>
+        `;
+        header.querySelector('.tsh-prefs-back').addEventListener('click', () => {
+            currentPrefsScriptId = null;
+            renderPrefsPanel(container);
+        });
+        container.appendChild(header);
+
+        let statusEl = null;
+        if (typeof script.status === 'function') {
+            try {
+                const statusText = script.status();
+                if (statusText) {
+                    statusEl = document.createElement('div');
+                    statusEl.className = 'tsh-prefs-status';
+                    statusEl.textContent = statusText;
+                    container.appendChild(statusEl);
+                }
+            } catch (e) {}
+        }
+
+        const refreshStatus = () => {
+            if (!statusEl || typeof script.status !== 'function') return;
+            try {
+                const text = script.status();
+                if (text) statusEl.textContent = text;
+            } catch (e) {}
+        };
+
+        const body = document.createElement('div');
+        body.className = 'tsh-prefs-detail-body';
+
+        const fields = script.prefs.fields || [];
+        const fieldByKey = new Map(fields.map(f => [f.key, f]));
+        const sections = Array.isArray(script.prefs.sections) ? script.prefs.sections : null;
+
+        if (sections && sections.length) {
+            // Sectioned layout: each section is a titled row of its fields (in order).
+            // Fields not listed in any section fall back to legacy type groups below.
+            const usedKeys = new Set();
+            sections.forEach(section => {
+                if (!section) return;
+                if (section.table) {
+                    renderPrefsTable(body, script, section, fieldByKey, usedKeys, refreshStatus);
+                    return;
+                }
+
+                const keys = Array.isArray(section.keys) ? section.keys
+                    : (Array.isArray(section.fields) ? section.fields : []);
+                const secFields = keys.map(k => fieldByKey.get(k)).filter(Boolean);
+                if (!secFields.length) return;
+                secFields.forEach(f => usedKeys.add(f.key));
+
+                const sec = document.createElement('div');
+                sec.className = 'tsh-pref-section tsh-pref-section-row';
+                if (section.title) {
+                    const title = document.createElement('div');
+                    title.className = 'tsh-pref-section-title';
+                    title.textContent = section.title;
+                    sec.appendChild(title);
+                }
+                const row = document.createElement('div');
+                row.className = 'tsh-pref-row';
+                secFields.forEach(f => row.appendChild(createPrefField(script, f, refreshStatus)));
+                sec.appendChild(row);
+                body.appendChild(sec);
+            });
+
+            const leftover = fields.filter(f => !usedKeys.has(f.key));
+            if (leftover.length) {
+                appendLegacyPrefGroups(body, leftover, script, refreshStatus);
+            }
+        } else {
+            appendLegacyPrefGroups(body, fields, script, refreshStatus);
+        }
+
+        container.appendChild(body);
+
+        const footer = document.createElement('div');
+        footer.className = 'tsh-prefs-footer';
+        footer.textContent = 'Changes are saved automatically.';
+        container.appendChild(footer);
+    }
+
+    // Table section: { table:true, title, columns:[labels], widths:'css grid template',
+    //                  rows:[[fieldKey, fieldKey, ...], ...] }  one key per column.
+    // Arrow + edge fade, shown only while columns are hidden to the right.
+    function attachScrollHint(wrap, outer, btn) {
+        const atEnd = () => wrap.scrollLeft >= (wrap.scrollWidth - wrap.clientWidth) - 2;
+        const update = () => {
+            const overflow = (wrap.scrollWidth - wrap.clientWidth) > 2;
+            const end = atEnd();
+            btn.hidden = !overflow;
+            outer.classList.toggle('tsh-more', overflow && !end);
+            btn.textContent = end ? '\u25C2' : '\u25B8';
+            btn.title = end ? 'Scroll back left' : 'Scroll right for more settings';
+            btn.setAttribute('aria-label', btn.title);
+        };
+        btn.addEventListener('click', () => {
+            const max = wrap.scrollWidth - wrap.clientWidth;
+            const left = atEnd() ? 0 : Math.min(max, wrap.scrollLeft + wrap.clientWidth * 0.8);
+            if (typeof wrap.scrollTo === 'function') wrap.scrollTo({ left, behavior: 'smooth' });
+            else wrap.scrollLeft = left;
+        });
+        wrap.addEventListener('scroll', update, { passive: true });
+        if (typeof ResizeObserver === 'function') new ResizeObserver(update).observe(wrap);
+        else window.addEventListener('resize', update);
+        requestAnimationFrame(update);
+    }
+ 
+    // Table section: { table:true, title, columns:[labels], widths:'css grid template',
+    //                  rows:[[fieldKey, fieldKey, ...], ...] }  one key per column.
+    function renderPrefsTable(body, script, section, fieldByKey, usedKeys, refreshStatus) {
+        const rows = Array.isArray(section.rows) ? section.rows : [];
+        const cols = Array.isArray(section.columns) ? section.columns : [];
+        const template = section.widths || cols.map(() => '1fr').join(' ');
+ 
+        const sec = document.createElement('div');
+        sec.className = 'tsh-pref-section tsh-pref-section-row';
+ 
+        const headRow = document.createElement('div');
+        headRow.className = 'tsh-pref-section-head';
+        const title = document.createElement('div');
+        title.className = 'tsh-pref-section-title';
+        title.textContent = section.title || '';
+        const hint = document.createElement('button');
+        hint.type = 'button';
+        hint.className = 'tsh-scroll-hint';
+        hint.hidden = true;
+        headRow.append(title, hint);
+        sec.appendChild(headRow);
+ 
+        const outer = document.createElement('div');
+        outer.className = 'tsh-table-outer';
+        const wrap = document.createElement('div');
+        wrap.className = 'tsh-table-wrap';
+        const table = document.createElement('div');
+        table.className = 'tsh-table';
+ 
+        const head = document.createElement('div');
+        head.className = 'tsh-table-row tsh-table-head';
+        head.style.gridTemplateColumns = template;
+        cols.forEach(c => {
+            const cell = document.createElement('span');
+            cell.textContent = c;
+            head.appendChild(cell);
+        });
+        table.appendChild(head);
+ 
+        rows.forEach(keys => {
+            if (!Array.isArray(keys)) return;
+            const row = document.createElement('div');
+            row.className = 'tsh-table-row';
+            row.style.gridTemplateColumns = template;
+            keys.forEach(k => {
+                const f = fieldByKey.get(k);
+                if (!f) { row.appendChild(document.createElement('span')); return; }
+                usedKeys.add(k);
+                row.appendChild(createPrefField(script, f, refreshStatus, true));
+            });
+            table.appendChild(row);
+        });
+ 
+        wrap.appendChild(table);
+        outer.appendChild(wrap);
+        sec.appendChild(outer);
+        body.appendChild(sec);
+        attachScrollHint(wrap, outer, hint);
+    }
+
+    function appendLegacyPrefGroups(body, fields, script, refreshStatus) {
+        const toggles = fields.filter(f => f.type === 'toggle' || f.type === 'checkbox');
+        const numbers = fields.filter(f => f.type === 'number');
+        const buttons = fields.filter(f => f.type === 'button');
+        const others  = fields.filter(f => f.type !== 'toggle' && f.type !== 'checkbox' && f.type !== 'number' && f.type !== 'button');
+
+        if (others.length) {
+            const sec = document.createElement('div');
+            sec.className = 'tsh-pref-section';
+            const stack = document.createElement('div');
+            stack.className = 'tsh-pref-stack';
+            others.forEach(f => stack.appendChild(createPrefField(script, f, refreshStatus)));
+            sec.appendChild(stack);
+            body.appendChild(sec);
+        }
+
+        if (buttons.length) {
+            const sec = document.createElement('div');
+            sec.className = 'tsh-pref-section';
+            const row = document.createElement('div');
+            row.className = 'tsh-pref-btn-row';
+            buttons.forEach(f => row.appendChild(createPrefField(script, f, refreshStatus)));
+            sec.appendChild(row);
+            body.appendChild(sec);
+        }
+
+        if (toggles.length) {
+            const sec = document.createElement('div');
+            sec.className = 'tsh-pref-section';
+            const grid = document.createElement('div');
+            grid.className = 'tsh-pref-toggles';
+            toggles.forEach(f => grid.appendChild(createPrefField(script, f, refreshStatus)));
+            sec.appendChild(grid);
+            body.appendChild(sec);
+        }
+
+        if (numbers.length) {
+            const sec = document.createElement('div');
+            sec.className = 'tsh-pref-section';
+            const grid = document.createElement('div');
+            grid.className = 'tsh-pref-grid';
+            numbers.forEach(f => grid.appendChild(createPrefField(script, f, refreshStatus)));
+            sec.appendChild(grid);
+            body.appendChild(sec);
+        }
+    }
+
+    function createPrefField(script, field, onAfterSave, compact) {
+        const wrap = document.createElement('div');
+        wrap.className = 'tsh-pref-field';
+
+        if (field.type === 'label') {
+            const txt = document.createElement('span');
+            txt.className = 'tsh-pref-static';
+            txt.textContent = field.text || field.label || field.key;
+            wrap.appendChild(txt);
+            return wrap;
+        }
+
+        const labelRow = document.createElement('div');
+        labelRow.className = 'tsh-pref-label-row';
+
+        const label = document.createElement('span');
+        label.className = 'tsh-pref-label';
+        label.textContent = field.label || field.key;
+        if (field.hint) {
+            label.title = field.hint;
+            label.classList.add('tsh-has-hint');
+        }
+        labelRow.appendChild(label);
+
+        if (field.hint) {
+            const hint = document.createElement('span');
+            hint.className = 'tsh-pref-hint';
+            hint.textContent = 'ⓘ';
+            hint.title = field.hint;
+            labelRow.appendChild(hint);
+        }
+
+        if (field.type !== 'button' && !compact) {
+            wrap.appendChild(labelRow);
+        }
+
+        let input;
+        const triggerSave = () => {
+            if (script.prefs.onSave) {
+                const result = script.prefs.onSave(script.prefs.values);
+                if (result && typeof result.then === 'function') {
+                    result.finally(() => { if (onAfterSave) onAfterSave(); });
+                } else if (onAfterSave) {
+                    onAfterSave();
+                }
+            } else if (onAfterSave) {
+                onAfterSave();
+            }
+        };
+
+        if (field.type === 'button') {
+            input = document.createElement('button');
+            input.type = 'button';
+            input.className = 'tsh-pref-btn';
+            input.textContent = field.icon || field.label || field.key;
+            input.title = field.hint || field.label || '';
+            input.addEventListener('click', () => {
+                if (typeof field.onClick === 'function') {
+                    try { field.onClick(); } catch (e) { console.error(e); }
+                } else if (field.url) {
+                    window.open(field.url, '_blank', 'noopener');
+                }
+            });
+            wrap.appendChild(input);
+            return wrap;
+        }
+
+        if (field.type === 'check') {
+            input = document.createElement('input');
+            input.type = 'checkbox';
+            input.className = 'tsh-pref-check';
+            input.checked = !!script.prefs.values[field.key];
+            if (field.hint) input.title = field.hint;
+            input.addEventListener('change', () => {
+                script.prefs.values[field.key] = input.checked;
+                triggerSave();
+            });
+        } else if (field.type === 'toggle' || field.type === 'checkbox') {
+            input = document.createElement('button');
+            input.type = 'button';
+            input.className = 'tsh-pref-toggle' + (script.prefs.values[field.key] ? ' active' : '');
+            input.textContent = script.prefs.values[field.key] ? 'On' : 'Off';
+            input.setAttribute('aria-pressed', script.prefs.values[field.key] ? 'true' : 'false');
+            input.addEventListener('click', () => {
+                script.prefs.values[field.key] = !script.prefs.values[field.key];
+                input.textContent = script.prefs.values[field.key] ? 'On' : 'Off';
+                input.classList.toggle('active', script.prefs.values[field.key]);
+                input.setAttribute('aria-pressed', script.prefs.values[field.key] ? 'true' : 'false');
+                triggerSave();
+            });
+        } else if (field.type === 'select' && Array.isArray(field.options)) {
+            input = document.createElement('select');
+            input.className = 'tsh-pref-select';
+            field.options.forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.value !== undefined ? opt.value : opt;
+                o.textContent = opt.label !== undefined ? opt.label : opt;
+                if (String(script.prefs.values[field.key]) === String(o.value)) o.selected = true;
+                input.appendChild(o);
+            });
+            input.addEventListener('change', () => {
+                script.prefs.values[field.key] = input.value;
+                triggerSave();
+            });
+        } else {
+            input = document.createElement('input');
+            input.className = 'tsh-pref-input';
+            input.type = field.type === 'number' ? 'number' : (field.type === 'password' ? 'password' : 'text');
+            if (field.min !== undefined) input.min = field.min;
+            if (field.max !== undefined) input.max = field.max;
+            if (field.step !== undefined) input.step = field.step;
+            if (field.placeholder) input.placeholder = field.placeholder;
+            input.value = script.prefs.values[field.key] ?? '';
+            input.addEventListener('change', () => {
+                let val = input.value;
+                if (field.type === 'number') {
+                    val = Number(val);
+                    if (!Number.isFinite(val)) return;
+                    if (field.min !== undefined) val = Math.max(field.min, val);
+                    if (field.max !== undefined) val = Math.min(field.max, val);
+                }
+                // Password fields: an empty change must not wipe a previously
+                // known value in the shared prefs.values snapshot. Scripts may
+                // receive the whole snapshot on every save; blanking the key
+                // here would look like "user cleared the secret".
+                if (field.type === 'password' && val === '' && script.prefs.values[field.key]) {
+                    triggerSave();
+                    return;
+                }
+                script.prefs.values[field.key] = val;
+                triggerSave();
+            });
+        }
+
+        wrap.appendChild(input);
+        return wrap;
+    }
+
+    // ----- Library -----
+    function normalizeScriptName(name) {
+        return String(name || '')
+            .toLowerCase()
+            .replace(/^torn:\s*/i, '')
+            .replace(/[^a-z0-9]+/g, ' ')
+            .trim();
+    }
+
+    function namesMatch(a, b) {
+        return normalizeScriptName(a) === normalizeScriptName(b);
+    }
+
+    function renderLibraryPanel(container) {
+        if (!container) return;
+        container.innerHTML = '';
+
+        const known = getKnownScripts();
+        const activeScripts = Array.from(registry.values()).filter(s => s.active);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'tsh-lib-wrap';
+
+        // ---- Hub-compatible Library section ----
+        const introTitle = document.createElement('div');
+        introTitle.className = 'tsh-lib-section-title';
+        introTitle.textContent = 'Hub-Compatible Scripts';
+        wrap.appendChild(introTitle);
+
+        const intro = document.createElement('p');
+        intro.className = 'tsh-lib-intro';
+        intro.textContent = 'Scripts built to work with Script Hub. Install any of these and they\u2019ll register here automatically.';
+        wrap.appendChild(intro);
+
+        const list = document.createElement('div');
+        list.className = 'tsh-lib-list';
+
+        LIBRARY_SCRIPTS.forEach(entry => {
+            const knownMatch = known.find(k => namesMatch(k.name, entry.name));
+            const activeMatch = activeScripts.find(s => namesMatch(s.name, entry.name));
+            const isActive = !!activeMatch;
+
+            const row = document.createElement('div');
+            row.className = 'tsh-lib-row';
+
+            const info = document.createElement('div');
+            info.className = 'tsh-lib-info';
+
+            const nameRow = document.createElement('div');
+            nameRow.className = 'tsh-lib-name-row';
+
+            const name = document.createElement('span');
+            name.className = 'tsh-lib-name';
+            name.textContent = entry.name;
+            nameRow.appendChild(name);
+
+            const versionLabel = (activeMatch && activeMatch.version) || (knownMatch && knownMatch.version);
+            if (versionLabel) {
+                const ver = document.createElement('span');
+                ver.className = 'tsh-lib-version';
+                ver.textContent = 'v' + versionLabel;
+                nameRow.appendChild(ver);
+            }
+
+            const badge = document.createElement('span');
+            badge.className = 'tsh-lib-badge' + (isActive ? ' tsh-lib-badge-active' : (knownMatch ? ' tsh-lib-badge-known' : ''));
+            badge.textContent = isActive ? 'Active' : (knownMatch ? 'Installed' : 'Available');
+            nameRow.appendChild(badge);
+
+            info.appendChild(nameRow);
+
+            const desc = document.createElement('div');
+            desc.className = 'tsh-lib-desc';
+            desc.textContent = entry.description;
+            info.appendChild(desc);
+
+            row.appendChild(info);
+
+            const install = document.createElement('a');
+            install.className = 'tsh-lib-install';
+            install.href = `https://greasyfork.org/en/scripts/${entry.id}`;
+            install.target = '_blank';
+            install.rel = 'noopener';
+            install.textContent = knownMatch ? 'View' : 'Install';
+            row.appendChild(install);
+
+            list.appendChild(row);
+        });
+
+        wrap.appendChild(list);
+
+        // ---- Watching (third-party) section ----
+        const watchTitle = document.createElement('div');
+        watchTitle.className = 'tsh-lib-section-title';
+        watchTitle.textContent = 'Watching';
+        wrap.appendChild(watchTitle);
+
+        const watchIntroRow = document.createElement('div');
+        watchIntroRow.className = 'tsh-watch-intro-row';
+
+        const watchIntro = document.createElement('p');
+        watchIntro.className = 'tsh-lib-intro';
+        watchIntro.style.margin = '0';
+        watchIntro.textContent = 'Third-party scripts you\u2019re tracking. Checked periodically against GreasyFork.';
+        watchIntroRow.appendChild(watchIntro);
+
+        const watchList = getWatchList();
+
+        if (watchList.length) {
+            const checkAllBtn = document.createElement('button');
+            checkAllBtn.type = 'button';
+            checkAllBtn.className = 'tsh-lib-check-all';
+            checkAllBtn.textContent = 'Check all';
+            checkAllBtn.addEventListener('click', async () => {
+                checkAllBtn.disabled = true;
+                checkAllBtn.textContent = 'Checking…';
+                await checkAllWatchEntries({ force: true });
+                checkAllBtn.disabled = false;
+                checkAllBtn.textContent = 'Check all';
+                renderLibraryPanel(container);
+                updateButtonState();
+            });
+            watchIntroRow.appendChild(checkAllBtn);
+        }
+
+        wrap.appendChild(watchIntroRow);
+
+        // ---- add-by-ID form ----
+        const addForm = document.createElement('div');
+        addForm.className = 'tsh-watch-add';
+
+        const addInput = document.createElement('input');
+        addInput.type = 'text';
+        addInput.className = 'tsh-watch-add-input';
+        addInput.placeholder = 'GreasyFork script ID or link…';
+
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'tsh-watch-add-btn';
+        addBtn.textContent = 'Add';
+
+        addForm.append(addInput, addBtn);
+        wrap.appendChild(addForm);
+
+        const addStatus = document.createElement('div');
+        addStatus.className = 'tsh-watch-add-status';
+        wrap.appendChild(addStatus);
+
+        const submitAdd = () => {
+            addWatchEntryFromInput(addInput.value, {
+                statusEl: addStatus,
+                inputEl: addInput,
+                addBtn,
+                onDone: () => {
+                    renderLibraryPanel(container);
+                    updateButtonState();
+                }
+            });
+        };
+
+        addBtn.addEventListener('click', submitAdd);
+        addInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitAdd();
+            }
+        });
+
+        // ---- watched entries ----
+        if (watchList.length) {
+            const listEl = document.createElement('div');
+            listEl.className = 'tsh-lib-list';
+            listEl.style.marginTop = '6px';
+
+            const state = getWatchState();
+
+            watchList.forEach(entry => {
+                const s = state[entry.id] || {};
+                const hasUpdate = !!(s.version && s.seenVersion && s.version !== s.seenVersion);
+
+                const row = document.createElement('div');
+                row.className = 'tsh-lib-row' + (hasUpdate ? ' tsh-watch-row-updated' : '');
+
+                const info = document.createElement('div');
+                info.className = 'tsh-lib-info';
+
+                const nameRow = document.createElement('div');
+                nameRow.className = 'tsh-lib-name-row';
+
+                const name = document.createElement('span');
+                name.className = 'tsh-lib-name';
+                name.textContent = entry.name;
+                nameRow.appendChild(name);
+
+                if (s.version) {
+                    const ver = document.createElement('span');
+                    ver.className = 'tsh-lib-version';
+                    ver.textContent = 'v' + s.version;
+                    nameRow.appendChild(ver);
+                }
+
+                const badge = document.createElement('span');
+                badge.className = 'tsh-lib-badge' + (hasUpdate ? ' tsh-watch-badge-update' : '');
+                badge.textContent = hasUpdate ? 'Update' : (s.version ? 'Up to date' : 'Not checked yet');
+                nameRow.appendChild(badge);
+
+                info.appendChild(nameRow);
+
+                if (entry.author) {
+                    const desc = document.createElement('div');
+                    desc.className = 'tsh-lib-desc';
+                    desc.textContent = `by ${entry.author}`;
+                    info.appendChild(desc);
+                }
+
+                row.appendChild(info);
+
+                if (s.lastChecked) {
+                    const checked = document.createElement('span');
+                    checked.className = 'tsh-watch-checked';
+                    checked.textContent = relativeTime(s.lastChecked);
+                    row.appendChild(checked);
+                }
+
+                const view = document.createElement('a');
+                view.className = 'tsh-lib-install';
+                view.href = `https://greasyfork.org/en/scripts/${entry.id}`;
+                view.target = '_blank';
+                view.rel = 'noopener';
+                view.textContent = 'View';
+                view.addEventListener('click', () => {
+                    if (hasUpdate) {
+                        setWatchEntry(entry.id, { seenVersion: s.version });
+                        updateButtonState();
+                    }
+                });
+                row.appendChild(view);
+
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.className = 'tsh-watch-remove';
+                remove.title = `Remove ${entry.name} from watchlist`;
+                remove.textContent = '×';
+                remove.addEventListener('click', () => {
+                    removeWatchEntry(entry.id);
+                    renderLibraryPanel(container);
+                    updateButtonState();
+                });
+                row.appendChild(remove);
+
+                listEl.appendChild(row);
+            });
+
+            wrap.appendChild(listEl);
+
+            // background throttled refresh whenever this tab renders
+            checkAllWatchEntries().then(() => updateButtonState());
+        } else {
+            const empty = document.createElement('div');
+            empty.className = 'tsh-dash-empty';
+            empty.style.padding = '14px 0';
+            empty.innerHTML = 'Nothing on your watchlist yet.<br><span>Paste a GreasyFork link or script ID above to start tracking one.</span>';
+            wrap.appendChild(empty);
+        }
+
+        const contact = document.createElement('div');
+        contact.className = 'tsh-lib-contact';
+        contact.innerHTML = `Questions or bug reports? <a href="${CONTACT_URL}" target="_blank" rel="noopener">Message cowboyup on Torn</a>.`;
+        wrap.appendChild(contact);
+
+        container.appendChild(wrap);
+    }
+
+    // ----- Debug (lightweight) -----
+    function safeScriptStatus(script) {
+        try {
+            if (typeof script.status === 'function') return String(script.status() || '');
+        } catch (err) {
+            return `(status error: ${err && err.message ? err.message : 'unknown'})`;
+        }
+        return '';
+    }
+
+    function buildScriptDiagnostic(script) {
+        const prefKeys = script.prefs && Array.isArray(script.prefs.fields)
+            ? script.prefs.fields.map(f => f.key)
+            : [];
+        // Never dump secret values — only whether a key looks set
+        const valueFlags = {};
+        if (script.prefs && script.prefs.values && typeof script.prefs.values === 'object') {
+            Object.keys(script.prefs.values).forEach(key => {
+                const val = script.prefs.values[key];
+                if (val == null || val === '') valueFlags[key] = 'empty';
+                else if (typeof val === 'boolean' || typeof val === 'number') valueFlags[key] = val;
+                else if (/key|token|secret|password/i.test(key)) valueFlags[key] = 'set';
+                else valueFlags[key] = 'set';
+            });
+        }
+        return {
+            id: script.id,
+            name: script.name,
+            version: script.version || '',
+            active: !!script.active,
+            order: script.order,
+            hasOpen: typeof script.open === 'function',
+            hasClose: typeof script.close === 'function',
+            hasStatus: typeof script.status === 'function',
+            status: safeScriptStatus(script),
+            prefKeys,
+            valueFlags,
+            page: location.href,
+            hubVersion: HUB_VERSION,
+            checkedAt: new Date().toISOString()
+        };
+    }
+
+    function buildDiagnosticsPayload() {
+        const known = getKnownScripts();
+        const live = Array.from(registry.values()).map(s => buildScriptDiagnostic(s));
+        return {
+            hubVersion: HUB_VERSION,
+            page: location.href,
+            uiEnabled: isUIEnabled(),
+            registeredCount: live.length,
+            knownCount: known.length,
+            registered: live,
+            known,
+            watchList: getWatchList(),
+            watchState: getWatchState(),
+            recentEvents: debugLog.slice()
+        };
+    }
+
+    async function copyText(text, button, okLabel) {
+        try {
+            await navigator.clipboard.writeText(text);
+            if (button) {
+                const prev = button.textContent;
+                button.textContent = okLabel || 'Copied';
+                setTimeout(() => { button.textContent = prev; }, 1500);
+            }
+        } catch (_) {
+            window.prompt('Copy:', text);
+        }
+    }
+
+    function renderDebugPanel(container) {
+        if (!container) return;
+        container.innerHTML = '';
+
+        const wrap = document.createElement('div');
+        wrap.className = 'tsh-debug-wrap';
+
+        const intro = document.createElement('p');
+        intro.className = 'tsh-debug-intro';
+        intro.textContent = 'Lightweight diagnostics for Hub-aware scripts. Start here when something looks wrong.';
+        wrap.appendChild(intro);
+
+        const meta = document.createElement('div');
+        meta.className = 'tsh-debug-meta';
+        meta.textContent = `Hub v${HUB_VERSION} · ${registry.size} registered · ${getKnownScripts().length} known · ${getWatchList().length} watched · UI ${isUIEnabled() ? 'on' : 'off'}`;
+        wrap.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'tsh-debug-actions';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'tsh-debug-btn';
+        copyBtn.textContent = 'Copy diagnostics';
+        copyBtn.addEventListener('click', () => {
+            copyText(JSON.stringify(buildDiagnosticsPayload(), null, 2), copyBtn);
+        });
+        actions.appendChild(copyBtn);
+
+        const pingBtn = document.createElement('button');
+        pingBtn.type = 'button';
+        pingBtn.className = 'tsh-debug-btn';
+        pingBtn.textContent = 'Ping scripts';
+        pingBtn.title = 'Re-dispatch hub ready so scripts can re-register';
+        pingBtn.addEventListener('click', () => {
+            pushDebugLog('ping: torn-script-hub:ready');
+            document.dispatchEvent(new CustomEvent(EVENTS.READY));
+            renderDebugPanel(container);
+        });
+        actions.appendChild(pingBtn);
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'tsh-debug-btn tsh-debug-btn-muted';
+        clearBtn.textContent = 'Clear known list';
+        clearBtn.title = 'Removes saved known-scripts cache (Library installed flags). Live registry is unchanged.';
+        clearBtn.addEventListener('click', () => {
+            if (!confirm('Clear Hub known-scripts cache? Library “Installed” flags reset until scripts register again.')) return;
+            try { localStorage.removeItem(KNOWN_SCRIPTS_KEY); } catch (_) {}
+            pushDebugLog('cleared known-scripts cache');
+            renderDebugPanel(container);
+            renderLibraryPanel(document.querySelector('[data-panel="library"]'));
+        });
+        actions.appendChild(clearBtn);
+
+        wrap.appendChild(actions);
+
+        const listTitle = document.createElement('div');
+        listTitle.className = 'tsh-debug-section-title';
+        listTitle.textContent = 'Registered on this page — click a script for actions';
+        wrap.appendChild(listTitle);
+
+        const list = document.createElement('div');
+        list.className = 'tsh-debug-list';
+        const scripts = Array.from(registry.values()).sort((a, b) => (a.order || 1000) - (b.order || 1000) || a.name.localeCompare(b.name));
+        if (!scripts.length) {
+            const empty = document.createElement('div');
+            empty.className = 'tsh-debug-empty';
+            empty.textContent = 'No scripts registered yet on this page.';
+            list.appendChild(empty);
+        } else {
+            scripts.forEach(s => {
+                const row = document.createElement('div');
+                row.className = 'tsh-debug-row tsh-debug-row-clickable';
+                row.tabIndex = 0;
+                row.setAttribute('role', 'button');
+                row.title = 'Show actions for this script';
+
+                const statusText = safeScriptStatus(s);
+                const head = document.createElement('div');
+                head.className = 'tsh-debug-row-main';
+                head.innerHTML =
+                    `<strong>${escapeHtml(s.name)}</strong>` +
+                    `<span class="tsh-debug-id">${escapeHtml(s.id)}</span>` +
+                    (s.version ? `<span class="tsh-debug-ver">v${escapeHtml(s.version)}</span>` : '');
+                row.appendChild(head);
+
+                const sub = document.createElement('div');
+                sub.className = 'tsh-debug-row-sub';
+                sub.textContent = (s.prefs ? 'prefs' : 'no prefs') + (statusText ? ' · ' + statusText : '');
+                row.appendChild(sub);
+
+                const detail = document.createElement('div');
+                detail.className = 'tsh-debug-detail';
+                detail.hidden = true;
+
+                const detailStatus = document.createElement('div');
+                detailStatus.className = 'tsh-debug-detail-status';
+                detailStatus.textContent = statusText ? `Status: ${statusText}` : 'Status: (none)';
+                detail.appendChild(detailStatus);
+
+                const detailActions = document.createElement('div');
+                detailActions.className = 'tsh-debug-actions';
+
+                const refreshBtn = document.createElement('button');
+                refreshBtn.type = 'button';
+                refreshBtn.className = 'tsh-debug-btn tsh-debug-btn-muted';
+                refreshBtn.textContent = 'Refresh status';
+                refreshBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    const next = safeScriptStatus(s);
+                    detailStatus.textContent = next ? `Status: ${next}` : 'Status: (none)';
+                    sub.textContent = (s.prefs ? 'prefs' : 'no prefs') + (next ? ' · ' + next : '');
+                    pushDebugLog(`status: ${s.id} → ${next || '(none)'}`);
+                });
+                detailActions.appendChild(refreshBtn);
+
+                const openBtn = document.createElement('button');
+                openBtn.type = 'button';
+                openBtn.className = 'tsh-debug-btn';
+                openBtn.textContent = 'Open';
+                openBtn.disabled = typeof s.open !== 'function';
+                openBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    pushDebugLog(`open: ${s.id}`);
+                    try { s.open(); } catch (err) {
+                        pushDebugLog(`open error: ${s.id} ${err && err.message ? err.message : ''}`);
+                    }
+                });
+                detailActions.appendChild(openBtn);
+
+                if (s.prefs) {
+                    const prefsBtn = document.createElement('button');
+                    prefsBtn.type = 'button';
+                    prefsBtn.className = 'tsh-debug-btn tsh-debug-btn-muted';
+                    prefsBtn.textContent = 'Settings';
+                    prefsBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        currentPrefsScriptId = s.id;
+                        const dash = document.getElementById(IDS.DASHBOARD);
+                        if (!dash) return;
+                        dash.querySelectorAll('.tsh-dash-tab').forEach(t => t.classList.remove('active'));
+                        dash.querySelectorAll('.tsh-dash-panel-content').forEach(p => p.classList.remove('active'));
+                        const tab = dash.querySelector('.tsh-dash-tab[data-tab="prefs"]');
+                        const panel = dash.querySelector('[data-panel="prefs"]');
+                        if (tab) tab.classList.add('active');
+                        if (panel) {
+                            panel.classList.add('active');
+                            renderPrefsPanel(panel);
+                        }
+                    });
+                    detailActions.appendChild(prefsBtn);
+                }
+
+                const copyOneBtn = document.createElement('button');
+                copyOneBtn.type = 'button';
+                copyOneBtn.className = 'tsh-debug-btn';
+                copyOneBtn.textContent = 'Copy diagnostic';
+                copyOneBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    const payload = buildScriptDiagnostic(s);
+                    pushDebugLog(`diagnostic: ${s.id}`);
+                    copyText(JSON.stringify(payload, null, 2), copyOneBtn);
+                });
+                detailActions.appendChild(copyOneBtn);
+
+                detail.appendChild(detailActions);
+                row.appendChild(detail);
+
+                const toggleDetail = () => {
+                    const opening = detail.hidden;
+                    list.querySelectorAll('.tsh-debug-detail').forEach(d => { d.hidden = true; });
+                    list.querySelectorAll('.tsh-debug-row').forEach(r => r.classList.remove('tsh-debug-row-open'));
+                    if (opening) {
+                        detail.hidden = false;
+                        row.classList.add('tsh-debug-row-open');
+                        // live refresh when opened
+                        const next = safeScriptStatus(s);
+                        detailStatus.textContent = next ? `Status: ${next}` : 'Status: (none)';
+                        sub.textContent = (s.prefs ? 'prefs' : 'no prefs') + (next ? ' · ' + next : '');
+                    }
+                };
+                row.addEventListener('click', (ev) => {
+                    if (ev.target.closest('button')) return;
+                    toggleDetail();
+                });
+                row.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault();
+                        toggleDetail();
+                    }
+                });
+
+                list.appendChild(row);
+            });
+        }
+        wrap.appendChild(list);
+
+        const logTitle = document.createElement('div');
+        logTitle.className = 'tsh-debug-section-title';
+        logTitle.textContent = 'Recent Hub events';
+        wrap.appendChild(logTitle);
+
+        const log = document.createElement('pre');
+        log.className = 'tsh-debug-log';
+        log.textContent = debugLog.length ? debugLog.join('\n') : 'No events yet.';
+        wrap.appendChild(log);
+
+        container.appendChild(wrap);
+    }
+
+    // =========================================================================
+    // ONBOARDING
+    // =========================================================================
+    function showOnboarding() {
+        if (localStorage.getItem(STORAGE_KEY)) return;
+        if (document.getElementById('tsh-onboarding')) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'tsh-onboarding';
+        overlay.className = 'tsh-onboarding';
+        overlay.innerHTML = `
+            <div class="tsh-onboard-card">
+                <h3>Welcome to Script Hub</h3>
+                <p>This is your control center for Torn userscripts.</p>
+                <ul>
+                    <li>Scripts register here automatically</li>
+                    <li>One dashboard to launch everything</li>
+                    <li>Inline preferences when scripts support them</li>
+                </ul>
+                <p class="tsh-onboard-hint">Click the <strong>Script Hub</strong> item in the sidebar to open the dashboard.</p>
+                <button class="tsh-onboard-btn" id="tsh-onboard-dismiss">Got it</button>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        overlay.querySelector('#tsh-onboard-dismiss').addEventListener('click', dismissOnboarding);
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) dismissOnboarding();
+        });
+    }
+
+    function dismissOnboarding() {
+        const overlay = document.getElementById('tsh-onboarding');
+        if (overlay) overlay.remove();
+        try { localStorage.setItem(STORAGE_KEY, HUB_VERSION); } catch (e) {}
+    }
+
+    // =========================================================================
+    // UTILS
+    // =========================================================================
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function relativeTime(ts) {
+        const diffMs = Date.now() - ts;
+        const mins = Math.round(diffMs / 60000);
+        if (mins < 1) return 'checked just now';
+        if (mins < 60) return `checked ${mins}m ago`;
+        const hrs = Math.round(mins / 60);
+        if (hrs < 24) return `checked ${hrs}h ago`;
+        const days = Math.round(hrs / 24);
+        return `checked ${days}d ago`;
+    }
+
+    // =========================================================================
+    // STYLES
+    // =========================================================================
+    function installStyles() {
+        if (document.getElementById(IDS.STYLE)) return;
+
+        const style = document.createElement('style');
+        style.id = IDS.STYLE;
+        style.textContent = `
+            #tsh-sidebar-row .tsh-svg { width:18px !important; height:18px !important; display:block !important; }
+            #tsh-sidebar-row { cursor:pointer; position:relative; }
+            #tsh-sidebar-row.tsh-disabled { cursor:default; opacity:0.45; filter:grayscale(0.6); }
+            #tsh-sidebar-row.tsh-disabled .tsh-svg { opacity:0.5; }
+            .tsh-watch-dot {
+                position:absolute; top:-2px; right:-2px;
+                width:8px; height:8px; border-radius:50%;
+                background:#e0554f; box-shadow:0 0 0 2px var(--tsh-bg,#f5f5f5);
+                pointer-events:none;
+            }
+
+            .tsh-menu {
+                position:fixed; z-index:2147483647;
+                min-width:240px; max-width:320px; padding:6px;
+                display:none;
+                background:var(--tsh-bg,#f5f5f5); color:var(--tsh-text,#222);
+                border:1px solid var(--tsh-border,#bbb); border-radius:6px;
+                box-shadow:0 8px 24px rgba(0,0,0,.35);
+                font-family:Arial,Helvetica,sans-serif; font-size:13px;
+            }
+            .tsh-menu.tsh-open { display:block; }
+            .tsh-item {
+                width:100%; min-height:36px; display:flex; align-items:center;
+                padding:8px 10px; margin:0; border:0; border-radius:4px;
+                background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer;
+            }
+            .tsh-item:hover, .tsh-item:focus { background:var(--tsh-hover,rgba(0,0,0,.08)); outline:none; }
+            .tsh-item-manage { border-top:1px solid var(--tsh-border,#bbb); margin-top:4px; padding-top:10px; border-radius:0 0 4px 4px; font-weight:700; }
+            .tsh-item-text { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+            .tsh-item-version { margin-left:8px; opacity:.5; font-size:11px; }
+            .tsh-empty { padding:12px; opacity:.55; font-size:12px; }
+            .tsh-divider { height:1px; background:var(--tsh-border,#bbb); margin:4px 0; opacity:.6; }
+
+            .tsh-dashboard {
+                position:fixed; inset:0; z-index:2147483646;
+                display:none; align-items:flex-start; justify-content:center;
+                padding:12px; padding-top:max(12px, env(safe-area-inset-top, 0px));
+                font-family:Arial,Helvetica,sans-serif;
+            }
+            .tsh-dashboard.tsh-dash-open { display:flex; }
+            .tsh-dash-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.55); }
+            .tsh-dash-panel {
+                position:relative; width:min(100%, 480px);
+                max-height:calc(100vh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+                display:flex; flex-direction:column;
+                background:var(--tsh-bg,#f5f5f5); color:var(--tsh-text,#222);
+                border:1px solid var(--tsh-border,#bbb); border-radius:4px;
+                box-shadow:0 10px 28px rgba(0,0,0,.4); overflow:hidden;
+                font-size:12px;
+            }
+            .tsh-dash-header {
+                display:flex; align-items:center; justify-content:space-between;
+                padding:8px 10px; border-bottom:1px solid var(--tsh-border,#bbb); flex-shrink:0;
+            }
+            .tsh-dash-title { font-size:13px; font-weight:700; }
+            .tsh-dash-ver { opacity:.5; font-size:11px; font-weight:400; margin-left:5px; }
+            .tsh-dash-close {
+                width:26px; height:26px; border:0; border-radius:3px;
+                background:transparent; color:inherit; font-size:18px; line-height:1;
+                cursor:pointer; display:flex; align-items:center; justify-content:center;
+            }
+            .tsh-dash-close:hover { background:var(--tsh-hover,rgba(0,0,0,.08)); }
+
+            .tsh-dash-tabs {
+                display:flex; padding:0 6px; border-bottom:1px solid var(--tsh-border,#bbb);
+                background:var(--tsh-tab-bg,rgba(0,0,0,.03)); flex-shrink:0;
+            }
+            .tsh-dash-tab {
+                flex:1; padding:8px 6px 7px; border:0; border-bottom:2px solid transparent;
+                margin-bottom:-1px; background:transparent; color:inherit;
+                font:inherit; font-size:12px; font-weight:600; cursor:pointer; opacity:.55; text-align:center;
+            }
+            .tsh-dash-tab.active { border-bottom-color:#4e8ac7; opacity:1; }
+            .tsh-dash-tab:hover { opacity:.85; }
+
+            .tsh-dash-body { flex:1; overflow-y:auto; padding:8px 10px; -webkit-overflow-scrolling:touch; }
+            .tsh-dash-panel-content { display:none; }
+            .tsh-dash-panel-content.active { display:block; }
+            .tsh-dash-empty { text-align:center; padding:24px 12px; opacity:.6; font-size:12px; line-height:1.5; }
+            .tsh-dash-empty span { font-size:11px; display:block; margin-top:4px; }
+
+            .tsh-script-list { display:flex; flex-direction:column; gap:4px; }
+            .tsh-script-row {
+                min-height:34px; display:flex; align-items:center;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02)); overflow:hidden;
+            }
+            .tsh-script-row:hover { border-color:rgba(78,138,199,.55); background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-script-row-off { opacity:.55; }
+            .tsh-script-row-inactive { opacity:.45; }
+            .tsh-script-launch {
+                min-width:0; flex:1; display:flex; align-items:center;
+                padding:6px 10px; border:0; background:transparent; color:inherit;
+                font:inherit; font-size:12px; text-align:left; cursor:pointer; min-height:34px;
+            }
+            .tsh-script-launch:disabled { cursor:default; }
+            .tsh-script-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+            .tsh-script-version { margin-left:auto; padding-left:8px; opacity:.5; font-size:10px; flex-shrink:0; }
+            .tsh-script-toggle {
+                margin-right:6px; min-width:40px; min-height:24px; padding:2px 8px;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:transparent; color:inherit; font-size:11px; font-weight:600; cursor:pointer; opacity:.75;
+            }
+            .tsh-script-toggle.active { color:#4e8ac7; border-color:rgba(78,138,199,.65); opacity:1; }
+            .tsh-script-inactive-note { margin-right:10px; font-size:10px; opacity:.55; font-style:italic; white-space:nowrap; }
+
+            .tsh-prefs-list { display:flex; flex-direction:column; gap:4px; }
+            .tsh-prefs-row {
+                min-height:36px; display:flex; align-items:center; justify-content:space-between;
+                padding:0 10px; border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02)); color:inherit;
+                font:inherit; font-size:12px; font-weight:600; cursor:pointer; text-align:left;
+            }
+            .tsh-prefs-row:hover { border-color:rgba(78,138,199,.55); background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-prefs-row-action { font-size:11px; font-weight:500; opacity:.6; }
+
+            .tsh-prefs-detail-header { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+            .tsh-prefs-back {
+                padding:4px 8px; border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:transparent; color:inherit; font-size:12px; cursor:pointer;
+            }
+            .tsh-prefs-back:hover { background:var(--tsh-hover,rgba(0,0,0,.06)); }
+            .tsh-prefs-detail-title { font-size:13px; font-weight:700; }
+            .tsh-prefs-status {
+                margin-bottom:8px; padding:6px 10px; border-radius:3px;
+                background:var(--tsh-status-bg,rgba(78,138,199,.12));
+                color:var(--tsh-status-text,#2a5a8a); font-size:12px; font-weight:600;
+            }
+            .tsh-prefs-detail-body { display:flex; flex-direction:column; gap:10px; }
+            .tsh-pref-grid {
+                display:grid; grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); gap:6px 8px;
+            }
+            .tsh-pref-toggles {
+                display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:6px;
+            }
+            .tsh-pref-stack { display:flex; flex-direction:column; gap:6px; }
+            .tsh-pref-btn-row { display:flex; flex-wrap:wrap; gap:6px; }
+            .tsh-pref-section-row {
+                padding:8px 10px; border:1px solid var(--tsh-border,#bbb); border-radius:4px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02));
+            }
+            .tsh-pref-section-title {
+                font-size:12px; font-weight:700; margin-bottom:6px; opacity:.9;
+            }
+            .tsh-pref-row {
+                display:grid;
+                grid-template-columns:minmax(64px,auto) minmax(80px,1fr) minmax(80px,1fr) minmax(110px,1.2fr) minmax(64px,auto);
+                gap:8px; align-items:end;
+            }
+            .tsh-pref-field { display:flex; flex-direction:column; gap:2px; min-width:0; }
+            .tsh-pref-label-row { display:flex; align-items:center; gap:3px; min-height:16px; }
+            .tsh-pref-label { font-size:11px; opacity:.85; }
+            .tsh-pref-label.tsh-has-hint { cursor:help; }
+            .tsh-pref-hint { font-size:10px; color:#4e8ac7; cursor:help; line-height:1; }
+            .tsh-pref-input, .tsh-pref-select {
+                width:100%; box-sizing:border-box; padding:4px 7px;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-input-bg,#fff); color:var(--tsh-text,#222);
+                font-size:12px; min-height:26px;
+            }
+            .tsh-pref-toggle {
+                align-self:flex-start; min-width:44px; min-height:22px; padding:2px 8px;
+                border:1px solid var(--tsh-border,#bbb); border-radius:11px;
+                background:var(--tsh-toggle-off,#ddd); color:inherit;
+                font-size:11px; font-weight:700; cursor:pointer;
+            }
+            .tsh-pref-toggle.active { background:#4e8ac7; border-color:#4e8ac7; color:#fff; }
+            .tsh-pref-btn {
+                padding:5px 10px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:12px; font-weight:600;
+                cursor:pointer; min-height:28px;
+            }
+            .tsh-pref-btn:hover { background:#355e94; }
+            .tsh-prefs-footer {
+                margin-top:10px; padding-top:6px; border-top:1px solid var(--tsh-border,#bbb);
+                font-size:10px; opacity:.5; text-align:center;
+            }
+
+            .tsh-dash-panel.tsh-dash-wide { width:min(100%, 600px); }
+            .tsh-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+            .tsh-pref-section-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+            .tsh-pref-section-head .tsh-pref-section-title { margin-bottom:0; }
+            .tsh-scroll-hint {
+                display:inline-flex; align-items:center; justify-content:center;
+                width:24px; height:22px; padding:0; border:1px solid var(--tsh-border,#bbb);
+                border-radius:3px; background:var(--tsh-input-bg,#fff); color:inherit;
+                font-size:12px; line-height:1; cursor:pointer;
+            }
+            .tsh-scroll-hint:hover { background:var(--tsh-hover,rgba(0,0,0,.06)); }
+            .tsh-scroll-hint[hidden] { display:none; }
+            .tsh-table-outer { position:relative; }
+            .tsh-table-outer.tsh-more::after {
+                content:''; position:absolute; top:0; right:0; bottom:0; width:28px;
+                pointer-events:none;
+                background:linear-gradient(to right, transparent, var(--tsh-bg,#f5f5f5));
+            }
+            .tsh-table { min-width:500px; display:flex; flex-direction:column; gap:6px; }
+            .tsh-table-row { display:grid; gap:6px; align-items:center; }
+            .tsh-table-head {
+                font-size:10px; font-weight:700; opacity:.6;
+                padding-bottom:4px; border-bottom:1px solid var(--tsh-border,#bbb);
+            }
+            .tsh-table-row .tsh-pref-field { gap:0; min-width:0; }
+            .tsh-pref-static { font-size:12px; font-weight:600; }
+            .tsh-pref-check { width:16px; height:16px; margin:0; align-self:center; cursor:pointer; }
+            .tsh-table .tsh-pref-toggle { align-self:stretch; min-width:0; width:100%; padding:2px 0; text-align:center; }
+            .tsh-table .tsh-pref-input, .tsh-table .tsh-pref-select { padding:3px 4px; min-height:26px; }
+            .tsh-table .tsh-pref-btn { width:100%; min-width:0; padding:2px 0; min-height:26px; }
+            .tsh-table input[type=number] { -moz-appearance:textfield; }
+            .tsh-table input[type=number]::-webkit-inner-spin-button,
+            .tsh-table input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+
+            .tsh-lib-wrap { display:flex; flex-direction:column; gap:10px; }
+            .tsh-lib-section-title {
+                font-size:10px; font-weight:700; text-transform:uppercase;
+                letter-spacing:.04em; opacity:.55; margin:2px 0 -4px;
+            }
+            .tsh-lib-section-title:first-child { margin-top:0; }
+            .tsh-lib-intro { margin:0; font-size:12px; opacity:.7; line-height:1.5; }
+            .tsh-lib-list { display:flex; flex-direction:column; gap:6px; }
+            .tsh-lib-row {
+                display:flex; align-items:center; justify-content:space-between; gap:10px;
+                padding:8px 10px; border:1px solid var(--tsh-border,#bbb); border-radius:4px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02));
+            }
+            .tsh-lib-row:hover { border-color:rgba(78,138,199,.55); background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-lib-info { min-width:0; flex:1; }
+            .tsh-lib-name-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+            .tsh-lib-name { font-size:12px; font-weight:700; }
+            .tsh-lib-version { font-size:10px; opacity:.5; }
+            .tsh-lib-badge {
+                font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+                padding:2px 6px; border-radius:9px;
+                background:var(--tsh-toggle-off,#ddd); color:inherit; opacity:.75;
+            }
+            .tsh-lib-badge-known { background:rgba(78,138,199,.18); color:#2a5a8a; opacity:1; }
+            .tsh-lib-badge-active { background:#4e8ac7; color:#fff; opacity:1; }
+            .tsh-lib-desc { margin-top:3px; font-size:11px; opacity:.65; line-height:1.4; }
+            .tsh-lib-install {
+                flex-shrink:0; padding:5px 12px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:11px; font-weight:600;
+                text-decoration:none; white-space:nowrap;
+            }
+            .tsh-lib-install:hover { background:#355e94; }
+            .tsh-lib-contact {
+                margin-top:4px; padding-top:8px; border-top:1px solid var(--tsh-border,#bbb);
+                font-size:11px; opacity:.75; text-align:center;
+            }
+            .tsh-lib-contact a { color:#4e8ac7; text-decoration:none; font-weight:600; }
+            .tsh-lib-contact a:hover { text-decoration:underline; }
+
+            .tsh-watch-intro-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+            .tsh-lib-check-all {
+                flex-shrink:0; padding:4px 10px; border:1px solid var(--tsh-border,#bbb);
+                border-radius:3px; background:transparent; color:inherit; font-size:11px;
+                font-weight:600; cursor:pointer;
+            }
+            .tsh-lib-check-all:hover { background:var(--tsh-hover,rgba(0,0,0,.06)); }
+            .tsh-lib-check-all:disabled { opacity:.6; cursor:default; }
+
+            .tsh-watch-add { display:flex; gap:6px; }
+            .tsh-watch-add-input {
+                flex:1; min-width:0; box-sizing:border-box; padding:6px 8px;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-input-bg,#fff); color:var(--tsh-text,#222); font-size:12px;
+            }
+            .tsh-watch-add-btn {
+                flex-shrink:0; padding:6px 14px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:12px; font-weight:600; cursor:pointer;
+            }
+            .tsh-watch-add-btn:hover { background:#355e94; }
+            .tsh-watch-add-btn:disabled { opacity:.6; cursor:default; }
+            .tsh-watch-add-status { font-size:11px; opacity:.7; min-height:14px; }
+
+            .tsh-watch-row-updated { border-color:rgba(224,85,79,.55) !important; }
+            .tsh-watch-badge-update { background:#e0554f; color:#fff; opacity:1; }
+            .tsh-watch-checked { font-size:10px; opacity:.5; white-space:nowrap; flex-shrink:0; }
+            .tsh-watch-remove {
+                flex-shrink:0; width:24px; height:24px; border:1px solid var(--tsh-border,#bbb);
+                border-radius:3px; background:transparent; color:inherit; font-size:14px;
+                line-height:1; cursor:pointer;
+            }
+            .tsh-watch-remove:hover { background:rgba(224,85,79,.15); border-color:rgba(224,85,79,.55); }
+
+            .tsh-debug-wrap { display:flex; flex-direction:column; gap:10px; }
+            .tsh-debug-intro { margin:0; font-size:12px; opacity:.7; line-height:1.5; }
+            .tsh-debug-meta { font-size:11px; opacity:.65; }
+            .tsh-debug-actions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+            .tsh-debug-btn {
+                flex-shrink:0; padding:5px 12px; border:1px solid #3d6eac; border-radius:3px;
+                background:#3d6eac; color:#fff; font-size:11px; font-weight:600;
+                cursor:pointer; line-height:1.2; white-space:nowrap;
+            }
+            .tsh-debug-btn:hover { background:#355e94; }
+            .tsh-debug-btn-muted {
+                background:transparent; color:inherit; border-color:var(--tsh-border,#bbb); font-weight:600;
+            }
+            .tsh-debug-btn-muted:hover { background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-debug-section-title {
+                font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; opacity:.55; margin-top:2px;
+            }
+            .tsh-debug-list { display:flex; flex-direction:column; gap:4px; }
+            .tsh-debug-row {
+                padding:6px 8px; border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.02)); font-size:11px;
+            }
+            .tsh-debug-row-clickable { cursor:pointer; }
+            .tsh-debug-row-clickable:hover { border-color:rgba(78,138,199,.55); background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-debug-row-open { border-color:rgba(78,138,199,.7); }
+            .tsh-debug-row-main { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; }
+            .tsh-debug-id, .tsh-debug-ver { font-size:10px; opacity:.5; font-weight:400; }
+            .tsh-debug-row-sub { margin-top:2px; font-size:10px; opacity:.6; line-height:1.35; }
+            .tsh-debug-detail {
+                margin-top:8px; padding-top:8px; border-top:1px solid var(--tsh-border,#bbb);
+                display:flex; flex-direction:column; gap:8px;
+            }
+            .tsh-debug-detail-status { font-size:11px; opacity:.8; line-height:1.4; word-break:break-word; }
+            .tsh-debug-empty { font-size:12px; opacity:.55; padding:6px 0; }
+            .tsh-debug-log {
+                margin:0; padding:8px; max-height:160px; overflow:auto;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-input-bg,#fff); font-size:10px; line-height:1.4;
+                white-space:pre-wrap; word-break:break-word;
+            }
+
+            .tsh-onboarding {
+                position:fixed; inset:0; z-index:2147483647;
+                display:flex; align-items:center; justify-content:center;
+                background:rgba(0,0,0,.55); font-family:Arial,Helvetica,sans-serif; padding:16px;
+            }
+            .tsh-onboard-card {
+                width:100%; max-width:400px; padding:24px;
+                background:var(--tsh-bg,#f5f5f5); color:var(--tsh-text,#222);
+                border-radius:8px; box-shadow:0 16px 48px rgba(0,0,0,.4); text-align:center;
+            }
+            .tsh-onboard-card h3 { margin:0 0 10px; font-size:18px; }
+            .tsh-onboard-card p { margin:0 0 12px; font-size:13px; opacity:.85; line-height:1.5; }
+            .tsh-onboard-card ul { text-align:left; display:inline-block; margin:0 0 16px; padding-left:20px; font-size:13px; opacity:.85; }
+            .tsh-onboard-hint {
+                background:var(--tsh-row-bg,rgba(0,0,0,.05)); padding:10px 12px;
+                border-radius:5px; font-size:12px; margin-bottom:16px !important;
+            }
+            .tsh-onboard-btn {
+                padding:10px 28px; border:0; border-radius:5px;
+                background:#3d6eac; color:#fff; font-size:14px; font-weight:700; cursor:pointer; min-height:40px;
+            }
+
+            :root {
+                --tsh-bg:#f5f5f5; --tsh-text:#222; --tsh-border:#c5c5c5;
+                --tsh-hover:rgba(0,0,0,.07); --tsh-row-bg:rgba(0,0,0,.025);
+                --tsh-input-bg:#fff; --tsh-toggle-off:#d8d8d8; --tsh-tab-bg:rgba(0,0,0,.03);
+                --tsh-status-bg:rgba(78,138,199,.12); --tsh-status-text:#2a5a8a;
+            }
+            body.dark-mode {
+                --tsh-bg:#252525; --tsh-text:#e8e8e8; --tsh-border:#4a4a4a;
+                --tsh-hover:rgba(255,255,255,.08); --tsh-row-bg:rgba(255,255,255,.03);
+                --tsh-input-bg:#1a1a1a; --tsh-toggle-off:#3a3a3a; --tsh-tab-bg:rgba(255,255,255,.03);
+                --tsh-status-bg:rgba(78,138,199,.18); --tsh-status-text:#8bb8e8;
+            }
+
+            @media (max-width: 480px) {
+                .tsh-dash-panel { width:100%; }
+                .tsh-pref-grid, .tsh-pref-toggles { grid-template-columns:1fr 1fr; }
+                .tsh-pref-row { grid-template-columns:1fr 1fr; }
+                .tsh-lib-row { flex-direction:column; align-items:flex-start; }
+                .tsh-lib-install { align-self:flex-end; }
+            }
+            @media (max-width: 360px) {
+                .tsh-pref-grid, .tsh-pref-toggles { grid-template-columns:1fr; }
+                .tsh-pref-row { grid-template-columns:1fr; }
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    // =========================================================================
+    // MOUNT
+    // =========================================================================
+    function mount() {
+        if (!document.body) return false;
+
+        document.querySelectorAll('[data-tsh-hub-slide]').forEach(el => el.remove());
+        document.querySelectorAll('#' + IDS.ROW).forEach(el => el.remove());
+        const oldMenu = document.getElementById(IDS.MENU);
+        if (oldMenu) oldMenu.remove();
+
+        installStyles();
+
+        const calendar = document.getElementById('nav-calendar');
+        const calendarSlide = calendar ? calendar.closest('.swiper-slide') : null;
+        const swiperWrapper = calendarSlide ? calendarSlide.closest('.swiper-wrapper') : null;
+        const canCloneDesktop = !!(calendar && calendar.parentNode && !calendarSlide);
+
+        let row;
+        if (canCloneDesktop) {
+            row = createNativeRow(calendar);
+            calendar.parentNode.insertBefore(row, calendar.nextSibling);
+            mountMode = 'row';
+        } else if (calendarSlide && swiperWrapper) {
+            row = createSwiperSlide(calendar, calendarSlide);
+            swiperWrapper.insertBefore(row, calendarSlide.nextSibling);
+            mountMode = 'swiper';
+            try {
+                const swiperContainer = swiperWrapper.closest('.swiper') || swiperWrapper.closest('.swiper-container');
+                if (swiperContainer && swiperContainer.swiper && typeof swiperContainer.swiper.update === 'function') {
+                    swiperContainer.swiper.update();
+                }
+            } catch (e) {}
+        } else {
+            return false;
+        }
+
+        updateButtonState();
+
+        const menu = createMenu();
+        document.body.appendChild(menu);
+        renderMenu();
+
+        if (!readyFired) {
+            readyFired = true;
+            document.dispatchEvent(new CustomEvent(EVENTS.READY, { detail: { version: HUB_VERSION } }));
+        }
+        return true;
+    }
+
+    // =========================================================================
+    // WATCHER
+    // =========================================================================
+    function startSidebarWatcher() {
+        let rafPending = false;
+        let mountSuccess = false;
+
+        const desiredMode = () => {
+            const calendar = document.getElementById('nav-calendar');
+            const calendarSlide = calendar ? calendar.closest('.swiper-slide') : null;
+            if (calendar && calendar.parentNode && !calendarSlide) return 'row';
+            if (calendarSlide) return 'swiper';
+            return null;
+        };
+
+        const tryMount = () => {
+            if (rafPending) return;
+            rafPending = true;
+            requestAnimationFrame(() => {
+                rafPending = false;
+                const existing = document.getElementById(IDS.ROW);
+                const missing = !existing || !document.body.contains(existing);
+                const mode = desiredMode();
+                if (!mode) return;
+                if (missing || mountMode !== mode) {
+                    if (mount()) {
+                        mountSuccess = true;
+                        setTimeout(showOnboarding, 600);
+                    }
+                }
+            });
+        };
+
+        if (document.body) {
+            if (mount()) {
+                mountSuccess = true;
+                setTimeout(showOnboarding, 600);
+            }
+        } else {
+            const bodyWatcher = new MutationObserver(() => {
+                if (document.body) {
+                    bodyWatcher.disconnect();
+                    if (mount()) {
+                        mountSuccess = true;
+                        setTimeout(showOnboarding, 600);
+                    }
+                }
+            });
+            bodyWatcher.observe(document.documentElement, { childList: true });
+        }
+
+        const observer = new MutationObserver(tryMount);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        window.addEventListener('resize', tryMount, { passive: true });
+
+        let attempts = 0;
+        const timer = setInterval(() => {
+            if (mountSuccess || attempts++ > 60) {
+                clearInterval(timer);
+                return;
+            }
+            tryMount();
+        }, 400);
+    }
+
+    // =========================================================================
+    // GLOBAL HANDLERS – primary click opens DASHBOARD
+    // =========================================================================
+    function onOutsideInteraction(e) {
+        const row  = document.getElementById(IDS.ROW);
+        const menu = document.getElementById(IDS.MENU);
+        if (!row || !menu) return;
+        if (e.target !== row && !row.contains(e.target) && !menu.contains(e.target)) {
+            closeMenu();
+        }
+    }
+
+    function onHubActivation(e) {
+        if (!isUIEnabled()) return;
+        const target = e.target instanceof Element ? e.target : null;
+        const row = target?.closest('#' + IDS.ROW);
+        if (!row || !row.dataset.tshHubButton) return;
+        if (e.button !== 0) return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        requestDashboardOpen();
+    }
+
+    function onHubContextMenu(e) {
+        const target = e.target instanceof Element ? e.target : null;
+        const row = target?.closest('#' + IDS.ROW);
+        if (!row || !row.dataset.tshHubButton) return;
+        if (isUIEnabled()) return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        setUIEnabled(true);
+        requestDashboardOpen();
+    }
+
+    document.addEventListener('click', onOutsideInteraction, true);
+    document.addEventListener('touchstart', onOutsideInteraction, { passive: true, capture: true });
+    document.addEventListener('click', onHubActivation, true);
+    document.addEventListener('contextmenu', onHubContextMenu, true);
+
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') {
+            if (currentPrefsScriptId) {
+                currentPrefsScriptId = null;
+                const dash = document.getElementById(IDS.DASHBOARD);
+                if (dash) renderPrefsPanel(dash.querySelector('[data-panel="prefs"]'));
+            } else {
+                closeMenu();
+                closeDashboard();
+            }
+        }
+        if (e.shiftKey && (e.key === 'H' || e.key === 'h')) {
+            e.preventDefault();
+            setUIEnabled(!isUIEnabled());
+        }
+    });
+    window.addEventListener('resize', () => {
+        const menu = document.getElementById(IDS.MENU);
+        if (menu && menu.classList.contains('tsh-open')) positionMenu();
+    });
+    window.addEventListener('scroll', () => {
+        const menu = document.getElementById(IDS.MENU);
+        if (menu && menu.classList.contains('tsh-open')) positionMenu();
+    }, true);
+
+    // =========================================================================
+    // START
+    // =========================================================================
+    drainQueue();
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startSidebarWatcher, { once: true });
+    } else {
+        startSidebarWatcher();
+    }
+})();
