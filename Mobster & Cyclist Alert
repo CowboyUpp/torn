@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.2
-// @description  Acoustical + green highlight alerts for pickpocket targets (Mobster, Cyclist, Classy Lady walking, Police Officer running, Postal Worker walking), filterable by gender and build. Standalone or Script Hub.
+// @version      1.8.1
+// @description  Acoustical + green highlight alerts for Torn pickpocketing targets, filterable by gender, status and build. Standalone or Script Hub.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @match        https://www.torn.com/loader.php?sid=crimes*
@@ -18,43 +18,66 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.7.2';
+    const SCRIPT_VERSION = '1.8.1';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
-    const TARGETS = {
-        classyLadyWalking: {
-            titleMatch: 'classy lady',
-            activity: 'walking',
-            label: 'Classy Lady (Walking)',
-            defaultBeeps: 2
-        },
-        cyclist: {
-            titleMatch: 'cyclist',
-            activity: null,
-            label: 'Cyclist',
-            defaultBeeps: 1
-        },
-        mobster: {
-            titleMatch: 'mobster',
-            activity: null,
-            label: 'Mobster',
-            defaultBeeps: 3
-        },
-        policeOfficerRunning: {
-            titleMatch: 'police officer',
-            activity: 'running',
-            label: 'Police Officer (Running)',
-            defaultBeeps: 4
-        },
-        postalWorkerWalking: {
-            titleMatch: 'postal worker',
-            activity: 'walking',
-            label: 'Postal Worker (Walking)',
-            defaultBeeps: 1
-        }
+    // Status icon values as Torn reports them (crimeInfo.status.icon) -> display label.
+    const STATUS_LABELS = {
+        walking: 'Walking',
+        running: 'Running',
+        phone: 'On Phone',
+        music: 'Listening to music',
+        distracted: 'Distracted',
+        stumbling: 'Stumbling',
+        loitering: 'Loitering',
+        begging: 'Begging',
+        soliciting: 'Soliciting',
+        cycling: 'Cycling'
     };
 
-    const TYPES = ['cyclist', 'mobster', 'postalWorkerWalking', 'policeOfficerRunning', 'classyLadyWalking'];
+    // id: kept stable so saved settings carry over (legacy = the original five targets).
+    // title: as Torn reports it, lowercase. gender: set when the name already says it.
+    // statuses: the statuses seen for that target in Torn's payload.
+    const TARGET_DEFS = [
+        { id: 'businessman', title: 'businessman', label: 'Businessman', gender: 'male', statuses: ['walking', 'phone'] },
+        { id: 'businesswoman', title: 'businesswoman', label: 'Businesswoman', gender: 'female', statuses: ['walking', 'phone'] },
+        { id: 'classyLadyWalking', title: 'classy lady', label: 'Classy Lady', gender: 'female', statuses: ['walking', 'phone'], legacy: true, defaultBeeps: 2, defaultStatuses: ['walking'] },
+        { id: 'cyclist', title: 'cyclist', label: 'Cyclist', statuses: ['cycling'], legacy: true, defaultBeeps: 1 },
+        { id: 'drunkMan', title: 'drunk man', label: 'Drunk Man', gender: 'male', statuses: ['distracted', 'stumbling'] },
+        { id: 'drunkWoman', title: 'drunk woman', label: 'Drunk Woman', gender: 'female', statuses: ['distracted', 'stumbling'] },
+        { id: 'elderlyMan', title: 'elderly man', label: 'Elderly Man', gender: 'male', statuses: ['walking'] },
+        { id: 'elderlyWoman', title: 'elderly woman', label: 'Elderly Woman', gender: 'female', statuses: ['walking'] },
+        { id: 'gangMember', title: 'gang member', label: 'Gang Member', statuses: ['loitering'] },
+        { id: 'homelessPerson', title: 'homeless person', label: 'Homeless Person', statuses: ['loitering', 'begging'] },
+        { id: 'jogger', title: 'jogger', label: 'Jogger', statuses: ['walking', 'running'], statusLabels: { running: 'Jogging' } },
+        { id: 'junkie', title: 'junkie', label: 'Junkie', statuses: ['loitering', 'stumbling'] },
+        { id: 'laborer', title: 'laborer', label: 'Laborer', statuses: ['walking', 'phone', 'distracted'] },
+        { id: 'mobster', title: 'mobster', label: 'Mobster', statuses: ['walking'], legacy: true, defaultBeeps: 3 },
+        { id: 'policeOfficerRunning', title: 'police officer', label: 'Police Officer', statuses: ['walking', 'running'], legacy: true, defaultBeeps: 4, defaultStatuses: ['running'] },
+        { id: 'postalWorkerWalking', title: 'postal worker', label: 'Postal Worker', statuses: ['walking', 'distracted'], legacy: true, defaultBeeps: 1, defaultStatuses: ['walking'] },
+        { id: 'richKid', title: 'rich kid', label: 'Rich Kid', statuses: ['walking', 'phone', 'music'] },
+        { id: 'sexWorker', title: 'sex worker', label: 'Sex Worker', statuses: ['phone', 'distracted', 'soliciting'] },
+        { id: 'student', title: 'student', label: 'Student', statuses: ['walking', 'running', 'phone', 'music'] },
+        { id: 'thug', title: 'thug', label: 'Thug', statuses: ['walking', 'running', 'loitering'] },
+        { id: 'youngMan', title: 'young man', label: 'Young Man', gender: 'male', statuses: ['walking', 'phone', 'music'] },
+        { id: 'youngWoman', title: 'young woman', label: 'Young Woman', gender: 'female', statuses: ['walking', 'phone', 'music', 'distracted'] }
+    ];
+
+    const TARGETS = {};
+    TARGET_DEFS.forEach(d => {
+        TARGETS[d.id] = {
+            titleMatch: d.title,
+            label: d.label,
+            fixedGender: d.gender || null,
+            statuses: d.statuses,
+            statusLabels: d.statusLabels || {},
+            legacy: !!d.legacy,
+            defaultBeeps: d.defaultBeeps || 1,
+            defaultStatuses: d.defaultStatuses || []
+        };
+    });
+
+    const TYPES = TARGET_DEFS.map(d => d.id);
 
     const REQUIRED_MUSCULAR = 'skinny';
     const GENDER_VALUES = ['any', 'female', 'male'];
@@ -90,28 +113,40 @@
         const settings = {};
 
         TYPES.forEach(type => {
+            const t = TARGETS[type];
             const enabledRaw = localStorage.getItem(STORAGE_KEY(type, 'enabled'));
             const waveformRaw = localStorage.getItem(STORAGE_KEY(type, 'waveform'));
             const volumeRaw = localStorage.getItem(STORAGE_KEY(type, 'volume'));
             const beepsRaw = localStorage.getItem(STORAGE_KEY(type, 'beeps'));
             const genderRaw = localStorage.getItem(STORAGE_KEY(type, 'gender'));
             const skinnyRaw = localStorage.getItem(STORAGE_KEY(type, 'skinny'));
+            const statusesRaw = localStorage.getItem(STORAGE_KEY(type, 'statuses'));
 
             let volume = volumeRaw !== null ? Number(volumeRaw) : DEFAULT_VOLUME;
             if (!Number.isFinite(volume)) volume = DEFAULT_VOLUME;
             volume = Math.max(1, Math.min(100, volume));
 
-            let beeps = beepsRaw !== null ? Number(beepsRaw) : TARGETS[type].defaultBeeps;
-            if (!Number.isFinite(beeps) || beeps < 1) beeps = TARGETS[type].defaultBeeps;
+            let beeps = beepsRaw !== null ? Number(beepsRaw) : t.defaultBeeps;
+            if (!Number.isFinite(beeps) || beeps < 1) beeps = t.defaultBeeps;
             beeps = Math.max(1, Math.min(10, beeps));
 
+            let statuses = t.defaultStatuses.slice();
+            if (statusesRaw !== null) {
+                try {
+                    const parsed = JSON.parse(statusesRaw);
+                    if (Array.isArray(parsed)) statuses = parsed.filter(v => t.statuses.includes(v));
+                } catch (err) { /* keep defaults */ }
+            }
+
             settings[type] = {
-                enabled: enabledRaw !== null ? enabledRaw === 'true' : hubPresent,
+                // new targets start off; the original five keep their old default
+                enabled: enabledRaw !== null ? enabledRaw === 'true' : (t.legacy ? hubPresent : false),
                 waveform: waveformRaw || DEFAULT_WAVEFORM,
                 volume,
                 beeps,
-                gender: GENDER_VALUES.includes(genderRaw) ? genderRaw : 'any',
-                skinny: skinnyRaw !== null ? skinnyRaw === 'true' : true
+                gender: !t.fixedGender && GENDER_VALUES.includes(genderRaw) ? genderRaw : 'any',
+                skinny: skinnyRaw !== null ? skinnyRaw === 'true' : true,
+                statuses
             };
         });
 
@@ -128,6 +163,7 @@
         localStorage.setItem(STORAGE_KEY(type, 'beeps'), String(s.beeps));
         localStorage.setItem(STORAGE_KEY(type, 'gender'), s.gender);
         localStorage.setItem(STORAGE_KEY(type, 'skinny'), String(!!s.skinny));
+        localStorage.setItem(STORAGE_KEY(type, 'statuses'), JSON.stringify(s.statuses));
     }
 
     // -------------------------------------------------------------------------
@@ -236,13 +272,9 @@
             if (!titlesMatch(c.title, target.titleMatch)) continue;
 
             if (s.skinny && crimeMuscular(c) !== REQUIRED_MUSCULAR) continue;
-            if (s.gender !== 'any' && crimeGender(c) !== s.gender) continue;
-
-            if (target.activity) {
-                if (crimeActivity(c).includes(target.activity)) return true;
-            } else {
-                return true;
-            }
+            if (!target.fixedGender && s.gender !== 'any' && crimeGender(c) !== s.gender) continue;
+            if (s.statuses.length && !s.statuses.includes(crimeActivity(c))) continue;
+            return true;
         }
         return false;
     }
@@ -359,7 +391,7 @@
             }
             .mca-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.55); }
             .mca-panel {
-                position:relative; width:min(100%, 600px);
+                position:relative; width:min(100%, 720px);
                 max-height:calc(100vh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
                 display:flex; flex-direction:column; overflow:hidden;
                 background:var(--mca-bg); color:var(--mca-text);
@@ -392,7 +424,8 @@
                 border-radius:3px; background:var(--mca-input-bg); color:inherit;
                 font-size:12px; line-height:1; cursor:pointer;
             }
-            .mca-scroll-hint:hover { background:var(--mca-hover); }
+            .mca-scroll-hint { background:#4e8ac7; border-color:#4e8ac7; color:#fff; }
+            .mca-scroll-hint:hover { filter:brightness(.92); }
             .mca-scroll-hint[hidden] { display:none; }
             .mca-table-outer { position:relative; }
             .mca-table-outer.mca-more::after {
@@ -402,7 +435,7 @@
             }
             .mca-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
             .mca-table { min-width:500px; display:flex; flex-direction:column; gap:6px; }
-            .mca-row { display:grid; gap:6px; align-items:center; }
+            .mca-row { display:grid; gap:4px; align-items:center; }
             .mca-head {
                 font-size:10px; font-weight:700; opacity:.6;
                 padding-bottom:4px; border-bottom:1px solid var(--mca-border);
@@ -431,12 +464,87 @@
                 color:#fff; font-size:12px; cursor:pointer;
             }
             .mca-btn:hover { background:#355e94; }
+            .mca-input:disabled { opacity:.6; cursor:default; }
+            .mca-multi {
+                width:100%; box-sizing:border-box; padding:3px 4px; min-height:26px;
+                text-align:left; border:1px solid var(--mca-border); border-radius:3px;
+                background:var(--mca-input-bg); color:var(--mca-text); font-size:12px;
+                cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+            }
+            .mca-pop {
+                position:fixed; z-index:5; padding:4px;
+                background:var(--mca-bg); color:var(--mca-text);
+                border:1px solid var(--mca-border); border-radius:6px;
+                box-shadow:0 8px 24px rgba(0,0,0,.35); font-size:12px;
+            }
+            .mca-pop-row {
+                display:flex; align-items:center; justify-content:space-between; gap:12px;
+                padding:7px 8px; border-radius:4px; cursor:pointer;
+            }
+            .mca-pop-row:hover { background:var(--mca-hover); }
+            .mca-pop-row input { width:16px; height:16px; margin:0; cursor:pointer; }
             .mca-footer {
                 padding:6px 10px; border-top:1px solid var(--mca-border);
                 font-size:10px; opacity:.5; text-align:center; flex-shrink:0;
             }
         `;
         (document.head || document.documentElement).appendChild(style);
+    }
+
+    function closeSetupMulti() {
+        const p = document.getElementById('mca-multi-pop');
+        if (p) {
+            if (p._cleanup) p._cleanup();
+            p.remove();
+        }
+    }
+
+    // Checkbox list popover anchored under a button (used for the Status column).
+    function openSetupMulti(anchor, options, getSel, onToggle) {
+        closeSetupMulti();
+        const pop = document.createElement('div');
+        pop.id = 'mca-multi-pop';
+        pop.className = 'mca-pop';
+        const sel = new Set(getSel());
+        options.forEach(opt => {
+            const row = document.createElement('label');
+            row.className = 'mca-pop-row';
+            const text = document.createElement('span');
+            text.textContent = opt.label;
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = sel.has(opt.value);
+            cb.addEventListener('change', () => onToggle(opt.value, cb.checked));
+            row.append(text, cb);
+            pop.appendChild(row);
+        });
+        (anchor.closest('.mca-overlay') || document.body).appendChild(pop);
+
+        const r = anchor.getBoundingClientRect();
+        const w = Math.max(190, r.width);
+        const left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - w - 8));
+        let top = r.bottom + 4;
+        const h = pop.offsetHeight;
+        if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
+        pop.style.minWidth = w + 'px';
+        pop.style.left = left + 'px';
+        pop.style.top = top + 'px';
+
+        const onDown = e => {
+            if (!pop.contains(e.target) && !anchor.contains(e.target)) closeSetupMulti();
+        };
+        const onKey = e => {
+            if (e.key === 'Escape') {
+                e.stopPropagation();
+                closeSetupMulti();
+            }
+        };
+        pop._cleanup = () => {
+            document.removeEventListener('pointerdown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+        };
+        document.addEventListener('pointerdown', onDown, true);
+        document.addEventListener('keydown', onKey, true);
     }
 
     function createSetupControl(field, values) {
@@ -485,9 +593,38 @@
                 el.appendChild(o);
             });
             if (field.hint) el.title = field.hint;
+            if (field.disabled) el.disabled = true;
             el.addEventListener('change', () => {
                 values[field.key] = el.value;
                 commit();
+            });
+        } else if (field.type === 'multi') {
+            el = document.createElement('button');
+            el.type = 'button';
+            el.className = 'mca-multi';
+            const getSel = () => (Array.isArray(values[field.key]) ? values[field.key] : []);
+            const paint = () => {
+                const sel = getSel().filter(v => field.options.some(o => o.value === v));
+                let text = field.emptyLabel || 'Any';
+                if (sel.length === 1) {
+                    const o = field.options.find(x => x.value === sel[0]);
+                    text = o ? o.label : sel[0];
+                } else if (sel.length > 1) {
+                    text = sel.length + ' selected';
+                }
+                el.textContent = text + ' \u25BE';
+                el.title = field.hint || '';
+            };
+            paint();
+            el.addEventListener('click', () => {
+                if (document.getElementById('mca-multi-pop')) { closeSetupMulti(); return; }
+                openSetupMulti(el, field.options, getSel, (value, on) => {
+                    const next = getSel().filter(v => v !== value);
+                    if (on) next.push(value);
+                    values[field.key] = next;
+                    paint();
+                    commit();
+                });
             });
         } else if (field.type === 'number') {
             el = document.createElement('input');
@@ -572,6 +709,7 @@
         wrap.className = 'mca-table-wrap';
         const table = document.createElement('div');
         table.className = 'mca-table';
+        if (section.minWidth) table.style.minWidth = section.minWidth;
 
         const head = document.createElement('div');
         head.className = 'mca-row mca-head';
@@ -604,11 +742,13 @@
     function onSetupKeydown(e) {
         if (e.key !== 'Escape') return;
         if (e.target && e.target.tagName === 'SELECT') return;
+        if (document.getElementById('mca-multi-pop')) return;
         closeSetupPopup();
     }
 
     function closeSetupPopup() {
         const overlay = document.getElementById(SETUP_OVERLAY_ID);
+        closeSetupMulti();
         if (overlay) overlay.remove();
         document.removeEventListener('keydown', onSetupKeydown, true);
     }
@@ -718,7 +858,7 @@
     }
 
     // -------------------------------------------------------------------------
-    // Script Hub prefs — one table: on, target, gender, skinny, beeps, volume, tone, test
+    // Script Hub prefs — one table: on, target, gender, status, skinny, beeps, volume, tone, test
     // -------------------------------------------------------------------------
     const WAVEFORM_OPTIONS = [
         { value: 'sine', label: 'Sine' },
@@ -732,14 +872,24 @@
         { value: 'female', label: 'Female' },
         { value: 'male', label: 'Male' }
     ];
-    const PREF_COLUMNS = ['On', 'Target', 'Gender', 'Skinny', 'Beeps', 'Vol %', 'Tone', ''];
-    const PREF_WIDTHS = '44px minmax(110px,1.4fr) 68px 46px 46px 52px 78px 30px';
-    const PREF_ROW_KEYS = ['Enabled', 'Name', 'Gender', 'Skinny', 'Beeps', 'Volume', 'Waveform', 'Test'];
+    const PREF_COLUMNS = ['On', 'Target', 'Gender', 'Status', 'Skinny', 'Beeps', 'Vol %', 'Tone', ''];
+    const PREF_WIDTHS = '44px 112px 74px minmax(100px,1fr) 44px 44px 48px minmax(76px,.6fr) 30px';
+    const PREF_MIN_WIDTH = '604px';
+    const PREF_ROW_KEYS = ['Enabled', 'Name', 'Gender', 'Status', 'Skinny', 'Beeps', 'Volume', 'Waveform', 'Test'];
+
+    function statusOptions(type) {
+        const t = TARGETS[type];
+        const order = Object.keys(STATUS_LABELS);
+        return t.statuses.slice()
+            .sort((a, b) => order.indexOf(a) - order.indexOf(b))
+            .map(v => ({ value: v, label: t.statusLabels[v] || STATUS_LABELS[v] || v }));
+    }
 
     function buildPrefFields() {
         const fields = [];
 
         TYPES.forEach(type => {
+            const t = TARGETS[type];
             fields.push({
                 key: type + 'Enabled',
                 label: 'On',
@@ -750,14 +900,23 @@
                 key: type + 'Name',
                 label: 'Target',
                 type: 'label',
-                text: TARGETS[type].label
+                text: t.label
             });
             fields.push({
                 key: type + 'Gender',
                 label: 'Gender',
                 type: 'select',
                 options: GENDER_OPTIONS,
-                hint: 'Any alerts for both genders'
+                disabled: !!t.fixedGender,
+                hint: t.fixedGender ? 'Gender is part of the name' : 'Any alerts for both genders'
+            });
+            fields.push({
+                key: type + 'Status',
+                label: 'Status',
+                type: 'multi',
+                options: statusOptions(type),
+                emptyLabel: 'Any',
+                hint: 'Tick the statuses to alert for; none ticked alerts for all'
             });
             fields.push({
                 key: type + 'Skinny',
@@ -805,6 +964,7 @@
             table: true,
             columns: PREF_COLUMNS,
             widths: PREF_WIDTHS,
+            minWidth: PREF_MIN_WIDTH,
             rows: TYPES.map(type => PREF_ROW_KEYS.map(k => type + k))
         }];
     }
@@ -812,8 +972,10 @@
     function buildPrefValues() {
         const values = {};
         TYPES.forEach(type => {
+            const t = TARGETS[type];
             values[type + 'Enabled'] = settings[type].enabled;
-            values[type + 'Gender'] = settings[type].gender;
+            values[type + 'Gender'] = t.fixedGender || settings[type].gender;
+            values[type + 'Status'] = settings[type].statuses.slice();
             values[type + 'Skinny'] = settings[type].skinny;
             values[type + 'Beeps'] = settings[type].beeps;
             values[type + 'Waveform'] = settings[type].waveform;
@@ -824,16 +986,20 @@
 
     function applyPrefValues(values) {
         TYPES.forEach(type => {
+            const t = TARGETS[type];
             const wasEnabled = settings[type].enabled;
             const nowEnabled = !!values[type + 'Enabled'];
 
             settings[type].enabled = nowEnabled;
             settings[type].waveform = values[type + 'Waveform'] || DEFAULT_WAVEFORM;
-            settings[type].gender = GENDER_VALUES.includes(values[type + 'Gender']) ? values[type + 'Gender'] : 'any';
+            settings[type].gender = !t.fixedGender && GENDER_VALUES.includes(values[type + 'Gender']) ? values[type + 'Gender'] : 'any';
             settings[type].skinny = !!values[type + 'Skinny'];
+            settings[type].statuses = Array.isArray(values[type + 'Status'])
+                ? values[type + 'Status'].filter(v => t.statuses.includes(v))
+                : [];
 
             let beeps = Number(values[type + 'Beeps']);
-            if (!Number.isFinite(beeps) || beeps < 1) beeps = TARGETS[type].defaultBeeps;
+            if (!Number.isFinite(beeps) || beeps < 1) beeps = t.defaultBeeps;
             settings[type].beeps = Math.max(1, Math.min(10, beeps));
 
             let vol = Number(values[type + 'Volume']);
