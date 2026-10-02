@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.1
+// @version      1.7.2
 // @description  Acoustical + green highlight alerts for pickpocket targets (Mobster, Cyclist, Classy Lady walking, Police Officer running, Postal Worker walking), filterable by gender and build. Standalone or Script Hub.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.7.1';
+    const SCRIPT_VERSION = '1.7.2';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     const TARGETS = {
@@ -331,21 +331,6 @@
     // -------------------------------------------------------------------------
     // Standalone UI (when Hub is not present)
     // -------------------------------------------------------------------------
-    function waitForElementToExist(selector) {
-        return new Promise(resolve => {
-            const el = document.querySelector(selector);
-            if (el) return resolve(el);
-            const obs = new MutationObserver(() => {
-                const found = document.querySelector(selector);
-                if (found) {
-                    obs.disconnect();
-                    resolve(found);
-                }
-            });
-            obs.observe(document.documentElement, { childList: true, subtree: true });
-        });
-    }
-
     const SETUP_OVERLAY_ID = 'mca-setup-overlay';
     const SETUP_STYLE_ID = 'mca-style';
 
@@ -675,31 +660,58 @@
         document.addEventListener('keydown', onSetupKeydown, true);
     }
 
-    function initStandaloneUI() {
-        waitForElementToExist('.pickpocketing-root').then(root => {
-            if (hubPresent) return;
-            if (document.getElementById('crime-alert-div')) return;
+    // Torn is a single-page app: the pickpocketing view is created and destroyed as you
+    // navigate, so the button is re-added whenever the view appears without it.
+    let standaloneObserver = null;
 
-            const box = document.createElement('div');
-            box.id = 'crime-alert-div';
-            box.style.marginBottom = '10px';
+    function ensureStandaloneButton() {
+        if (hubPresent) return;
+        const root = document.querySelector('.pickpocketing-root');
+        if (!root) return;
+        if (root.querySelector('#crime-alert-div')) return;
 
-            const btn = document.createElement('a');
-            btn.id = 'mca-setup-btn';
-            btn.className = 'torn-btn btn-big';
-            btn.style.display = 'inline-block';
-            btn.textContent = SCRIPT_NAME + ' Setup';
-            btn.addEventListener('click', e => {
-                e.preventDefault();
-                openSetupPopup();
-            });
+        const stale = document.getElementById('crime-alert-div');
+        if (stale) stale.remove();
 
-            box.appendChild(btn);
-            root.appendChild(box);
+        const box = document.createElement('div');
+        box.id = 'crime-alert-div';
+        box.style.marginBottom = '10px';
+
+        const btn = document.createElement('a');
+        btn.id = 'mca-setup-btn';
+        btn.className = 'torn-btn btn-big';
+        btn.style.display = 'inline-block';
+        btn.textContent = SCRIPT_NAME + ' Setup';
+        btn.addEventListener('click', e => {
+            e.preventDefault();
+            openSetupPopup();
         });
+
+        box.appendChild(btn);
+        root.appendChild(box);
+    }
+
+    function initStandaloneUI() {
+        if (standaloneObserver) return;
+        let pending = false;
+        const schedule = () => {
+            if (pending) return;
+            pending = true;
+            requestAnimationFrame(() => {
+                pending = false;
+                ensureStandaloneButton();
+            });
+        };
+        standaloneObserver = new MutationObserver(schedule);
+        standaloneObserver.observe(document.documentElement, { childList: true, subtree: true });
+        schedule();
     }
 
     function removeStandaloneUI() {
+        if (standaloneObserver) {
+            standaloneObserver.disconnect();
+            standaloneObserver = null;
+        }
         const div = document.getElementById('crime-alert-div');
         if (div) div.remove();
         closeSetupPopup();
