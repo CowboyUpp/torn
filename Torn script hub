@@ -871,4 +871,27 @@
             renderScriptPrefsDetail(container, currentPrefsScriptId);
             return;
         }
-        const widePanel = container
+        const widePanel = container.closest('.tsh-dash-panel');
+        if (widePanel) widePanel.classList.remove('tsh-dash-wide');
+
+        const scripts = Array.from(registry.values())
+            .filter(s => s.prefs && s.active)
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        if (!scripts.length) {
+            container.innerHTML = `
+                <div class="tsh-dash-empty">
+                    <strong>No settings available</strong><br>
+                    <span>Scripts that support preferences will appear here.</span>
+                </div>
+            `;
+            return;
+        }
+
+        const list = document.createElement('div');
+        list.className = 'tsh-prefs-list';
+
+        scripts.forEach(script => {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'tsh-prefs
