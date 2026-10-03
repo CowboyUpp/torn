@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mobster & Cyclist Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.8.1
+// @version      1.8.2
 // @description  Acoustical + green highlight alerts for Torn pickpocketing targets, filterable by gender, status and build. Standalone or Script Hub.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,7 +18,7 @@
 
     const HUB_ID = 'mobster-cyclist-alert';
     const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.8.1';
+    const SCRIPT_VERSION = '1.8.2';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     // Status icon values as Torn reports them (crimeInfo.status.icon) -> display label.
@@ -127,8 +127,8 @@
             volume = Math.max(1, Math.min(100, volume));
 
             let beeps = beepsRaw !== null ? Number(beepsRaw) : t.defaultBeeps;
-            if (!Number.isFinite(beeps) || beeps < 1) beeps = t.defaultBeeps;
-            beeps = Math.max(1, Math.min(10, beeps));
+            if (!Number.isFinite(beeps) || beeps < 0) beeps = t.defaultBeeps;
+            beeps = Math.max(0, Math.min(10, beeps));
 
             let statuses = t.defaultStatuses.slice();
             if (statusesRaw !== null) {
@@ -215,7 +215,8 @@
     function playAlert(type) {
         const s = settings[type];
         if (!s) return;
-        const count = s.beeps || 1;
+        const count = s.beeps;
+        if (!count) return; // 0 beeps = silent (highlight only)
         unlockAudio().then(ctx => {
             if (!ctx) return;
             try {
@@ -633,6 +634,7 @@
             if (field.min !== undefined) el.min = field.min;
             if (field.max !== undefined) el.max = field.max;
             if (field.step !== undefined) el.step = field.step;
+            if (field.hint) el.title = field.hint;
             el.value = values[field.key];
             el.addEventListener('change', () => {
                 let v = Number(el.value);
@@ -928,9 +930,10 @@
                 key: type + 'Beeps',
                 label: 'Beeps',
                 type: 'number',
-                min: 1,
+                min: 0,
                 max: 10,
-                step: 1
+                step: 1,
+                hint: '0 = no sound, green highlight only'
             });
             fields.push({
                 key: type + 'Volume',
@@ -999,8 +1002,8 @@
                 : [];
 
             let beeps = Number(values[type + 'Beeps']);
-            if (!Number.isFinite(beeps) || beeps < 1) beeps = t.defaultBeeps;
-            settings[type].beeps = Math.max(1, Math.min(10, beeps));
+            if (!Number.isFinite(beeps) || beeps < 0) beeps = t.defaultBeeps;
+            settings[type].beeps = Math.max(0, Math.min(10, beeps));
 
             let vol = Number(values[type + 'Volume']);
             if (!Number.isFinite(vol) || vol <= 0) vol = DEFAULT_VOLUME;
