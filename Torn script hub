@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      4.5.0
+// @version      4.5.1
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -19,7 +19,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.5.0';
+    const HUB_VERSION = '4.5.1';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -63,7 +63,7 @@
         { id: 596397, name: 'Market Quick Buy', description: 'Moves TornW3B bazaar listings below the native Item Market seller row. Layout only — no purchase clicks.' },
         { id: 581347, name: 'HoF Battle Stat Rank', description: 'Shows your battle stat rank in the Hall of Fame.' },
         { id: 581948, name: 'Crime Chain Tracker', description: 'Tracks your Crimes 2.0 chain, critical fails, and resets.' },
-        { id: 591579, name: 'Mobster & Cyclist Alert', description: 'Beeps when a pickpocketing target you choose becomes available, filtered by gender, status and build.' },
+        { id: 591579, name: 'Pickpocketing Alert', description: 'Beeps and highlights pickpocketing targets you choose, filtered by gender, status and build.' },
         { id: 589775, name: 'OpenMarket', description: 'Overlays item quality % and bonus info on the Item Market, Auction House, and Bazaar.' },
         { id: 587089, name: 'Cracking Heat Badge', description: 'Shows a live heat badge while cracking.' },
         { id: 585434, name: 'Item Market Portfolio', description: 'Tracks the value of your Item Market listings over time.' },
