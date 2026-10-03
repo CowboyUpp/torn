@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Mobster & Cyclist Alert
+// @name         Pickpocketing Alert
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.8.2
-// @description  Acoustical + green highlight alerts for Torn pickpocketing targets, filterable by gender, status and build. Standalone or Script Hub.
+// @version      1.8.3
+// @description  Formerly Mobster & Cyclist Alert. Acoustical + green highlight alerts for Torn pickpocketing targets (Mobster, Cyclist, Classy Lady, Police Officer, Postal Worker and more), filterable by gender, status and build. Standalone or Script Hub.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @match        https://www.torn.com/loader.php?sid=crimes*
@@ -17,8 +17,8 @@
     'use strict';
 
     const HUB_ID = 'mobster-cyclist-alert';
-    const SCRIPT_NAME = 'Mobster & Cyclist Alert';
-    const SCRIPT_VERSION = '1.8.2';
+    const SCRIPT_NAME = 'Pickpocketing Alert';
+    const SCRIPT_VERSION = '1.8.3';
     const QUEUE_PROPERTY = '__tornScriptHubQueue';
 
     // Status icon values as Torn reports them (crimeInfo.status.icon) -> display label.
