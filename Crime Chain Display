@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.9.9
+// @version      4.14.1
 // @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -18,16 +18,8 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.9.9';
-    // TODO after deploying cct-sync-worker.js: replace both this URL and the
-    // @connect host above with your real *.workers.dev address (or custom
-    // domain). Cross-device sync stays fully inert — no requests fired, no
-    // permission prompt shown — until the person opts in AND a token is set,
-    // regardless of what this is set to.
+    const VERSION = '4.14.1';
     const SYNC_WORKER_URL = 'https://cct-sync.selbaer.workers.dev';
-    // Installed immediately, before anything else, so a crime attempt fired in
-    // the brief window before waitForApp() resolves is never missed. Function
-    // declaration is hoisted, so this call can sit ahead of its definition.
     installCrimeAttemptInterceptor();
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
     const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
@@ -40,34 +32,19 @@
     const STORAGE_KEY_SYNC_ENABLED = 'cct_sync_enabled_v1';
     const STORAGE_KEY_SYNC_TOKEN = 'cct_sync_token_v1';
     const STORAGE_KEY_SYNC_PUSH_CURSOR = 'cct_sync_push_cursor_v1';
+    const STORAGE_KEY_NERVE_USED = 'cct_nerve_used_by_type_v1';
+    const NERVE_MAX_SPEND_PER_RESPONSE = 25;
     const CORRECTION_LOG_MAX = 15;
     const DIAGNOSTIC_LOG_MAX = 10;
     const CHAIN_CAP_DISPLAY = 100;
     const OUTCOME_DEDUPE_MS = 3500;
     const MAX_REASONABLE_COUNTER_DELTA = 10;
     const ITEM_PRICE_CACHE_MS = 24 * 60 * 60 * 1000;
-    // Push (write) is the scarce resource on the Worker's free KV tier (1,000
-    // writes/day shared across every opted-in user), so it's batched on a slow
-    // 10-min cycle. Pull (read) is cheap (100k/day) so it runs far more often,
-    // which is what actually makes cross-device stats feel close to live.
     const SYNC_PUSH_INTERVAL_MS = 10 * 60 * 1000;
     const SYNC_PULL_INTERVAL_MS = 150 * 1000;
     const SYNC_PUSH_BATCH_MAX = 300;
-    // Mirrors the Worker's own TOKEN_RE exactly — catching a malformed token
-    // here means "why is sync failing?" gets answered immediately in the UI
-    // instead of surfacing later as an opaque HTTP 400 from the server.
     const SYNC_TOKEN_RE = /^[a-zA-Z0-9_-]{16,64}$/;
-    // Shared with gmRequest's own GM_xmlhttpRequest timeout so every network
-    // call this script makes — Torn's own API included — fails the same way
-    // after the same wait, instead of some paths hanging indefinitely.
     const FETCH_TIMEOUT_MS = 15000;
-
-    // Verified against real API responses, not assumed. See torn/logtypes:
-    // 9010 = Crime success, 9150 = Crime fail (new). Critical fails fragment across
-    // several IDs depending on side effect — a jail-outcome crit logs ONLY as 9155,
-    // NOT the generic 9154, confirmed by cross-checking a real critical fail against
-    // Torn's own in-game log page down to the exact second. Querying just 9154 alone
-    // silently misses these and produces a chain that reads too high.
     const LOG_ID_SUCCESS = 9010;
     const LOG_ID_FAIL = 9150;
     const LOG_IDS_CRITICAL = [9154, 9155, 9158, 9160, 9163, 9165, 9190, 9191];
@@ -76,26 +53,22 @@
     let chain = clampChain(parseInt(safeGet(STORAGE_KEY_CHAIN, '0'), 10) || 0);
     let isDark = safeGet(STORAGE_KEY_THEME, 'dark') !== 'light';
     let observer = null;
+    let appWatchObserver = null;
+    let appWatchInterval = null;
+    let appRuntimeStarted = false;
+    let appWatcherStarted = false;
+    let appWaitLogged = false;
+    let widgetRecoveryLogged = false;
     let lastEvent = readLastEvent();
     let syncTimer = null;
     let lastResultCounts = null;
     let pendingResultCountReseed = null;
     let cachedNativeChainValueEl = null;
     let lastCrimesRoute = null;
-    // Set the cycle a critical-fail delta is first spotted by the counts fallback.
-    // Not applied to the chain until a second consecutive reading confirms it —
-    // see applyResultCountDeltaFallback().
     let pendingCriticalConfirm = null;
-    // The criticalFails count already "priced in" to the current chain value.
-    // Tracked separately from lastResultCounts so that merely seeing a suspicious
-    // reading doesn't itself shift the baseline used to detect it.
     let confirmedCriticalFails = null;
     let profitRecords = readProfitRecords();
     let itemPriceCache = readItemPriceCache();
-
-    // Cross-device Crime Profit sync (opt-in, off by default — see wireSyncUI()).
-    // Named distinctly from the pre-existing `syncTimer` above, which is the
-    // unrelated SPA-navigation debounce timer.
     let syncEnabled = safeGet(STORAGE_KEY_SYNC_ENABLED, '0') === '1';
     let syncToken = safeGet(STORAGE_KEY_SYNC_TOKEN, '');
     let syncPushCursor = Number(safeGet(STORAGE_KEY_SYNC_PUSH_CURSOR, '0')) || 0;
@@ -103,31 +76,22 @@
     let crossSyncPullTimer = null;
     let crossSyncInFlight = false;
     let crossSyncLastStatus = '';
+    let graphVisibility = { cash: true, items: true, total: true };
+    let nerveTracker = { last: null, pendingSpend: null, pendingAt: 0, warnedMissing: false, totalDrops: 0, totalRegen: 0, totalConsumed: 0, totalExpired: 0 };
+    const TRACE_MAX = 150;
+    // Torn's lifetime nerve counter (DB.currentUserStats.nerveUsed) is PER CRIME TYPE (typeID in the request URL).
+    // The delta between two consecutive responses of the same type is the exact nerve the later attempt cost, fails included.
+    let nerveUsedByType = (() => {
+        try {
+            const v = JSON.parse(safeGet(STORAGE_KEY_NERVE_USED, '{}'));
+            return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+        } catch (_) { return {}; }
+    })();
+    let lastUserNerveSeen = null; // { value, at } from DB.user.nerve of the previous response (bootstrap fallback)
+    const nerveTrace = [];
 
-    // Nerve capture: there is no confirmed, documented "Nerve outgoing" log
-    // type in Torn's API (torn/logtypes has no such entry, and nerve cost is
-    // set per crime/subcrime rather than logged as its own event) — so unlike
-    // LOG_ID_SUCCESS/LOG_ID_FAIL above, nerve is intentionally NOT sourced from
-    // the log API. Guessing a log ID here would silently produce wrong ratios
-    // with no way to detect it, which breaks this script's "verified against
-    // real responses, not assumed" rule.
-    //
-    // Instead this reads the nerve bar that's actually rendered on the page —
-    // still DOM-based (unlike reward/cash capture, which as of v4.8.0 comes
-    // from intercepting Torn's own crime-attempt response — see
-    // installCrimeAttemptInterceptor) since there's no nerve figure in that
-    // JSON either. If the bar element can't be found, nerve simply stays
-    // unknown for that record (rendered as "—"), it never guesses.
-    let nerveTracker = { last: null, pendingSpend: null, pendingAt: 0, warnedMissing: false };
     const NERVE_PENDING_WINDOW_MS = 15000;
-    // Session-only guard so an item with no resolvable price (no key set, or
-    // Torn genuinely has no listed price for it) isn't re-fetched on every
-    // capture. Cleared on page reload, matching itemPriceCache's own TTL model.
     const itemPriceFetchAttempted = new Set();
-    // Reason the most recent attempt for a given item id failed, so the UI can
-    // tell a fixable permissions gap (wrong key selections) apart from a
-    // transient network/API error or a genuinely unpriced item, instead of
-    // lumping everything into one vague "pending" state.
     const itemPriceFetchFailureReason = new Map();
 
     const THEME = {
@@ -209,6 +173,8 @@
     const MOON_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.05 8.05 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .35-2.43A1 1 0 0 0 8.1 2.3a10.14 10.14 0 1 0 13.5 13.27 1 1 0 0 0-.04-2.57z"/></svg>';
     const SUN_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
     const GEAR_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+    const CHART_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>';
+    const BUG_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M19 7l-3 2M5 7l3 2M19 19l-3-2M5 19l3-2M20 13h-4M4 13h4M10 2l1 2M14 2l-1 2"/></svg>';
 
     function clampChain(value) {
         const n = Number(value);
@@ -319,11 +285,9 @@
         while (entries.length > DIAGNOSTIC_LOG_MAX) entries.pop();
         saveDiagnostics(entries);
         console.log(`[CCT v${VERSION}] diagnostic: ${type}`, entry);
+        refreshDebugIfOpen();
     }
 
-    // Central place every chain-update path funnels through: it writes the
-    // console line (kept for debugging) AND persists a small ring buffer that
-    // the settings popover reads to show a human-readable audit trail.
     function logCorrection(source, oldChain, newChain, detail, reason) {
         console.log(`[CCT v${VERSION}] ${source}: ${oldChain} -> ${newChain}`, reason || '', detail || '');
 
@@ -341,12 +305,6 @@
         renderCorrectionLog();
     }
 
-    // Shared tail for every chain-update path that only wants to log/persist/
-    // re-render when the value actually moved (native badge sync, the counts
-    // fallback's final delta). Assumes `chain` has ALREADY been reassigned to
-    // its new (clamped) value by the caller — this only decides whether that
-    // change is worth announcing. Returns whether a change was recorded, so
-    // callers can gate a source-specific follow-up (e.g. saveLastEvent) on it.
     function commitChainIfChanged(source, oldChain, detail, reason) {
         if (chain === oldChain) return false;
         logCorrection(source, oldChain, chain, detail, reason);
@@ -355,11 +313,6 @@
         return true;
     }
 
-    // Sibling to commitChainIfChanged for paths that persist/re-render every
-    // time they run regardless of whether the value moved (manual entry,
-    // parsed outcome text) — logCorrection is still skipped when unchanged,
-    // but saveChain/render always fire so the UI reflects the latest input.
-    // Assumes `chain` has already been reassigned by the caller.
     function commitChainAlways(source, oldChain, detail, reason) {
         const changed = chain !== oldChain;
         if (changed) logCorrection(source, oldChain, chain, detail, reason);
@@ -436,9 +389,6 @@
         safeSet(STORAGE_KEY_ITEM_PRICES, JSON.stringify(itemPriceCache));
     }
 
-    // Destructive and irreversible, so this always gates on a native confirm()
-    // dialog naming exactly what's being lost — no silent or single-click wipe.
-    // Only touches profit records; chain, correction log, and API key are untouched.
     function resetProfitData() {
         const count = profitRecords.length;
         if (!count) return;
@@ -467,26 +417,16 @@
         safeSet(STORAGE_KEY_SYNC_PUSH_CURSOR, String(ts));
     }
 
-    // 122 bits of entropy, no external dependency — this token is the only
-    // thing gating access to a KV partition on the shared Worker, so it must
-    // never be predictable. Treated like the log API key everywhere in the
-    // UI: password-masked input, never written to the diagnostics log.
     function generateSyncToken() {
         if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
             return crypto.randomUUID().replace(/-/g, '');
         }
-        // Fallback for older engines: still crypto-sourced, just assembled by hand.
+
         const bytes = new Uint8Array(16);
         (crypto.getRandomValues ? crypto : window.crypto).getRandomValues(bytes);
         return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
     }
 
-    // Thin Promise wrapper around GM_xmlhttpRequest, used instead of page fetch()
-    // specifically because it's a brand-new cross-origin destination outside
-    // Torn's own API — GM_xmlhttpRequest runs outside the page's CSP, whereas
-    // window.fetch to a new host could silently be blocked by it. Declared via
-    // @connect in the userscript header, which is what triggers Tampermonkey's
-    // one-time cross-origin permission prompt on first use.
     function gmRequest(details) {
         return new Promise((resolve, reject) => {
             if (typeof GM_xmlhttpRequest !== 'function') {
@@ -503,11 +443,6 @@
         });
     }
 
-    // Wraps page fetch() with the same timeout behavior gmRequest gets for
-    // free from GM_xmlhttpRequest's own `timeout` option. Bare fetch() has no
-    // built-in timeout, so a stalled Torn API response previously left
-    // fetchCrimeLogPage()/fetchOfficialItemPrice() hanging indefinitely — e.g.
-    // blocking resolveUnknownItemPrices()'s whole item loop on one bad request.
     function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -524,10 +459,6 @@
         if (el) el.textContent = text;
     }
 
-    // Turns the Worker's { error: "..." } response body into something a
-    // non-technical status line can show, instead of just a bare HTTP code —
-    // this is what actually let the invalid-token case below get diagnosed
-    // instead of just retrying blind forever.
     function describeSyncError(status, responseText) {
         let body = null;
         try { body = JSON.parse(responseText); } catch (_) { /* not JSON, ignore */ }
@@ -539,11 +470,6 @@
         return `HTTP ${status}`;
     }
 
-    // Shared request/error-handling path for both push and pull: fires the
-    // GM request, and on any non-2xx status or thrown error sets the status
-    // line + logs a diagnostic entry using the caller-supplied labels/keys.
-    // Callers only handle their own success path (advancing the push cursor,
-    // merging pulled records) — everything else funnels through here.
     async function syncRequest(method, endpoint, { data, failLabel, diagKey, retryStatus, diagErrKey } = {}) {
         try {
             const res = await gmRequest({
@@ -558,21 +484,17 @@
             return { ok: false };
         } catch (err) {
             setSyncStatus(retryStatus);
-            logDiagnostic(diagErrKey, String(err && err.message || err));
+            let errText;
+            try { errText = err && err.message ? String(err.message) : JSON.stringify(err, Object.getOwnPropertyNames(Object(err))); } catch (_) { errText = String(err); }
+            logDiagnostic(diagErrKey, errText);
             return { ok: false };
         }
     }
 
-    // Pushes any local records newer than the push cursor, oldest-first, capped
-    // at SYNC_PUSH_BATCH_MAX per call. The cursor only advances to the newest
-    // timestamp actually included in a *successful* push — a large offline
-    // backlog simply catches up over a few cycles rather than risking an
-    // oversized request or losing track of a failed batch.
     async function pushProfitRecords() {
         if (!syncEnabled || !syncToken || !profitRecords.length) return;
 
-        const pending = profitRecords
-            .filter((r) => new Date(r.ts).getTime() > syncPushCursor)
+        const pending = profitRecords            .filter((r) => new Date(r.ts).getTime() > syncPushCursor)
             .sort((a, b) => new Date(a.ts) - new Date(b.ts))
             .slice(0, SYNC_PUSH_BATCH_MAX);
         if (!pending.length) return;
@@ -591,23 +513,6 @@
         setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
     }
 
-    // Pulls the token's full record set and merges by id — safe even if the
-    // server returns overlap with what's already stored locally, since a
-    // record's id is unique and never reused. Recomputes/re-renders only if
-    // something new was actually merged in.
-    //
-    // Deliberately NOT filtered by "since a last-seen timestamp": an earlier
-    // version tracked a high-water-mark cursor based on the newest record ts
-    // seen, but that breaks the moment two devices push independently. If
-    // device A captures a crime at 9:00 but (batched every 10 min) doesn't
-    // push it until 9:10, and this device already pulled something else at
-    // 9:05 that advanced its cursor to 9:30, then A's 9:00 record arrives on
-    // the server *after* this device's cursor has already passed 9:00 — so a
-    // since-based filter would silently and permanently exclude it. Reads are
-    // the cheap side of the Cloudflare free tier (100k/day vs. 1k/day writes)
-    // and blobs are capped at MAX_RECORDS_PER_TOKEN server-side, so there's no
-    // real cost to just always fetching everything and letting id-based
-    // dedup — which is order-independent — sort out what's actually new.
     async function pullProfitRecords() {
         if (!syncEnabled || !syncToken) return;
 
@@ -646,9 +551,6 @@
             : `Synced ✓ ${relativeTime(Date.now())}`);
     }
 
-    // Shared entry point for both the periodic timers and the manual
-    // "Sync now" button. Guarded against overlap so a slow request can't
-    // stack with the next timer tick or a second manual click.
     async function runCrossDeviceSync() {
         if (!syncEnabled || !syncToken || crossSyncInFlight) return;
         crossSyncInFlight = true;
@@ -673,8 +575,6 @@
         if (!syncEnabled || !syncToken) return;
         crossSyncPushTimer = setInterval(pushProfitRecords, SYNC_PUSH_INTERVAL_MS);
         crossSyncPullTimer = setInterval(pullProfitRecords, SYNC_PULL_INTERVAL_MS);
-        // Kick off an immediate combined sync so enabling the toggle (or
-        // reloading with it already on) doesn't sit idle until the first timer.
         runCrossDeviceSync();
     }
 
@@ -708,83 +608,297 @@
         return `$${Math.round(totalWithNerve / nerve).toLocaleString('en-US')}`;
     }
 
-    // Confirmed against real rendered markup on the crimes page (a hashed-class
-    // CSS-module bar widget, same convention as the reward/count selectors
-    // above): a container with a "nerve" class substring holding a child whose
-    // class has a "bar-value" substring and text like "4 / 140". The remaining
-    // entries are defensive fallbacks in case Torn ships a different layout
-    // (e.g. the mobile bar variant) — never asserted, always sanity-checked.
-    function findNerveElement() {
-        return document.querySelector('[class*="nerve" i] [class*="bar-value" i]')
-            || document.querySelector('[class*="nerve" i][title*="/"]')
-            || document.querySelector('[class*="nerve" i][aria-label*="/"]')
-            || document.querySelector('.bar-nerve[title]')
-            || document.querySelector('[data-bar="nerve" i]')
-            || document.querySelector('[class*="nerveBar" i]')
-            || document.querySelector('[class*="nerve" i]');
-    }
+    const NERVE_SELECTORS = [
+        '[class*="nerve" i] [class*="bar-value" i]',
+        '[class*="nerve" i][title*="/"]',
+        '[class*="nerve" i][aria-label*="/"]',
+        '.bar-nerve[title]',
+        '[data-bar="nerve" i]',
+        '[class*="nerveBar" i]',
+        '[class*="nerve" i]',
+    ];
 
-    function readNerveValue() {
-        const el = findNerveElement();
-        if (!el) return null;
-        const raw = el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '';
-        const match = normalizeText(raw).match(/(\d+)\s*\/\s*\d+/) || normalizeText(raw).match(/^(\d+)$/);
+    function parseNerveText(raw) {
+        const text = normalizeText(raw);
+        const match = text.match(/(\d+)\s*\/\s*\d+/) || text.match(/^(\d+)$/);
         if (!match) return null;
         const value = Number(match[1]);
         return Number.isFinite(value) && value >= 0 ? value : null;
     }
 
-    // Polls the nerve bar and records a "spend" only when the value drops
-    // (a rise means regen or a refill, not a crime attempt). The most recent
-    // unclaimed drop is handed to the next captured profit record, then
-    // cleared — see consumeNerveSpend().
-    function pollNerve() {
+    function nerveRawText(el) {
+        return el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '';
+    }
+
+    // Returns the first element that actually carries a "N/MAX" nerve reading. The broad class*="nerve" fallback also
+    // matches <html> (TornTools adds tt-highlight-nerve-refill there), so unparseable/oversized hits are skipped.
+    function findNerveElement() {
+        for (const sel of NERVE_SELECTORS) {
+            let list;
+            try { list = document.querySelectorAll(sel); } catch (_) { continue; }
+            const limit = Math.min(list.length, 60);
+            for (let i = 0; i < limit; i++) {
+                const el = list[i];
+                if (el === document.documentElement || el === document.body) continue;
+                if (el.closest && el.closest('#cct-root')) continue;
+                const raw = nerveRawText(el);
+                if (raw.length > 80) continue;
+                if (parseNerveText(raw) !== null) return el;
+            }
+        }
+        return null;
+    }
+
+    function readNerveValue() {
+        const el = findNerveElement();
+        if (!el) return null;
+        return parseNerveText(nerveRawText(el));
+    }
+
+    function pollNerve(source) {
         const value = readNerveValue();
         if (value === null) {
             if (!nerveTracker.warnedMissing) {
                 nerveTracker.warnedMissing = true;
                 logDiagnostic('nerve-element-not-found', 'Could not locate a nerve bar element on the page — $/nerve will show "—" until this selector is fixed.');
+                traceEvent('nerve-missing', 'no nerve element/value found');
             }
             return;
         }
-        if (nerveTracker.last !== null && value < nerveTracker.last) {
-            // Sum rather than overwrite: if a drop happens while a previous one
-            // is still unconsumed (e.g. two rapid attempts land in the same
-            // mutation window), the earlier drop must not be silently discarded.
-            nerveTracker.pendingSpend = (nerveTracker.pendingSpend || 0) + (nerveTracker.last - value);
-            nerveTracker.pendingAt = Date.now();
+        if (nerveTracker.last === null) {
+            traceEvent('nerve-init', { value });
+        } else if (value !== nerveTracker.last) {
+            const diff = value - nerveTracker.last;
+            if (diff < 0) {
+                nerveTracker.pendingSpend = (nerveTracker.pendingSpend || 0) - diff;
+                nerveTracker.pendingAt = Date.now();
+                nerveTracker.totalDrops += -diff;
+            } else {
+                nerveTracker.totalRegen += diff;
+            }
+            traceEvent('nerve', { from: nerveTracker.last, to: value, diff, src: source || 'poll', pending: nerveTracker.pendingSpend });
         }
         nerveTracker.last = value;
     }
 
-    // Consumes (and clears) the most recent nerve-spend reading if it's fresh
-    // enough to plausibly belong to the outcome currently being captured.
     function consumeNerveSpend() {
         if (nerveTracker.pendingSpend === null) return null;
-        if (Date.now() - nerveTracker.pendingAt > NERVE_PENDING_WINDOW_MS) {
+        const age = Date.now() - nerveTracker.pendingAt;
+        if (age > NERVE_PENDING_WINDOW_MS) {
+            nerveTracker.totalExpired += nerveTracker.pendingSpend;
+            traceEvent('nerve-expired', { spend: nerveTracker.pendingSpend, ageMs: age });
             nerveTracker.pendingSpend = null;
             return null;
         }
         const spend = nerveTracker.pendingSpend;
+        nerveTracker.totalConsumed += spend;
         nerveTracker.pendingSpend = null;
         return spend;
     }
 
-    // Cash/item capture no longer scrapes the rendered outcome popup. Instead it
-    // intercepts Torn's own internal crime-attempt network call — the exact same
-    // technique the OutcomeDB userscript uses in production (unsafeWindow.fetch
-    // wrapping, watching for "sid=crimesData" + "step=attempt" in the URL) — and
-    // reads data.DB.outcome straight from the JSON response. This is strictly
-    // more reliable than DOM parsing: exact reward type/amount/id from Torn's own
-    // server response, no hashed CSS classes to track, and no more ambiguity
-    // about whether an empty "rewards" section means a genuine $0 outcome (e.g.
-    // Cracking's brute-force step) or a parse failure — the JSON just says so.
-    //
-    // The one thing this response does NOT carry is a dollar value for items —
-    // that only exists in the rendered popup's tooltip. So item pricing still
-    // falls back to the same pipeline as before: try the DOM tooltip shortly
-    // after (best-effort, since the popup may not have painted yet), then the
-    // per-session cache, then Torn's public item-price API.
+    // =========================================================================
+    // DEBUG PANEL
+    // =========================================================================
+    function traceEvent(kind, detail) {
+        nerveTrace.unshift({ t: Date.now(), kind, detail });
+        while (nerveTrace.length > TRACE_MAX) nerveTrace.pop();
+        refreshDebugIfOpen();
+    }
+
+    function resolveServerNerveSpend(data, requestUrl) {
+        const used = Number(data && data.DB && data.DB.currentUserStats && data.DB.currentUserStats.nerveUsed);
+        const userNerve = Number(data && data.DB && data.DB.user && data.DB.user.nerve);
+        const typeMatch = String(requestUrl || '').match(/[?&]typeID=(\d+)/i);
+        const typeKey = typeMatch ? typeMatch[1] : 'unknown';
+        let spent = null;
+
+        if (Number.isFinite(used) && used >= 0) {
+            const prev = Number.isFinite(Number(nerveUsedByType[typeKey])) ? Number(nerveUsedByType[typeKey]) : null;
+            if (prev !== null) {
+                const delta = used - prev;
+                if (delta >= 0 && delta <= NERVE_MAX_SPEND_PER_RESPONSE) {
+                    spent = delta;
+                } else {
+                    // Crimes done elsewhere (other device/tab) or responses arriving out of order: don't guess from this counter.
+                    traceEvent('nerve-baseline-skip', { type: typeKey, prev, used, delta });
+                }
+            }
+            if (prev === null || used > prev) {
+                nerveUsedByType[typeKey] = used;
+                safeSet(STORAGE_KEY_NERVE_USED, JSON.stringify(nerveUsedByType));
+            }
+        }
+
+        // Bootstrap: first attempt of a crime type (no baseline yet). Use the drop in the user's nerve since the last response.
+        if (spent === null && Number.isFinite(userNerve) && lastUserNerveSeen && Date.now() - lastUserNerveSeen.at < 5 * 60 * 1000) {
+            const d = lastUserNerveSeen.value - userNerve;
+            if (d > 0 && d <= NERVE_MAX_SPEND_PER_RESPONSE) {
+                spent = d;
+                traceEvent('nerve-bootstrap', { type: typeKey, from: lastUserNerveSeen.value, to: userNerve, spent: d });
+            }
+        }
+        if (Number.isFinite(userNerve)) lastUserNerveSeen = { value: userNerve, at: Date.now() };
+        return spent;
+    }
+
+    // Server delta is authoritative; if the DOM saw a smaller drop, the extra was spent elsewhere, so trust the DOM.
+    function reconcileNerve(serverSpend, domSpend) {
+        if (typeof serverSpend !== 'number') return typeof domSpend === 'number' ? domSpend : null;
+        if (typeof domSpend === 'number' && domSpend > 0 && domSpend < serverSpend) return domSpend;
+        return serverSpend;
+    }
+
+    // Attempts that paid nothing but cost nerve (fails, critical fails, steps with no outcome object).
+    function recordNerveOnlyRecord(serverSpend, label) {
+        pollNerve('nerve-only');
+        const dom = consumeNerveSpend();
+        const nerve = reconcileNerve(serverSpend, dom);
+        traceEvent('nerve-only', { label, serverSpend, dom, nerve });
+        const id = `profit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const record = { id, ts: new Date().toISOString(), cash: 0, itemValue: 0, total: 0, items: [], nerve };
+        profitRecords.unshift(record);
+        saveProfitData();
+        renderProfitPopover();
+    }
+
+    function findNerveFields(obj, path = '', depth = 0, out = []) {
+        if (!obj || typeof obj !== 'object' || depth > 4 || out.length >= 8) return out;
+        for (const [k, v] of Object.entries(obj)) {
+            const p = path ? `${path}.${k}` : k;
+            if (/nerve/i.test(k) && out.length < 8) {
+                out.push(`${p}=${v && typeof v === 'object' ? JSON.stringify(v).slice(0, 80) : v}`);
+            }
+            if (v && typeof v === 'object' && !Array.isArray(v)) findNerveFields(v, p, depth + 1, out);
+        }
+        return out;
+    }
+
+    function buildDebugReport() {
+        const pad = (n, w = 2) => String(n).padStart(w, '0');
+        const fmtT = (ts) => {
+            const d = new Date(ts);
+            return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}`;
+        };
+        const L = [];
+        L.push(`CCT v${VERSION} debug — ${new Date().toISOString()} (times are TCT/UTC)`);
+        L.push(`URL: ${location.href}`);
+        L.push('');
+        L.push('== Nerve bar ==');
+        const el = findNerveElement();
+        if (el) {
+            const d = describeElement(el);
+            L.push(`Element: ${d.path}`);
+            L.push(`  title="${el.getAttribute('title') || ''}" aria-label="${el.getAttribute('aria-label') || ''}"`);
+            L.push(`  text="${normalizeText(el.textContent).slice(0, 80)}"`);
+        } else {
+            L.push('Element: NOT FOUND');
+        }
+        L.push(`Parsed value now: ${readNerveValue()}`);
+        L.push('Selector hits:');
+        NERVE_SELECTORS.forEach((sel, i) => {
+            let n = 0;
+            try { n = document.querySelectorAll(sel).length; } catch (_) { /* ignore */ }
+            L.push(`  ${i + 1}. ${n}x  ${sel}`);
+        });
+        L.push('');
+        L.push('== Tracker (since page load / last reset) ==');
+        const age = nerveTracker.pendingSpend !== null ? `${Math.round((Date.now() - nerveTracker.pendingAt) / 1000)}s ago` : '-';
+        L.push(`last bar value: ${nerveTracker.last}   pending spend: ${nerveTracker.pendingSpend} (${age})`);
+        L.push(`drops observed: ${nerveTracker.totalDrops}   regen observed: ${nerveTracker.totalRegen}`);
+        L.push(`nerveUsed baselines by crime type: ${JSON.stringify(nerveUsedByType)}`);
+        L.push(`credited to records: ${nerveTracker.totalConsumed}   expired/discarded: ${nerveTracker.totalExpired}   still pending: ${nerveTracker.pendingSpend || 0}`);
+        L.push('');
+        const today = new Date().toISOString().slice(0, 10);
+        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        for (const day of [today, yesterday]) {
+            const recs = profitRecords.filter((r) => String(r.ts).slice(0, 10) === day);
+            const withNerve = recs.filter((r) => typeof r.nerve === 'number' && r.nerve > 0);
+            const nerveSum = withNerve.reduce((s, r) => s + r.nerve, 0);
+            const nullCount = recs.filter((r) => typeof r.nerve !== 'number').length;
+            L.push(`== ${day}: ${recs.length} records | nerve sum ${nerveSum} | records w/ nerve ${withNerve.length} | null ${nullCount} ==`);
+        }
+        L.push('');
+        L.push('== Last 12 records (newest first) ==');
+        profitRecords.slice(0, 12).forEach((r) => {
+            L.push(`${String(r.ts).slice(5, 19).replace('T', ' ')}  cash ${r.cash}  items ${r.itemValue}  nerve ${r.nerve}  (${r.items.length} item stacks)`);
+        });
+        L.push('');
+        L.push(`== Trace (newest first, max ${TRACE_MAX}) ==`);
+        if (!nerveTrace.length) L.push('(empty — do a crime with this panel open)');
+        nerveTrace.slice(0, 60).forEach((e) => {
+            const detail = typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail);
+            L.push(`${fmtT(e.t)}  ${String(e.kind).padEnd(13)} ${detail}`);
+        });
+        L.push('');
+        L.push('== Diagnostics (latest 5) ==');
+        const diags = readDiagnostics().slice(0, 5);
+        if (!diags.length) L.push('(none)');
+        diags.forEach((d) => L.push(`${fmtT(d.time)}  ${d.type}  ${JSON.stringify(d.detail).slice(0, 160)}`));
+        return L.join('\n');
+    }
+
+    function renderDebugPanel() {
+        const out = document.querySelector('#cct-debug-output');
+        if (out) out.textContent = buildDebugReport();
+    }
+
+    function refreshDebugIfOpen() {
+        const p = document.querySelector('#cct-profit-popover');
+        if (!p || !p.classList.contains('cct-debug-open')) return;
+        try {
+            const sel = window.getSelection && window.getSelection().toString();
+            if (sel) return; // don't clobber text the user is selecting
+        } catch (_) { /* ignore */ }
+        renderDebugPanel();
+    }
+
+    async function copyDebugReport(btn) {
+        const text = buildDebugReport();
+        let ok = false;
+        try {
+            await navigator.clipboard.writeText(text);
+            ok = true;
+        } catch (_) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                ok = document.execCommand('copy');
+                ta.remove();
+            } catch (__) { /* ignore */ }
+        }
+        const old = btn.textContent;
+        btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
+        setTimeout(() => { btn.textContent = old; }, 1500);
+    }
+
+    function wireDebugUI(popover) {
+        popover.querySelector('#cct-debug-toggle').addEventListener('click', (e) => {
+            e.stopPropagation();
+            popover.classList.toggle('cct-debug-open');
+            if (popover.classList.contains('cct-debug-open')) renderDebugPanel();
+        });
+        popover.querySelector('#cct-debug-refresh').addEventListener('click', (e) => {
+            e.stopPropagation();
+            renderDebugPanel();
+        });
+        popover.querySelector('#cct-debug-copy').addEventListener('click', (e) => {
+            e.stopPropagation();
+            copyDebugReport(e.currentTarget);
+        });
+        popover.querySelector('#cct-debug-clear').addEventListener('click', (e) => {
+            e.stopPropagation();
+            nerveTrace.length = 0;
+            nerveTracker.totalDrops = 0;
+            nerveTracker.totalRegen = 0;
+            nerveTracker.totalConsumed = 0;
+            nerveTracker.totalExpired = 0;
+            renderDebugPanel();
+        });
+    }
+
     function installCrimeAttemptInterceptor() {
         const isSandboxed = typeof unsafeWindow !== 'undefined';
         const win = isSandboxed ? unsafeWindow : window;
@@ -796,19 +910,10 @@
                 try {
                     const resource = args[0];
                     const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
-                    // Broadened from step=attempt only: collecting a finished Arson
-                    // job's payout ("Collect Reward") is a distinct action from a
-                    // normal crime attempt and may hit step=collect/step=claim.
-                    // The handler below decides whether the body is capturable —
-                    // this is just casting a wider net on which requests get read.
                     if (url.includes('sid=crimesData') && (url.includes('step=attempt') || url.includes('step=collect') || url.includes('step=claim'))) {
                         response.clone().text()
                             .then((body) => handleCrimeAttemptResponseBody(body, url))
                             .catch((err) => {
-                                // Previously silently swallowed here — a real blind
-                                // spot under rapid back-to-back actions, since a
-                                // failure here left zero trace anywhere. Logged now
-                                // so a future silent miss leaves evidence instead.
                                 logDiagnostic('crime-attempt-clone-failed', {
                                     url: String(url).slice(0, 300),
                                     error: String(err && err.message || err),
@@ -825,19 +930,10 @@
         };
     }
 
-    // Guards against acting twice on the same real outcome (belt-and-suspenders;
-    // fetch already gives a natural 1:1 with real network calls, unlike the old
-    // DOM approach which could see several mutations per popup).
     let lastCrimeOutcomeSignature = null;
     let lastCrimeOutcomeTime = 0;
     const CRIME_OUTCOME_DEDUPE_MS = 2000;
 
-    // Extract every success-shaped outcome object we can find in a response.
-    // Normal path: data.DB.outcome (singular). A bulk "collect all" action, if
-    // Torn has one, might instead put an array under data.DB.outcomes/results/
-    // claims/rewards, or nest an outcome one level deeper — this walks those
-    // known candidate keys without inventing any structure, keeping only
-    // objects that look like real outcomes (have a `result` field).
     function extractOutcomesFromResponse(data) {
         const found = [];
         if (!data || typeof data !== 'object') return found;
@@ -861,7 +957,6 @@
             }
         }
 
-        // Rare alternate top-level shapes seen on some Torn endpoints.
         if (data.outcome && typeof data.outcome === 'object' && data.outcome.result !== undefined) {
             found.push(data.outcome);
         }
@@ -895,23 +990,19 @@
         }
 
         const outcomes = extractOutcomesFromResponse(data);
-        // Only the confirmed literal value seen in real responses is treated as
-        // capturable. Anything else (fail/critical/unknown) is left alone here —
-        // chain success/fail/critical detection is handled entirely separately
-        // (native badge / result counters / log verification) and is untouched
-        // by this change.
         const successOutcomes = outcomes.filter((o) => o && o.result === 'success');
+        const serverSpend = resolveServerNerveSpend(data, requestUrl);
+        traceEvent('fetch', {
+            req: String(requestUrl || '').replace(/^.*?page\.php\?/, '').slice(0, 90),
+            results: outcomes.map((o) => o && o.result),
+            serverSpend,
+            nerveUsed: data && data.DB && data.DB.currentUserStats ? data.DB.currentUserStats.nerveUsed : undefined,
+        });
 
         if (!successOutcomes.length) {
-            // Visibility for the genuine "silent miss" case: we saw a
-            // crimesData attempt/collect/claim response but found ZERO
-            // outcome-shaped objects of ANY kind — that's the actual signal
-            // of an unrecognized response shape. Deliberately NOT triggered
-            // by finding an ordinary fail/critical outcome (outcomes.length
-            // > 0, successOutcomes.length === 0) — that's expected on every
-            // failed crime attempt and would otherwise flood the 10-slot
-            // diagnostics ring buffer with routine noise, burying the
-            // genuinely useful entries (item pricing, nerve selector, etc).
+            if (serverSpend > 0) {
+                recordNerveOnlyRecord(serverSpend, outcomes.map((o) => o && o.result).join(',') || 'no-outcome');
+            }
             if (outcomes.length === 0) {
                 const dbKeys = (data && data.DB && typeof data.DB === 'object')
                     ? Object.keys(data.DB).slice(0, 20)
@@ -926,14 +1017,22 @@
             return;
         }
 
+        let spendLeft = serverSpend;
         for (const outcome of successOutcomes) {
             const signature = hashText(JSON.stringify(outcome));
-            if (signature === lastCrimeOutcomeSignature && Date.now() - lastCrimeOutcomeTime < CRIME_OUTCOME_DEDUPE_MS) {
+            // A real new attempt always moves Torn's nerveUsed counter; only dedupe when it didn't (or is unknown).
+            const nerveProvesNewAttempt = typeof serverSpend === 'number' && serverSpend > 0;
+            if (!nerveProvesNewAttempt && signature === lastCrimeOutcomeSignature && Date.now() - lastCrimeOutcomeTime < CRIME_OUTCOME_DEDUPE_MS) {
                 continue;
             }
             lastCrimeOutcomeSignature = signature;
             lastCrimeOutcomeTime = Date.now();
-            recordProfitFromOutcomeJSON(outcome);
+            recordProfitFromOutcomeJSON(outcome, spendLeft);
+            if (typeof spendLeft === 'number') spendLeft = 0; // one response = one nerve charge; don't repeat it per outcome
+        }
+        if (typeof spendLeft === 'number' && spendLeft > 0) {
+            // every success was a duplicate-skip but nerve was still spent
+            recordNerveOnlyRecord(spendLeft, 'dup-skip');
         }
     }
 
@@ -942,7 +1041,7 @@
         record.total = record.cash + record.itemValue;
     }
 
-    function recordProfitFromOutcomeJSON(outcome) {
+    function recordProfitFromOutcomeJSON(outcome, serverSpend) {
         for (const [id, cached] of Object.entries(itemPriceCache)) {
             if (!cached || Date.now() - Number(cached.at || 0) > ITEM_PRICE_CACHE_MS) delete itemPriceCache[id];
         }
@@ -968,8 +1067,10 @@
             }
         }
 
-        pollNerve();
-        const nerve = consumeNerveSpend();
+        pollNerve('outcome');
+        const domNerve = consumeNerveSpend();
+        const nerve = reconcileNerve(serverSpend, domNerve);
+        traceEvent('outcome', { cash, items: items.length, nerve, server: serverSpend, dom: domNerve, barNow: nerveTracker.last });
         if (!rewards.length) {
             console.log(`[CCT v${VERSION}] captured a zero-reward success (e.g. Cracking brute-force step) — nerve counted, $0 payout.`);
         }
@@ -981,10 +1082,6 @@
         renderProfitPopover();
 
         if (items.some((item) => typeof item.unitValue !== 'number')) {
-            // Give React a couple of paint cycles to render the outcome popup,
-            // then try the free/no-key DOM tooltip source before falling back
-            // to the API. Double rAF rather than a fixed timeout: ties this to
-            // actual paint cycles instead of guessing a duration.
             requestAnimationFrame(() => requestAnimationFrame(() => {
                 tryEnrichItemPricesFromDOM(record);
                 if (record.items.some((item) => typeof item.unitValue !== 'number')) resolveUnknownItemPrices();
@@ -992,10 +1089,6 @@
         }
     }
 
-    // Best-effort only: looks for the same rendered popup + tooltip the old DOM
-    // capture used, purely as a free pricing source. If the popup isn't there,
-    // or an item's tooltip isn't, this simply leaves unitValue as null for
-    // resolveUnknownItemPrices() to pick up — never a required step.
     function tryEnrichItemPricesFromDOM(record) {
         const app = findCrimesApp();
         if (!app) return;
@@ -1022,18 +1115,6 @@
         }
     }
 
-    // Fetches an item's official Torn price (torn/{id}?selections=items) as a
-    // fallback source when the outcome popup didn't render an inline value.
-    // Requires a valid Torn API key — item price is public data, so the
-    // already-stored log-scoped key works fine for this too. Returns null (never
-    // a guess) if no key is set, the item has no listed price, or the request fails.
-    //
-    // Field name verified against Torn's own response shape: the items selection
-    // returns market_value (resale/market price), NOT a field literally named
-    // "price" — v4.7.4 read the wrong key and silently failed to resolve every
-    // single item, which is why item 178 (and everything else) came back
-    // unresolved. sell_price is a documented secondary fallback for the rare
-    // item where market_value is 0/missing but a fixed sell-to-NPC price exists.
     async function fetchOfficialItemPrice(id) {
         const key = getLogApiKey();
         if (!key) {
@@ -1044,11 +1125,6 @@
             const res = await fetchWithTimeout(`https://api.torn.com/torn/${encodeURIComponent(id)}?selections=items&key=${encodeURIComponent(key)}`);
             const data = await res.json();
             if (data?.error) {
-                // Code 16 = "Access level of this key is not high enough" — this is a
-                // Custom-key permissions gap, not a broken key: the Torn > Items
-                // selection is a separate checkbox from the User > log selection
-                // this key was originally created for. Flagged distinctly so the UI
-                // can point at the actual fix instead of a generic error.
                 itemPriceFetchFailureReason.set(id, data.error.code === 16 ? 'permissions' : 'api-error');
                 logDiagnostic('item-price-fetch-error', `Item ${id}: ${data.error.error || 'API error'}`);
                 return null;
@@ -1067,10 +1143,6 @@
         }
     }
 
-    // Resolves any item ids still missing a price across ALL stored records
-    // (not just the one that just triggered this), then recomputes every
-    // affected record's itemValue/total and re-renders. Each id is only
-    // attempted once per page session to avoid hammering the API.
     async function resolveUnknownItemPrices() {
         const unresolvedIds = [...new Set(
             profitRecords.flatMap((rec) => rec.items.filter((it) => typeof it.unitValue !== 'number').map((it) => it.id))
@@ -1119,16 +1191,12 @@
         const grouped = new Map();
         for (const record of profitRecords) {
             const key = profitPeriodKey(record.ts, period);
-            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, unresolvedCount: 0, permissionsBlocked: false };
+            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, nerveSpent: 0, unresolvedCount: 0, permissionsBlocked: false };
             row.cash += record.cash; row.itemValue += record.itemValue; row.total += record.total; row.count += 1;
-            // Only records with a matched nerve reading contribute to the ratio,
-            // on both sides of the division — an unmatched record (nerve bar
-            // wasn't found, or it's an older record from before this feature)
-            // is left out of the ratio entirely rather than treated as 0 nerve,
-            // which would otherwise silently inflate $/nerve.
             if (typeof record.nerve === 'number' && record.nerve > 0) {
                 row.nerve += record.nerve;
                 row.totalWithNerve += record.total;
+                row.nerveSpent += record.nerve;
             }
             for (const it of record.items) {
                 if (typeof it.unitValue !== 'number') {
@@ -1141,11 +1209,96 @@
         return [...grouped.values()].sort((a, b) => b.key.localeCompare(a.key));
     }
 
+    function buildGraphSVG(rows) {
+        const sorted = [...rows].sort((a, b) => a.key.localeCompare(b.key));
+
+        const width = 460;
+        const height = 220;
+        const padding = { top: 15, right: 25, bottom: 30, left: 50 };
+
+        const innerWidth = width - padding.left - padding.right;
+        const innerHeight = height - padding.top - padding.bottom;
+
+        const visibleMaxima = [];
+
+        if (graphVisibility.cash) {
+            visibleMaxima.push(...sorted.map(r => r.cash));
+        }
+        if (graphVisibility.items) {
+            visibleMaxima.push(...sorted.map(r => r.itemValue));
+        }
+        if (graphVisibility.total) {
+            visibleMaxima.push(...sorted.map(r => r.total));
+        }
+
+        const maxVal = Math.max(1, ...visibleMaxima);
+
+        const getX = (i) => padding.left + (i / (sorted.length - 1)) * innerWidth;
+        const getY = (val) => padding.top + innerHeight - (val / maxVal) * innerHeight;
+
+        const cashPath = sorted.map((r, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(r.cash)}`).join(' ');
+        const itemsPath = sorted.map((r, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(r.itemValue)}`).join(' ');
+        const totalPath = sorted.map((r, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(r.total)}`).join(' ');
+
+        const yTicks = 4;
+        let gridLines = '';
+        for (let i = 0; i <= yTicks; i++) {
+            const val = (maxVal / yTicks) * i;
+            const y = getY(val);
+            gridLines += `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" class="cct-graph-grid" />`;
+            gridLines += `<text x="${padding.left - 5}" y="${y + 3}" text-anchor="end" class="cct-graph-label">${money(val)}</text>`;
+        }
+
+        const step = Math.ceil(sorted.length / 6);
+        let xLabels = '';
+        sorted.forEach((r, i) => {
+            if (i % step === 0 || i === sorted.length - 1) {
+                const anchor = (i === sorted.length - 1) ? 'end' : 'middle';
+                xLabels += `<text x="${getX(i)}" y="${height - 5}" text-anchor="${anchor}" class="cct-graph-label">${r.key}</text>`;
+            }
+        });
+
+        let dots = '';
+        sorted.forEach((r, i) => {
+            const x = getX(i);
+            if (graphVisibility.cash) dots += `<circle cx="${x}" cy="${getY(r.cash)}" r="3" fill="#00ff66" class="cct-graph-dot"><title>${r.key} Cash: ${money(r.cash)}</title></circle>`;
+            if (graphVisibility.items) dots += `<circle cx="${x}" cy="${getY(r.itemValue)}" r="3" fill="#4ea8de" class="cct-graph-dot"><title>${r.key} Items: ${money(r.itemValue)}</title></circle>`;
+            if (graphVisibility.total) dots += `<circle cx="${x}" cy="${getY(r.total)}" r="3" fill="#ffaa00" class="cct-graph-dot"><title>${r.key} Total: ${money(r.total)}</title></circle>`;
+        });
+
+        return `
+            <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
+                <!-- Axes -->
+                <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}" class="cct-graph-axis" />
+                <line x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}" class="cct-graph-axis" />
+
+                <!-- Grid & Labels -->
+                ${gridLines}
+                ${xLabels}
+
+                <!-- Data Lines -->
+                ${graphVisibility.total ? `<path d="${totalPath}" stroke="#ffaa00" class="cct-graph-line" />` : ''}
+                ${graphVisibility.items ? `<path d="${itemsPath}" stroke="#4ea8de" class="cct-graph-line" />` : ''}
+                ${graphVisibility.cash ? `<path d="${cashPath}" stroke="#00ff66" class="cct-graph-line" />` : ''}
+
+                <!-- Dots -->
+                ${dots}
+            </svg>
+            <div class="cct-graph-legend">
+                <span data-graph-toggle="cash" class="${graphVisibility.cash ? '' : 'cct-graph-legend-off'}"><span class="dot" style="background:#00ff66"></span> Cash</span>
+                <span data-graph-toggle="items" class="${graphVisibility.items ? '' : 'cct-graph-legend-off'}"><span class="dot" style="background:#4ea8de"></span> Items</span>
+                <span data-graph-toggle="total" class="${graphVisibility.total ? '' : 'cct-graph-legend-off'}"><span class="dot" style="background:#ffaa00"></span> Total</span>
+            </div>
+        `;
+    }
+
     function renderProfitPopover() {
         const popover = document.querySelector('#cct-profit-popover');
         if (!popover) return;
         const period = popover.dataset.period || 'day';
         const rows = profitRows(period);
+
+        // Totals for the summary block (stays the same regardless of view)
         const totals = rows.reduce((sum, row) => ({
             cash: sum.cash + row.cash,
             itemValue: sum.itemValue + row.itemValue,
@@ -1153,12 +1306,36 @@
             count: sum.count + row.count,
             nerve: sum.nerve + row.nerve,
             totalWithNerve: sum.totalWithNerve + row.totalWithNerve,
-        }), { cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0 });
-        popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
-        popover.querySelector('#cct-profit-rows').innerHTML = rows.length ? `<div class="cct-profit-row cct-profit-row-header">
+            nerveSpent: sum.nerveSpent + row.nerveSpent,
+        }), { cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, nerveSpent: 0 });
+
+        popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>Nerve</small><strong>${totals.nerveSpent.toLocaleString('en-US')}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
+
+        const tableEl = popover.querySelector('#cct-profit-rows');
+        const graphEl = popover.querySelector('#cct-profit-graph');
+        const scrollArea = popover.querySelector('#cct-profit-scroll-area');
+        const toggleBtn = popover.querySelector('#cct-profit-view-toggle');
+        const isGraphView = popover.dataset.view === 'graph';
+
+        if (isGraphView) {
+            tableEl.style.display = 'none';
+            graphEl.classList.add('cct-open');
+            scrollArea.classList.add('cct-hide-scrollbar'); // Hide scrollbar only in graph view
+            toggleBtn.innerHTML = CHART_ICON;
+            toggleBtn.style.opacity = '1';
+        } else {
+            tableEl.style.display = 'grid';
+            graphEl.classList.remove('cct-open');
+            scrollArea.classList.remove('cct-hide-scrollbar'); // Restore scrollbar in table view
+            toggleBtn.innerHTML = CHART_ICON;
+            toggleBtn.style.opacity = '0.6';
+        }
+
+        tableEl.innerHTML = rows.length ? `<div class="cct-profit-row cct-profit-row-header">
                 <span class="cct-profit-col-date"></span>
                 <span class="cct-profit-col-val">Cash</span>
                 <span class="cct-profit-col-val">Items</span>
+                <span class="cct-profit-col-val">Nerve</span>
                 <span class="cct-profit-col-val">$/N</span>
             </div>` + rows.map((row) => {
             const pendingTag = row.permissionsBlocked
@@ -1168,10 +1345,27 @@
                 <span class="cct-profit-col-date">${escapeHTML(row.key)}</span>
                 <span class="cct-profit-col-val">${money(row.cash)}</span>
                 <span class="cct-profit-col-val">${money(row.itemValue)}</span>
+                <span class="cct-profit-col-val">${(row.nerveSpent || 0).toLocaleString('en-US')}</span>
                 <span class="cct-profit-col-val">${ratioText(row.totalWithNerve, row.nerve)}/N</span>
                 ${pendingTag ? `<span class="cct-profit-col-tag">${pendingTag}</span>` : ''}
             </div>`;
         }).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
+
+        if (isGraphView && rows.length > 1) {
+            graphEl.innerHTML = buildGraphSVG(rows);
+            // Wire up the legend toggles
+            graphEl.querySelectorAll('[data-graph-toggle]').forEach(span => {
+                span.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const key = span.dataset.graphToggle;
+                    graphVisibility[key] = !graphVisibility[key];
+                    renderProfitPopover();
+                });
+            });
+        } else if (isGraphView) {
+            graphEl.innerHTML = '<div class="cct-profit-empty" style="text-align:center;">Not enough data to graph yet.</div>';
+        }
+
         popover.querySelectorAll('[data-profit-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.profitPeriod === period));
         const resetBtn = popover.querySelector('#cct-profit-reset');
         if (resetBtn) resetBtn.disabled = profitRecords.length === 0;
@@ -1193,8 +1387,6 @@
         const clean = normalizeText(text);
         if (!clean) return null;
 
-        // Jail busts / busted messages are not Crime 2.0 chain outcomes.
-        // They must never halve or reset the crime chain.
         if (/\b(?:jail\s*)?bust(?:ed|s|ing)?\b/i.test(clean)) return null;
 
         for (const rule of OUTCOME_RULES) {
@@ -1264,10 +1456,8 @@
     function isExcludedNativeBadgeContext(el) {
         if (!el || !el.closest) return true;
         if (el.closest('#cct-root')) return true;
-        // Top bars / menus often hold points, energy, happy — never treat those as chain
         if (el.closest('#header, #top-header, .header, .top-header, #sidebar, .sidebar, #nav, nav')) return true;
         if (el.closest('[class*="header-wrapper" i], [class*="top-banner" i], [class*="menu-items" i]')) return true;
-        // Points / money / bars tooltips
         if (el.closest('[class*="point" i][class*="value" i], [class*="user-info" i]')) return true;
         return false;
     }
@@ -1279,7 +1469,6 @@
         if (labelEl && el.parentElement && el.parentElement === labelEl.parentElement) score += 6;
         if (labelEl && (el.previousElementSibling === labelEl || el.nextElementSibling === labelEl)) score += 10;
         if (labelEl && labelEl.contains(el)) score += 4;
-        // Prefer smaller numbers near the label; huge page-wide scans get low score
         try {
             const labelRect = labelEl.getBoundingClientRect();
             const elRect = el.getBoundingClientRect();
@@ -1292,7 +1481,6 @@
     }
 
     function findNativeChainBadge() {
-        // Re-validate cache: must still look like a chain digit leaf next to crimes UI
         if (
             cachedNativeChainValueEl &&
             cachedNativeChainValueEl.isConnected &&
@@ -1305,7 +1493,6 @@
         }
         cachedNativeChainValueEl = null;
 
-        // Prefer Torn crimes app scope so sidebar points (e.g. P 3024) cannot win
         const scope =
             document.querySelector('.crimes-app') ||
             document.querySelector('[class*="crimes-app"]') ||
@@ -1328,7 +1515,6 @@
         const labelEl = labelNode.parentElement;
         if (!labelEl) return null;
 
-        // Search only a tight ancestor chain — large containers pull in points/nerve
         let container = labelEl;
         let best = null;
         let bestScore = -Infinity;
@@ -1351,7 +1537,6 @@
             container = container.parentElement;
         }
 
-        // Require a minimum confidence so a random digit in a fat parent is ignored
         if (!best || bestScore < 4) return null;
 
         cachedNativeChainValueEl = best;
@@ -1365,7 +1550,6 @@
 
         const current = Number.isFinite(chain) ? chain : 0;
 
-        // Hardening against false positives (points, display-cap ghosts, etc.)
         if (badge.value === CHAIN_CAP_DISPLAY && current > 0 && current !== CHAIN_CAP_DISPLAY) {
             logDiagnostic('native-badge-rejected', {
                 reason: 'value equals display cap while current chain differs',
@@ -1377,8 +1561,6 @@
         }
 
         const delta = Math.abs(badge.value - current);
-        // Always reject implausible jumps (including non-finite edge cases).
-        // Real chain steps come from outcome counters / log verify / manual set.
         if (!Number.isFinite(delta) || (delta > MAX_REASONABLE_COUNTER_DELTA && badge.value !== 0)) {
             logDiagnostic('native-badge-rejected', {
                 reason: 'implausible jump from current chain',
@@ -1386,7 +1568,6 @@
                 currentChain: current,
                 delta,
             });
-            // Drop cache so the next pass re-resolves the DOM node
             cachedNativeChainValueEl = null;
             return false;
         }
@@ -1496,15 +1677,6 @@
             return true;
         }
 
-        // Torn's crime panel can render a blank 0/0/0 frame for a moment while it
-        // reloads — this happens after using an item (e.g. a nerve refill), navigating,
-        // or a plain refresh, not just chain-relevant events. If we let that zero
-        // become the new baseline, the *next* real reading (which is often unchanged
-        // from before the reload) looks like a huge jump up from zero — including in
-        // criticalFails — and gets misread as a fresh critical failure, wrongly
-        // resetting the chain. So: if we were previously tracking real counts and this
-        // reading is all-zero, treat it as a render artifact and keep the old baseline
-        // rather than reseeding to zero.
         const wasTrackingRealCounts = lastResultCounts.successes > 0 || lastResultCounts.fails > 0 || lastResultCounts.criticalFails > 0;
         const isBlankFrame = current.successes === 0 && current.fails === 0 && current.criticalFails === 0;
         if (wasTrackingRealCounts && isBlankFrame) return true;
@@ -1512,11 +1684,6 @@
         const dSuccess = current.successes - lastResultCounts.successes;
         const dFail = current.fails - lastResultCounts.fails;
         const criticalDelta = current.criticalFails - confirmedCriticalFails;
-
-        // If Torn rehydrates the crimes panel, these visible counters can jump from
-        // the short-lived session counts we were tracking to larger cumulative totals.
-        // Treat impossible positive jumps as a fresh baseline, not thousands of new
-        // crimes. Real-time DOM fallback should only ever see small bursts.
         const isImplausiblePositiveJump =
             dSuccess > MAX_REASONABLE_COUNTER_DELTA ||
             dFail > MAX_REASONABLE_COUNTER_DELTA;
@@ -1567,34 +1734,14 @@
             pendingResultCountReseed = null;
         }
 
-        // Critical-fail confirmation is tracked against its own baseline
-        // (confirmedCriticalFails), independent from lastResultCounts, so that the
-        // act of merely *seeing* a suspicious reading doesn't itself shift the
-        // goalposts used to detect it again on the next cycle.
         const oldChain = chain;
         let criticalConfirmedReset = false;
 
         if (criticalDelta < 0) {
-            // Counter went backwards (page reload/reseed) — trust the new lower
-            // number as the fresh baseline, don't touch the chain.
             confirmedCriticalFails = current.criticalFails;
             pendingCriticalConfirm = null;
             pendingResultCountReseed = null;
         } else if (criticalDelta > 0) {
-            // A critical fail wipes the whole chain — the one irreversible action this
-            // script can take — so a single noisy reading isn't enough to trust it. This
-            // was seen firsthand: a race-crash hospitalization interrupt on the crimes
-            // page produced one garbled reading that looked like an extra critical fail
-            // and wiped a legitimate 61-chain. Require the *next* reading to still show
-            // criticalFails at this same elevated value before actually applying the
-            // reset; a transient/corrupted render won't usually repeat itself twice in a row.
-            //
-            // NOTE: lastResultCounts/confirmedCriticalFails are (re)assigned here even
-            // though canApplyResultDeltas may already have done so above — deliberately
-            // NOT deduplicated. canApplyResultDeltas requires dSuccess>=0 && dFail>=0,
-            // which is a weaker condition than reaching this branch; criticalDelta>0 can
-            // legitimately occur alongside a negative dSuccess/dFail (canApplyResultDeltas
-            // false), in which case this is the only place that advances the baseline.
             if (pendingCriticalConfirm && pendingCriticalConfirm.criticalFails === current.criticalFails) {
                 chain = 0;
                 criticalConfirmedReset = true;
@@ -1626,8 +1773,6 @@
                     criticalDelta,
                     pendingCriticalConfirm,
                 });
-                // Fall through — success/fail movement this cycle still applies below.
-                // Only the critical-fail reset itself is deferred pending confirmation.
             }
         } else {
             pendingCriticalConfirm = null;
@@ -2079,26 +2224,88 @@
                 max-width: calc(100vw - 16px);
                 box-sizing: border-box;
                 max-height: min(68vh, 620px);
-                overflow: auto;
+                overflow: hidden;
                 padding: 10px 12px;
                 border-radius: 8px;
                 box-shadow: 0 6px 20px rgba(0,0,0,0.5);
                 font-size: 12px;
+                flex-direction: column;
             }
-            #cct-profit-popover.cct-open { display: block; }
-            #cct-profit-title { font-size: 13px; font-weight: 700; }
-            #cct-profit-periods { display: flex; gap: 5px; margin: 9px 0; }
+            #cct-profit-popover.cct-open { display: flex; }
+            #cct-profit-scroll-area {
+                overflow-y: auto;
+                overflow-x: hidden; /* Prevents horizontal window break */
+                flex: 1;
+                min-height: 0;
+            }
+            /* Hide scrollbar only when the graph is active */
+            #cct-profit-scroll-area.cct-hide-scrollbar::-webkit-scrollbar {
+                display: none;
+            }
+            #cct-profit-scroll-area.cct-hide-scrollbar {
+                -ms-overflow-style: none;
+                scrollbar-width: none;
+            }
+            #cct-profit-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 4px; }
+            #cct-debug-toggle { padding: 2px 4px; }
+            #cct-profit-popover.cct-debug-open #cct-debug-toggle { opacity: 1 !important; }
+            #cct-profit-popover.cct-debug-open #cct-profit-periods,
+            #cct-profit-popover.cct-debug-open #cct-profit-scroll-area,
+            #cct-profit-popover.cct-debug-open #cct-profit-reset-row,
+            #cct-profit-popover.cct-debug-open #cct-sync-section { display: none; }
+            #cct-debug-panel { display: none; flex-direction: column; gap: 6px; margin-top: 8px; flex: 1; min-height: 0; }
+            #cct-profit-popover.cct-debug-open #cct-debug-panel { display: flex; }
+            #cct-debug-actions { display: flex; gap: 6px; }
+            #cct-debug-refresh, #cct-debug-copy, #cct-debug-clear {
+                padding: 4px 9px; font-size: 11px; border-radius: 5px; cursor: pointer;
+                transition: background 0.15s; white-space: nowrap;
+            }
+            #cct-debug-output {
+                margin: 0; padding: 8px; border-radius: 5px;
+                font-family: ui-monospace, Consolas, monospace; font-size: 10px; line-height: 1.4;
+                white-space: pre-wrap; word-break: break-all;
+                overflow: auto; flex: 1; min-height: 0; max-height: 46vh; user-select: text;
+            }
+            #cct-profit-periods { display: flex; gap: 5px; margin: 9px 0; align-items: center; }
             .cct-profit-period { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 0; font-size: 11px; opacity: 0.6; }
             .cct-profit-period:not(:last-child)::after { content: '·'; margin-left: 5px; }
             .cct-profit-period.cct-profit-active { font-weight: 700; opacity: 1; }
-            #cct-profit-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+            #cct-profit-summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
             #cct-profit-summary > div { padding: 7px 5px; border-radius: 5px; }
             #cct-profit-summary small { display: block; opacity: 0.55; font-size: 9px; white-space: nowrap; }
             #cct-profit-summary strong { font-size: 11px; white-space: nowrap; }
             #cct-profit-rows { display: grid; gap: 2px; margin-top: 8px; }
+            #cct-profit-graph {
+                display: none;
+                margin-top: 10px;
+                width: 100%;
+                box-sizing: border-box;
+                flex: 1;
+                min-height: 0;
+            }
+            #cct-profit-graph.cct-open { display: flex; flex-direction: column; }
+            #cct-profit-graph svg {
+                width: 100%;
+                flex: 1;
+                min-height: 0;
+                max-width: 100%;
+                display: block;
+                overflow: visible;
+            }
+            .cct-graph-axis { stroke: rgba(128,128,128,0.3); stroke-width: 1; }
+            .cct-graph-grid { stroke: rgba(128,128,128,0.1); stroke-width: 1; stroke-dasharray: 2 2; }
+            .cct-graph-label { font-size: 9px; fill: inherit; opacity: 0.6; }
+            .cct-graph-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+            .cct-graph-dot { stroke: #1e1e1e; stroke-width: 1.5; transition: r 0.15s; }
+            .cct-graph-dot:hover { r: 4; }
+            .cct-graph-legend { display: flex; justify-content: center; gap: 10px; margin-top: 5px; font-size: 10px; opacity: 0.8; }
+            .cct-graph-legend span { display: flex; align-items: center; gap: 4px; cursor: pointer; transition: opacity 0.2s; user-select: none; }
+            .cct-graph-legend span:hover { opacity: 1; }
+            .cct-graph-legend span.cct-graph-legend-off { opacity: 0.3; text-decoration: line-through; }
+            .cct-graph-legend .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
             .cct-profit-row {
                 display: grid;
-                grid-template-columns: 1fr 1fr 1fr 1fr;
+                grid-template-columns: 1fr 1fr 1fr 0.8fr 0.8fr;
                 align-items: baseline;
                 gap: 4px 10px;
                 font-size: 10px;
@@ -2164,6 +2371,11 @@
                 el.style.background = th.saveBg;
                 el.style.border = `1px solid ${th.saveBorder}`;
             });
+            const dbgOut = profitPopover.querySelector('#cct-debug-output');
+            if (dbgOut) {
+                dbgOut.style.background = th.saveBg;
+                dbgOut.style.border = `1px solid ${th.saveBorder}`;
+            }
         }
 
         document.querySelectorAll('#cct-chain-input,#cct-log-key-input,#cct-sync-token-input').forEach((input) => {
@@ -2174,7 +2386,7 @@
             input.onblur = () => { input.style.borderColor = th.inputBorder; };
         });
 
-        document.querySelectorAll('#cct-chain-save,#cct-log-clear,#cct-log-key-save,#cct-log-sync-now,#cct-create-log-key-btn,#cct-sync-token-generate,#cct-sync-token-save,#cct-sync-now').forEach((btn) => {
+        document.querySelectorAll('#cct-chain-save,#cct-log-clear,#cct-log-key-save,#cct-log-sync-now,#cct-create-log-key-btn,#cct-sync-token-generate,#cct-sync-token-save,#cct-sync-now,#cct-debug-refresh,#cct-debug-copy,#cct-debug-clear').forEach((btn) => {
             btn.style.background = th.saveBg;
             btn.style.border = `1px solid ${th.saveBorder}`;
             btn.style.color = th.popoverColor;
@@ -2252,16 +2464,28 @@
                 </details>
                 <div class="cct-version-footer">Version ${VERSION}</div>
             </div>
-            <div id="cct-profit-popover" data-period="day">
-                <div id="cct-profit-title">Crime Profit</div>
+            <div id="cct-profit-popover" data-period="day" data-view="table">
+                <div id="cct-profit-title">Crime Profit <span style="font-size: 9px; opacity: 0.5; font-weight: normal; margin-left: 4px;">v${VERSION}</span><button id="cct-debug-toggle" class="cct-icon-btn" type="button" title="Debug nerve tracking">${BUG_ICON}</button></div>
                 <div id="cct-profit-periods">
                     <button class="cct-profit-period" data-profit-period="day" type="button">Day</button>
                     <button class="cct-profit-period" data-profit-period="week" type="button">Week</button>
                     <button class="cct-profit-period" data-profit-period="month" type="button">Month</button>
                     <button class="cct-profit-period" data-profit-period="year" type="button">Year</button>
+                    <button id="cct-profit-view-toggle" class="cct-icon-btn" type="button" title="Toggle Graph View" style="margin-left: auto; opacity: 0.6;">${CHART_ICON}</button>
                 </div>
-                <div id="cct-profit-summary"></div>
-                <div id="cct-profit-rows"></div>
+                <div id="cct-profit-scroll-area">
+                    <div id="cct-profit-summary"></div>
+                    <div id="cct-profit-rows"></div>
+                    <div id="cct-profit-graph"></div>
+                </div>
+                <div id="cct-debug-panel">
+                    <div id="cct-debug-actions">
+                        <button id="cct-debug-refresh" type="button">Refresh</button>
+                        <button id="cct-debug-copy" type="button">Copy report</button>
+                        <button id="cct-debug-clear" type="button">Reset trace</button>
+                    </div>
+                    <pre id="cct-debug-output"></pre>
+                </div>
                 <div id="cct-profit-reset-row">
                     <button id="cct-profit-reset" type="button">Reset profit history</button>
                 </div>
@@ -2289,6 +2513,12 @@
         `;
 
         anchor.appendChild(el);
+        widgetRecoveryLogged = false;
+        logDiagnostic('widget-inserted', {
+            anchor: anchor.id || (typeof anchor.className === 'string' ? anchor.className : anchor.tagName),
+            route: location.pathname + location.search,
+        });
+        console.log(`[CCT v${VERSION}] Widget inserted into Crimes interface.`);
 
         el.querySelector('#cct-theme-toggle').addEventListener('click', (e) => {
             e.stopPropagation();
@@ -2306,11 +2536,6 @@
 
     let infoIconWired = false;
 
-    // Hover/:focus alone don't work reliably on touch devices — many mobile
-    // browsers don't fire :hover on tap at all, and even where they do,
-    // there's no "hover away" gesture to dismiss it again. This adds an
-    // explicit tap-toggle (.cct-info-open, handled by the CSS above) so the
-    // same tooltip works on PDA/mobile, not just desktop.
     function wireInfoIconOnce() {
         if (infoIconWired) return;
         infoIconWired = true;
@@ -2318,9 +2543,6 @@
         document.addEventListener('click', (e) => {
             const icon = e.target.closest('.cct-info-icon');
             if (icon && icon.closest('#cct-root')) {
-                // The sync-section icon sits inside a <summary> — without this,
-                // tapping ⓘ would also toggle that <details> open/closed via the
-                // browser's default summary-click behavior.
                 e.preventDefault();
                 e.stopPropagation();
                 const wasOpen = icon.classList.contains('cct-info-open');
@@ -2334,15 +2556,6 @@
 
     let outsideClickWired = false;
 
-    // Pure CSS (max-width + right:0/left:0) can bound a popover's *size* to the
-    // viewport, but it can't know where the widget itself actually sits on
-    // screen — on Torn's mobile/PDA layout the widget can be near the left
-    // edge, which left a right-anchored popover mostly off-canvas to the left
-    // with nothing to scroll or drag it into view. This measures the popover's
-    // real on-screen position after CSS has placed it, and nudges it back
-    // in-bounds with an inline left offset (converted into rootEl's own
-    // coordinate space, since the popover is absolutely positioned relative
-    // to rootEl, not the viewport).
     function clampPopoverToViewport(popover, rootEl) {
         const margin = 8;
         const viewportWidth = window.innerWidth;
@@ -2363,9 +2576,6 @@
         if (viewportClampWired) return;
         viewportClampWired = true;
 
-        // Re-clamp whichever popover is currently open on resize/rotation —
-        // covers switching a phone between portrait and landscape, or a
-        // desktop window being resized, while a popover is sitting open.
         const reclamp = () => {
             const root = document.querySelector('#cct-root');
             if (!root) return;
@@ -2386,10 +2596,6 @@
         if (outsideClickWired) return;
         outsideClickWired = true;
 
-        // Single delegated listener for the lifetime of the page. Looks up the
-        // *current* #cct-root and #cct-settings-popover at click time instead of
-        // closing over a specific widget instance, so rebuilding the widget
-        // after SPA navigation never accumulates extra document listeners.
         document.addEventListener('click', (e) => {
             const root = document.querySelector('#cct-root');
             const popover = document.querySelector('#cct-settings-popover');
@@ -2414,6 +2620,13 @@
                 clampPopoverToViewport(popover, el);
             }
         });
+
+        popover.querySelector('#cct-profit-view-toggle').addEventListener('click', (e) => {
+            e.stopPropagation();
+            popover.dataset.view = popover.dataset.view === 'graph' ? 'table' : 'graph';
+            renderProfitPopover();
+        });
+
         popover.querySelectorAll('[data-profit-period]').forEach((button) => {
             button.addEventListener('click', () => {
                 popover.dataset.period = button.dataset.profitPeriod;
@@ -2428,6 +2641,7 @@
         wireViewportClampOnce();
         wireInfoIconOnce();
         wireSyncUI(popover);
+        wireDebugUI(popover);
     }
 
     function wireSyncUI(popover) {
@@ -2617,10 +2831,7 @@
         observer = new MutationObserver((mutations) => {
             if (!document.querySelector('#cct-root')) renderWidget();
 
-            // Supplementary nerve reading opportunity — profit/reward capture
-            // itself is now handled by the crime-attempt fetch interceptor (see
-            // installCrimeAttemptInterceptor), not by watching this popup render.
-            pollNerve();
+            pollNerve('mutation');
 
             const synced = syncFromNativeBadge();
 
@@ -2631,25 +2842,9 @@
             }
         });
 
-        // Deliberately NOT observing characterData: outcome/chain detection
-        // above only ever reads element text via textContent/querySelectorAll
-        // (childList additions), never diffs individual text-node mutations.
-        // Enabling characterData here fired the whole callback — including a
-        // findCrimesApp()/readResultCounts() DOM query pass — on every single
-        // text-node change in the crimes subtree (keystrokes, timers, animated
-        // counters), which is a lot of unnecessary work for a signal nothing
-        // downstream actually consumes.
         observer.observe(root, { childList: true, subtree: true });
     }
 
-    // Fetches one page (up to 100 entries) of crime-outcome log entries. Verified
-    // against real API responses — log IDs confirmed via torn/logtypes and
-    // cross-checked against the in-game log page down to the exact second:
-    //   9010 = Crime success, 9150 = Crime fail (new)
-    //   9154/9155/9158/9160/9163/9165 = Crime critical fail (fragmented by side effect —
-    //   a jail-outcome crit logs ONLY as 9155, not the generic 9154)
-    // Optional `to` pages further back in time (unix seconds) per Torn's documented
-    // log pagination. Paginated (to/from) queries are cached ~30s by Torn's API.
     async function fetchCrimeLogPage(key, to) {
         const idsParam = LOG_IDS_ALL.join(',');
         let url = `https://api.torn.com/user/?selections=log&log=${idsParam}&key=${encodeURIComponent(key)}`;
@@ -2665,9 +2860,6 @@
         return Object.values(raw).map((e) => ({ log: e.log, timestamp: e.timestamp }));
     }
 
-    // Replays success (+1) / fail (halve, floored) from just after the most recent
-    // critical fail (reset to 0) found in the given entries. Returns null if no
-    // critical fail appears in this batch at all — caller should page further back.
     function replayChainFromEntries(entries) {
         const sorted = entries.slice().sort((a, b) => a.timestamp - b.timestamp);
         let lastCritIndex = -1;
@@ -2685,8 +2877,6 @@
         return { chain: result, successCount, failCount, resetTimestamp: sorted[lastCritIndex].timestamp, oldestTimestamp: sorted[0].timestamp };
     }
 
-    // Remembers where to page backward to if the last attempt found no critical fail
-    // in its batch — cleared on any successful reconstruction.
     let logSyncPageBefore = null;
 
     async function syncFromLogs(trigger) {
@@ -2699,9 +2889,6 @@
 
             const result = replayChainFromEntries(entries);
             if (!result) {
-                // No critical fail in this batch — remember to page further back on
-                // the next attempt rather than auto-chaining calls (30s cache on
-                // paginated queries would just return the same data back-to-back).
                 const oldest = entries.slice().sort((a, b) => a.timestamp - b.timestamp)[0].timestamp;
                 logSyncPageBefore = oldest - 1;
                 return { ok: false, reason: 'no-reset-found' };
@@ -2734,20 +2921,95 @@
             }
             renderWidget();
             startDOMObserver();
-            pollNerve();
+            pollNerve('sync-loop');
             if (!syncFromNativeBadge()) applyResultCountDeltaFallback({ source: 'sync-loop' });
             render(false);
         }, 100);
     }
 
-    async function waitForApp(timeout = 15000) {
-        const started = Date.now();
-        while (Date.now() - started < timeout) {
-            const app = findCrimesApp();
-            if (app) return app;
-            await new Promise((resolve) => setTimeout(resolve, 250));
+    function startAppRuntime(source) {
+        if (appRuntimeStarted) return;
+        appRuntimeStarted = true;
+        appWaitLogged = false;
+
+        const detectedApp = findCrimesApp();
+        logDiagnostic('crimes-interface-detected', {
+            source,
+            app: describeElement(detectedApp),
+            route: location.pathname + location.search,
+        });
+        console.log(`[CCT v${VERSION}] Crimes interface detected (${source}); initializing tracker.`);
+        runSyncLoop();
+        pollNerve('init');
+        setInterval(() => pollNerve('interval'), 1500);
+        resolveUnknownItemPrices();
+        startCrossDeviceSync();
+        logDiagnostic('tracker-initialized', {
+            source,
+            widgetPresent: !!document.querySelector('#cct-root'),
+            fetchAvailable: typeof window.fetch === 'function',
+        });
+        console.log(`[CCT v${VERSION}] Tracker initialized successfully.`);
+    }
+
+    function checkForCrimesApp(source) {
+        const app = findCrimesApp();
+        if (!app) return false;
+
+        if (!appRuntimeStarted) {
+            startAppRuntime(source || 'watcher');
+            return true;
         }
-        return null;
+
+        // Torn PDA can replace the Crimes subtree after initial startup.
+        // If that happens, let the normal sync loop reattach the widget/observer.
+        if (!document.querySelector('#cct-root')) {
+            if (!widgetRecoveryLogged) {
+                widgetRecoveryLogged = true;
+                logDiagnostic('widget-missing-recovery-started', {
+                    source,
+                    app: describeElement(app),
+                    route: location.pathname + location.search,
+                });
+            }
+            runSyncLoop();
+        }
+        return true;
+    }
+
+    function startAppWatcher() {
+        if (appWatcherStarted) return;
+        appWatcherStarted = true;
+
+        // Observe the whole document because Torn PDA may mount the Crimes app
+        // after document-idle or replace it during an internal navigation.
+        const watchTarget = document.documentElement || document;
+        if (watchTarget && typeof MutationObserver !== 'undefined') {
+            appWatchObserver = new MutationObserver(() => checkForCrimesApp('DOM observer'));
+            appWatchObserver.observe(watchTarget, { childList: true, subtree: true });
+        }
+
+        // Mutation observers are the primary trigger; this low-frequency check
+        // is a fallback for PDA builds that update the view without useful DOM
+        // mutations reaching the observer.
+        appWatchInterval = setInterval(() => {
+            const wasStarted = appRuntimeStarted;
+            const found = checkForCrimesApp('retry');
+            if (found && !wasStarted) {
+                logDiagnostic('crimes-interface-found-on-retry', {
+                    route: location.pathname + location.search,
+                });
+            }
+        }, 1500);
+
+        const foundInitially = checkForCrimesApp('initial check');
+        if (!foundInitially && !appWaitLogged) {
+            appWaitLogged = true;
+            logDiagnostic('waiting-for-crimes-interface', {
+                message: 'Crimes interface was not present at initial check; watcher remains active.',
+                route: location.pathname + location.search,
+            });
+        }
     }
 
     function watchSpaNavigation() {
@@ -2848,28 +3110,23 @@
     }
     document.addEventListener('torn-script-hub:ready', registerWithHub);
 
-    async function init() {
+    function init() {
         injectCSS();
         watchSpaNavigation();
-
-        const app = await waitForApp();
-        if (!app) return;
-
-        runSyncLoop();
-        pollNerve();
-        // Heartbeat independent of the SPA sync loop so a nerve drop that lands
-        // between mutation bursts (or on a route the observer isn't watching)
-        // still gets caught before its window expires.
-        setInterval(pollNerve, 1500);
-        // One-time sweep on load: retries any item left unresolved by an earlier
-        // session (e.g. the market_value/price field-name bug in 4.7.4, which
-        // made every lookup fail regardless of item) now that the fix is live.
-        resolveUnknownItemPrices();
-        // Only arms timers/fires a request if the person previously opted in
-        // AND saved a token — stays fully inert otherwise (see SYNC_WORKER_URL
-        // comment near the top).
-        startCrossDeviceSync();
-        console.log(`[CCT v${VERSION}] Hardened crime chain tracker loaded.`);
+        logDiagnostic('script-started', {
+            readyState: document.readyState,
+            visibilityState: document.visibilityState,
+            route: location.pathname + location.search,
+            userAgent: navigator.userAgent.slice(0, 160),
+        });
+        const interceptorWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        logDiagnostic('fetch-interceptor-status', {
+            installed: !!interceptorWindow.__cctFetchWrapped,
+            fetchAvailable: typeof interceptorWindow.fetch === 'function',
+            realm: typeof unsafeWindow !== 'undefined' ? 'unsafeWindow' : 'window',
+        });
+        startAppWatcher();
+        console.log(`[CCT v${VERSION}] Script started; waiting for Crimes interface if it is not mounted yet.`);
     }
 
     init();
