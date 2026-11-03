@@ -1,0 +1,3226 @@
+// ==UserScript==
+// @name         Crime Chain Tracker
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      4.15.0
+// @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
+// @author       cowboyup
+// @match        https://www.torn.com/page.php?sid=crimes*
+// @run-at       document-idle
+// @license      MIT; https://opensource.org/licenses/MIT
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      cct-sync.selbaer.workers.dev
+// @connect      login.microsoftonline.com
+// @connect      graph.microsoft.com
+// @downloadURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.user.js
+// @updateURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.meta.js
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const VERSION = '4.15.0';
+    const SYNC_WORKER_URL = 'https://cct-sync.selbaer.workers.dev';
+    installCrimeAttemptInterceptor();
+    const STORAGE_KEY_CHAIN = 'cct_chain_v4';
+    const STORAGE_KEY_LOG_APIKEY = 'cct_log_apikey_v4';
+    const STORAGE_KEY_THEME = 'cct_theme_v4';
+    const STORAGE_KEY_LAST_EVENT = 'cct_last_event_v4';
+    const STORAGE_KEY_CORRECTION_LOG = 'cct_correction_log_v4';
+    const STORAGE_KEY_DIAGNOSTICS = 'cct_diagnostics_v4';
+    const STORAGE_KEY_PROFIT_RECORDS = 'cct_profit_records_v1';
+    const STORAGE_KEY_ITEM_PRICES = 'cct_profit_prices_v1';
+    const STORAGE_KEY_SYNC_ENABLED = 'cct_sync_enabled_v1';
+    const STORAGE_KEY_SYNC_TOKEN = 'cct_sync_token_v1';
+    const STORAGE_KEY_SYNC_PUSH_CURSOR = 'cct_sync_push_cursor_v1';
+    const OD_REFRESH_KEY = 'cct_onedrive_refresh_v1';
+    const OD_LAST_KEY = 'cct_onedrive_last_backup_v1';
+    const OD_CLIENT = 'dfcdc5e1-3623-4721-a08e-b740c075c4d2';
+    const OD_FOLDER = 'Crime Profit Monitor';
+    const STORAGE_KEY_NERVE_USED = 'cct_nerve_used_by_type_v1';
+    const NERVE_MAX_SPEND_PER_RESPONSE = 25;
+    const CORRECTION_LOG_MAX = 15;
+    const DIAGNOSTIC_LOG_MAX = 10;
+    const CHAIN_CAP_DISPLAY = 100;
+    const OUTCOME_DEDUPE_MS = 3500;
+    const MAX_REASONABLE_COUNTER_DELTA = 10;
+    const ITEM_PRICE_CACHE_MS = 24 * 60 * 60 * 1000;
+    const SYNC_PUSH_INTERVAL_MS = 10 * 60 * 1000;
+    const SYNC_PULL_INTERVAL_MS = 150 * 1000;
+    const SYNC_PUSH_BATCH_MAX = 300;
+    const SYNC_TOKEN_RE = /^[a-zA-Z0-9_-]{16,64}$/;
+    const FETCH_TIMEOUT_MS = 15000;
+    const LOG_ID_SUCCESS = 9010;
+    const LOG_ID_FAIL = 9150;
+    const LOG_IDS_CRITICAL = [9154, 9155, 9158, 9160, 9163, 9165, 9190, 9191];
+    const LOG_IDS_ALL = [LOG_ID_SUCCESS, LOG_ID_FAIL, ...LOG_IDS_CRITICAL];
+
+    let chain = clampChain(parseInt(safeGet(STORAGE_KEY_CHAIN, '0'), 10) || 0);
+    let isDark = safeGet(STORAGE_KEY_THEME, 'dark') !== 'light';
+    let observer = null;
+    let appWatchObserver = null;
+    let appWatchInterval = null;
+    let appRuntimeStarted = false;
+    let appWatcherStarted = false;
+    let appWaitLogged = false;
+    let widgetRecoveryLogged = false;
+    let lastEvent = readLastEvent();
+    let syncTimer = null;
+    let lastResultCounts = null;
+    let pendingResultCountReseed = null;
+    let cachedNativeChainValueEl = null;
+    let lastCrimesRoute = null;
+    let pendingCriticalConfirm = null;
+    let confirmedCriticalFails = null;
+    let profitRecords = readProfitRecords();
+    let itemPriceCache = readItemPriceCache();
+    let syncEnabled = safeGet(STORAGE_KEY_SYNC_ENABLED, '0') === '1';
+    let syncToken = safeGet(STORAGE_KEY_SYNC_TOKEN, '');
+    let syncPushCursor = Number(safeGet(STORAGE_KEY_SYNC_PUSH_CURSOR, '0')) || 0;
+    let crossSyncPushTimer = null;
+    let crossSyncPullTimer = null;
+    let crossSyncInFlight = false;
+    let crossSyncLastStatus = '';
+    let odRefresh = safeGet(OD_REFRESH_KEY, '');
+    let odLastBackup = safeGet(OD_LAST_KEY, '');
+    let odAccess = '';
+    let odFolderId = '';
+    let odBusy = false;
+    let odTimer = null;
+    let odPoll = null;
+    let graphVisibility = { cash: true, items: true, total: true };
+    let nerveTracker = { last: null, pendingSpend: null, pendingAt: 0, warnedMissing: false, totalDrops: 0, totalRegen: 0, totalConsumed: 0, totalExpired: 0 };
+    const TRACE_MAX = 150;
+    // Torn's lifetime nerve counter (DB.currentUserStats.nerveUsed) is PER CRIME TYPE (typeID in the request URL).
+    // The delta between two consecutive responses of the same type is the exact nerve the later attempt cost, fails included.
+    let nerveUsedByType = (() => {
+        try {
+            const v = JSON.parse(safeGet(STORAGE_KEY_NERVE_USED, '{}'));
+            return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+        } catch (_) { return {}; }
+    })();
+    let lastUserNerveSeen = null; // { value, at } from DB.user.nerve of the previous response (bootstrap fallback)
+    const nerveTrace = [];
+
+    const NERVE_PENDING_WINDOW_MS = 15000;
+    const itemPriceFetchAttempted = new Set();
+    const itemPriceFetchFailureReason = new Map();
+
+    const THEME = {
+        dark: {
+            widgetBg: 'rgba(255,255,255,0.07)',
+            widgetBorder: 'rgba(255,255,255,0.12)',
+            ringTrack: 'rgba(255,255,255,0.10)',
+            popoverBg: '#1e1e1e',
+            popoverBorder: 'rgba(255,255,255,0.15)',
+            popoverColor: '#ccc',
+            inputBg: 'rgba(255,255,255,0.06)',
+            inputBorder: 'rgba(255,255,255,0.15)',
+            inputFocus: 'rgba(255,255,255,0.4)',
+            saveBg: 'rgba(255,255,255,0.08)',
+            saveBorder: 'rgba(255,255,255,0.18)',
+            saveBgHover: 'rgba(255,255,255,0.16)',
+            labelOpacity: '0.4',
+            statusOpacity: '0.8',
+            gearOpacity: '0.45',
+            gearHover: '0.8',
+            ringInnerBg: 'rgba(255,255,255,0.08)',
+            ringInnerBorder: 'rgba(255,255,255,0.14)',
+            ringInnerShadow: 'inset 0 1px 1px rgba(255,255,255,0.10), inset 0 -1px 2px rgba(0,0,0,0.55), 0 1px 1px rgba(0,0,0,0.35)',
+            ringText: 'rgba(255,255,255,0.86)',
+            chainLow: '#00ff66',
+            chainMid: '#ffaa00',
+            chainHigh: '#ff3344',
+        },
+        light: {
+            widgetBg: 'rgba(0,0,0,0.05)',
+            widgetBorder: 'rgba(0,0,0,0.14)',
+            ringTrack: 'rgba(0,0,0,0.12)',
+            popoverBg: '#ffffff',
+            popoverBorder: 'rgba(0,0,0,0.15)',
+            popoverColor: '#222',
+            inputBg: 'rgba(0,0,0,0.04)',
+            inputBorder: 'rgba(0,0,0,0.18)',
+            inputFocus: 'rgba(0,0,0,0.45)',
+            saveBg: 'rgba(0,0,0,0.06)',
+            saveBorder: 'rgba(0,0,0,0.18)',
+            saveBgHover: 'rgba(0,0,0,0.13)',
+            labelOpacity: '0.45',
+            statusOpacity: '1',
+            gearOpacity: '0.55',
+            gearHover: '0.85',
+            ringInnerBg: 'rgba(0,0,0,0.06)',
+            ringInnerBorder: 'rgba(0,0,0,0.16)',
+            ringInnerShadow: 'inset 0 1px 1px rgba(255,255,255,0.75), inset 0 -1px 2px rgba(0,0,0,0.18), 0 1px 1px rgba(255,255,255,0.45)',
+            ringText: 'rgba(32,33,36,0.82)',
+            chainLow: '#16a34a',
+            chainMid: '#d97706',
+            chainHigh: '#dc2626',
+        },
+    };
+
+    const OUTCOME_RULES = [
+        { type: 'critical', re: /\bcritical(?:ly)?\b|critical\s+failure|crit\s+fail/i },
+        { type: 'fail', re: /\bfail(?:ed|ure)?\b|unsuccessful/i },
+        { type: 'success', re: /\bsuccess(?:ful|fully)?\b|\bcompleted\b|you\s+managed\s+to/i },
+    ];
+
+    const OUTCOME_CONTAINER_SELECTOR = [
+        '[class*="crime" i][class*="result" i]',
+        '[class*="crime" i][class*="outcome" i]',
+        '[class*="crime" i][class*="message" i]',
+        '[class*="crime" i][class*="notification" i]',
+        '[class*="crime" i][class*="toast" i]',
+        '[class*="crime" i][class*="success" i]',
+        '[class*="crime" i][class*="fail" i]',
+        '[class*="result" i][class*="success" i]',
+        '[class*="result" i][class*="fail" i]',
+        '[class*="outcome" i][class*="success" i]',
+        '[class*="outcome" i][class*="fail" i]',
+    ].join(',');
+
+    const RADIUS = 10;
+    const CIRC = 2 * Math.PI * RADIUS;
+
+    const MOON_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.05 8.05 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .35-2.43A1 1 0 0 0 8.1 2.3a10.14 10.14 0 1 0 13.5 13.27 1 1 0 0 0-.04-2.57z"/></svg>';
+    const SUN_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+    const GEAR_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+    const CHART_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>';
+    const BUG_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M19 7l-3 2M5 7l3 2M19 19l-3-2M5 19l3-2M20 13h-4M4 13h4M10 2l1 2M14 2l-1 2"/></svg>';
+
+    function clampChain(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return 0;
+        return Math.max(0, Math.floor(n));
+    }
+
+    function safeGet(key, fallback) {
+        return typeof GM_getValue === 'function' ? GM_getValue(key, fallback) : fallback;
+    }
+
+    function safeSet(key, value) {
+        if (typeof GM_setValue === 'function') GM_setValue(key, value);
+    }
+
+    function readLastEvent() {
+        try {
+            return JSON.parse(safeGet(STORAGE_KEY_LAST_EVENT, '{}')) || {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    function saveChain() {
+        safeSet(STORAGE_KEY_CHAIN, String(chain));
+    }
+
+    function getLogApiKey() {
+        return safeGet(STORAGE_KEY_LOG_APIKEY, '');
+    }
+
+    function saveLogApiKey(key) {
+        const sanitized = String(key || '').replace(/\s+/g, '');
+        safeSet(STORAGE_KEY_LOG_APIKEY, sanitized);
+        return sanitized;
+    }
+
+    function saveTheme() {
+        safeSet(STORAGE_KEY_THEME, isDark ? 'dark' : 'light');
+    }
+
+    function saveLastEvent(event) {
+        lastEvent = event;
+        safeSet(STORAGE_KEY_LAST_EVENT, JSON.stringify(event));
+    }
+
+    function currentCrimesRoute() {
+        return `${location.pathname}${location.search}${location.hash}`;
+    }
+
+    function resetResultCounterTracking() {
+        lastResultCounts = null;
+        confirmedCriticalFails = null;
+        pendingCriticalConfirm = null;
+        pendingResultCountReseed = null;
+    }
+
+    const CORRECTION_SOURCE_LABELS = {
+        native: 'Native badge sync',
+        counts: 'Result counter delta',
+        text: 'Toast text fallback',
+        manual: 'Manual correction',
+        log: 'Log-based sync',
+    };
+
+    function readCorrectionLog() {
+        try {
+            const parsed = JSON.parse(safeGet(STORAGE_KEY_CORRECTION_LOG, '[]'));
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
+    function saveCorrectionLog(entries) {
+        safeSet(STORAGE_KEY_CORRECTION_LOG, JSON.stringify(entries));
+    }
+
+    function readDiagnostics() {
+        try {
+            const parsed = JSON.parse(safeGet(STORAGE_KEY_DIAGNOSTICS, '[]'));
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
+    function saveDiagnostics(entries) {
+        safeSet(STORAGE_KEY_DIAGNOSTICS, JSON.stringify(entries));
+        try {
+            localStorage.setItem(STORAGE_KEY_DIAGNOSTICS, JSON.stringify(entries));
+        } catch (_) {
+            // Best-effort console-readable mirror; GM storage above is canonical.
+        }
+    }
+
+    function logDiagnostic(type, detail) {
+        const entry = {
+            time: Date.now(),
+            type,
+            url: location.href,
+            visibilityState: document.visibilityState,
+            readyState: document.readyState,
+            detail,
+        };
+        const entries = readDiagnostics();
+        entries.unshift(entry);
+        while (entries.length > DIAGNOSTIC_LOG_MAX) entries.pop();
+        saveDiagnostics(entries);
+        console.log(`[CCT v${VERSION}] diagnostic: ${type}`, entry);
+        refreshDebugIfOpen();
+    }
+
+    function logCorrection(source, oldChain, newChain, detail, reason) {
+        console.log(`[CCT v${VERSION}] ${source}: ${oldChain} -> ${newChain}`, reason || '', detail || '');
+
+        const entries = readCorrectionLog();
+        entries.unshift({
+            time: Date.now(),
+            source,
+            oldChain,
+            newChain,
+            reason: reason || '',
+        });
+        while (entries.length > CORRECTION_LOG_MAX) entries.pop();
+        saveCorrectionLog(entries);
+
+        renderCorrectionLog();
+    }
+
+    function commitChainIfChanged(source, oldChain, detail, reason) {
+        if (chain === oldChain) return false;
+        logCorrection(source, oldChain, chain, detail, reason);
+        saveChain();
+        render(true);
+        return true;
+    }
+
+    function commitChainAlways(source, oldChain, detail, reason) {
+        const changed = chain !== oldChain;
+        if (changed) logCorrection(source, oldChain, chain, detail, reason);
+        saveChain();
+        render(true);
+        return changed;
+    }
+
+    function relativeTime(ts) {
+        const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+        if (diffSec < 5) return 'just now';
+        if (diffSec < 60) return `${diffSec}s ago`;
+        const diffMin = Math.floor(diffSec / 60);
+        if (diffMin < 60) return `${diffMin}m ago`;
+        const diffHr = Math.floor(diffMin / 60);
+        if (diffHr < 24) return `${diffHr}h ago`;
+        return `${Math.floor(diffHr / 24)}d ago`;
+    }
+
+    function renderCorrectionLog() {
+        const list = document.querySelector('#cct-log-list');
+        if (!list) return;
+
+        const entries = readCorrectionLog();
+        if (!entries.length) {
+            list.innerHTML = '<li id="cct-log-empty">No corrections yet — nice and steady 🤠</li>';
+            return;
+        }
+
+        list.innerHTML = entries.map((entry) => {
+            const label = CORRECTION_SOURCE_LABELS[entry.source] || entry.source;
+            const arrow = entry.newChain > entry.oldChain ? '📈' : entry.newChain < entry.oldChain ? '📉' : '↔️';
+            const reasonLine = entry.reason ? `<div class="cct-log-reason">${escapeHTML(entry.reason)}</div>` : '';
+            return `<li>
+                <span class="cct-log-arrow">${arrow}</span>
+                <span class="cct-log-detail">${escapeHTML(label)}: <strong>${entry.oldChain} → ${entry.newChain}</strong>${reasonLine}</span>
+                <span class="cct-log-time">${relativeTime(entry.time)}</span>
+            </li>`;
+        }).join('');
+    }
+
+    function escapeHTML(value) {
+        return String(value || '').replace(/[&<>"]/g, (ch) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+        }[ch]));
+    }
+
+    function normalizeText(text) {
+        return String(text || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 500);
+    }
+
+    function readProfitRecords() {
+        try {
+            const value = JSON.parse(safeGet(STORAGE_KEY_PROFIT_RECORDS, '[]'));
+            return Array.isArray(value) ? value : [];
+        } catch (_) { return []; }
+    }
+
+    function readItemPriceCache() {
+        try {
+            const value = JSON.parse(safeGet(STORAGE_KEY_ITEM_PRICES, '{}'));
+            return value && typeof value === 'object' ? value : {};
+        } catch (_) { return {}; }
+    }
+
+    function saveProfitData() {
+        safeSet(STORAGE_KEY_PROFIT_RECORDS, JSON.stringify(profitRecords));
+        safeSet(STORAGE_KEY_ITEM_PRICES, JSON.stringify(itemPriceCache));
+    }
+
+    function odStatus(t) { const e = document.querySelector('#cct-onedrive-status'); if (e) e.textContent = t; }
+    function odRequest(method, url, token, data, headers = {}) { return gmRequest({ method, url, data, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...headers } }); }
+    async function odForm(url, params) { return odRequest('POST', url, '', new URLSearchParams(params).toString(), { 'Content-Type': 'application/x-www-form-urlencoded' }); }
+    async function odAuthorize() {
+        const base = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/';
+        const r = await odForm(base + 'devicecode', { client_id: OD_CLIENT, scope: 'Files.ReadWrite offline_access User.Read' });
+        if (r.status < 200 || r.status >= 300) throw Error('Device sign-in failed: HTTP ' + r.status);
+        const d = JSON.parse(r.responseText); odStatus('Visit ' + d.verification_uri + ' and enter code: ' + d.user_code);
+        const poll = async () => { try {
+            const t = await odForm(base + 'token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: OD_CLIENT, device_code: d.device_code });
+            const p = JSON.parse(t.responseText || '{}');
+            if (t.status >= 200 && t.status < 300 && p.access_token) { odAccess = p.access_token; odRefresh = p.refresh_token || ''; safeSet(OD_REFRESH_KEY, odRefresh); odStatus('Connected. Starting backup…'); await odBackup(); return; }
+            if (p.error === 'authorization_pending' || p.error === 'slow_down') { odPoll = setTimeout(poll, ((d.interval || 5) + (p.error === 'slow_down' ? 5 : 0)) * 1000); return; }
+            odStatus(p.error_description || p.error || 'Sign-in expired; connect again.');
+        } catch (e) { odStatus('Sign-in error: ' + e.message); } };
+        odPoll = setTimeout(poll, (d.interval || 5) * 1000);
+    }
+    async function odToken() {
+        if (odAccess) return odAccess; if (!odRefresh) throw Error('Connect OneDrive first');
+        const r = await odForm('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', { client_id: OD_CLIENT, grant_type: 'refresh_token', refresh_token: odRefresh, scope: 'Files.ReadWrite offline_access User.Read' });
+        const p = JSON.parse(r.responseText || '{}'); if (r.status < 200 || r.status >= 300 || !p.access_token) { if (p.error === 'invalid_grant') { odRefresh = ''; safeSet(OD_REFRESH_KEY, ''); } throw Error(p.error_description || 'Reconnect OneDrive'); }
+        odAccess = p.access_token; if (p.refresh_token) { odRefresh = p.refresh_token; safeSet(OD_REFRESH_KEY, odRefresh); } return odAccess;
+    }
+    async function odFolder(token) {
+        if (odFolderId) return odFolderId;
+        const r = await odRequest('GET', 'https://graph.microsoft.com/v1.0/me/drive/root/children?$select=id,name,folder&$top=200', token);
+        if (r.status < 200 || r.status >= 300) throw Error('OneDrive folder lookup failed: HTTP ' + r.status);
+        const x = (JSON.parse(r.responseText).value || []).find(v => v.name === OD_FOLDER && v.folder); if (x) return odFolderId = x.id;
+        const c = await odRequest('POST', 'https://graph.microsoft.com/v1.0/me/drive/root/children', token, JSON.stringify({ name: OD_FOLDER, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }), { 'Content-Type': 'application/json' });
+        if (c.status < 200 || c.status >= 300) throw Error('OneDrive folder creation failed: HTTP ' + c.status); return odFolderId = JSON.parse(c.responseText).id;
+    }
+    async function odUpload(token, folder, name, body) {
+        const url = 'https://graph.microsoft.com/v1.0/me/drive/items/' + encodeURIComponent(folder) + ':/' + encodeURIComponent(name) + ':/content';
+        const r = await odRequest('PUT', url, token, body, { 'Content-Type': 'application/json' }); if (r.status < 200 || r.status >= 300) throw Error('Upload failed: HTTP ' + r.status);
+    }
+    function odPayload() { return JSON.stringify({ schema: 'cct-crime-profit-backup', schemaVersion: 1, scriptVersion: VERSION, exportedAt: new Date().toISOString(), timezone: 'Torn City Time (UTC)', profitRecords, itemPriceCache }, null, 2); }
+    async function odBackup(opts = {}) {
+        if (odBusy) return; odBusy = true;
+        try { const token = await odToken(); const folder = await odFolder(token); const day = new Date().toISOString().slice(0,10); const body = odPayload(); odStatus('Uploading backup…');
+            await odUpload(token, folder, 'Crime-Profit-' + day + '.json', body); await odUpload(token, folder, 'latest.json', body); odLastBackup = day; safeSet(OD_LAST_KEY, day); odStatus('Last backup: ' + day + ' (TCT/UTC) · ' + profitRecords.length.toLocaleString('en-US') + ' records');
+        } catch (e) { odStatus('Backup failed: ' + e.message); if (opts.automatic) logDiagnostic('onedrive-backup-failed', { message: String(e.message || e).slice(0,250) }); } finally { odBusy = false; }
+    }
+    function odSchedule() {
+        const today = new Date().toISOString().slice(0,10); if (odRefresh && odLastBackup !== today) odBackup({ automatic: true });
+        if (!odTimer) { const n = new Date(); n.setUTCHours(24,0,5,0); odTimer = setTimeout(() => { odTimer = null; odSchedule(); }, Math.max(1000, n.getTime() - Date.now())); }
+    }
+    async function odRestore() {
+        if (!window.confirm('Restore from OneDrive latest.json? This replaces local Crime Profit records and item-price cache.')) return;
+        try { const token = await odToken(); const folder = await odFolder(token); const url = 'https://graph.microsoft.com/v1.0/me/drive/items/' + encodeURIComponent(folder) + ':/latest.json:/content'; const r = await odRequest('GET', url, token);
+            if (r.status < 200 || r.status >= 300) throw Error('Download failed: HTTP ' + r.status); const d = JSON.parse(r.responseText);
+            if (d.schema !== 'cct-crime-profit-backup' || d.schemaVersion !== 1 || !Array.isArray(d.profitRecords) || !d.itemPriceCache || typeof d.itemPriceCache !== 'object') throw Error('Invalid backup file');
+            profitRecords = d.profitRecords; itemPriceCache = d.itemPriceCache; saveProfitData(); renderProfitPopover(); odStatus('Restored ' + profitRecords.length.toLocaleString('en-US') + ' records');
+        } catch (e) { odStatus('Restore failed: ' + e.message); }
+    }
+    function odExport() { const b = new Blob([odPayload()], { type: 'application/json' }); const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = 'Crime-Profit-Backup-' + new Date().toISOString().slice(0,10) + '.json'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1000); }
+    function odImport(file) { if (!file) return; const reader = new FileReader(); reader.onload = () => { try { const d = JSON.parse(String(reader.result || '{}')); if (d.schema !== 'cct-crime-profit-backup' || d.schemaVersion !== 1 || !Array.isArray(d.profitRecords) || !d.itemPriceCache || typeof d.itemPriceCache !== 'object') throw Error('Invalid backup file'); if (!window.confirm('Import this backup and replace local records and item-price cache?')) return; profitRecords = d.profitRecords; itemPriceCache = d.itemPriceCache; saveProfitData(); renderProfitPopover(); odStatus('Imported ' + profitRecords.length.toLocaleString('en-US') + ' records'); } catch (e) { odStatus('Import failed: ' + e.message); } }; reader.readAsText(file); }
+    function resetProfitData() {
+        const count = profitRecords.length;
+        if (!count) return;
+        const noun = count === 1 ? 'payout' : 'payouts';
+        const confirmed = window.confirm(
+            `Wipe your Crime Profit history?\n\nThis permanently deletes all ${count.toLocaleString('en-US')} tracked ${noun} — every $ and item you've captured — and can't be undone.\n\nYour crime chain and settings are not affected.`
+        );
+        if (!confirmed) return;
+        profitRecords = [];
+        saveProfitData();
+        renderProfitPopover();
+    }
+
+    function saveSyncEnabled(enabled) {
+        syncEnabled = Boolean(enabled);
+        safeSet(STORAGE_KEY_SYNC_ENABLED, syncEnabled ? '1' : '0');
+    }
+
+    function saveSyncToken(token) {
+        syncToken = String(token || '').trim();
+        safeSet(STORAGE_KEY_SYNC_TOKEN, syncToken);
+    }
+
+    function saveSyncPushCursor(ts) {
+        syncPushCursor = ts;
+        safeSet(STORAGE_KEY_SYNC_PUSH_CURSOR, String(ts));
+    }
+
+    function generateSyncToken() {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID().replace(/-/g, '');
+        }
+
+        const bytes = new Uint8Array(16);
+        (crypto.getRandomValues ? crypto : window.crypto).getRandomValues(bytes);
+        return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function gmRequest(details) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('GM_xmlhttpRequest not granted'));
+                return;
+            }
+            GM_xmlhttpRequest({
+                ...details,
+                onload: (res) => resolve(res),
+                onerror: (err) => reject(err || new Error('network error')),
+                ontimeout: () => reject(new Error('timeout')),
+                timeout: 15000,
+            });
+        });
+    }
+
+    function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    }
+
+    function syncStatusEl() {
+        return document.querySelector('#cct-sync-status');
+    }
+
+    function setSyncStatus(text) {
+        crossSyncLastStatus = text;
+        const el = syncStatusEl();
+        if (el) el.textContent = text;
+    }
+
+    function describeSyncError(status, responseText) {
+        let body = null;
+        try { body = JSON.parse(responseText); } catch (_) { /* not JSON, ignore */ }
+        const code = body && body.error;
+        if (code === 'invalid-token') return 'Token isn\'t valid (16\u201364 letters/numbers/-/_ only) — use Generate for a safe one';
+        if (code === 'invalid-record-shape' || code === 'invalid-json') return 'Sync data was rejected as malformed — please report this';
+        if (code === 'batch-too-large') return 'Too many records to sync in one go — will retry in smaller batches next cycle';
+        if (code === 'unauthorized') return 'Not authorized';
+        return `HTTP ${status}`;
+    }
+
+    async function syncRequest(method, endpoint, { data, failLabel, diagKey, retryStatus, diagErrKey } = {}) {
+        try {
+            const res = await gmRequest({
+                method,
+                url: `${SYNC_WORKER_URL}${endpoint}`,
+                headers: data ? { 'Content-Type': 'application/json' } : undefined,
+                data,
+            });
+            if (res.status >= 200 && res.status < 300) return { ok: true, res };
+            setSyncStatus(`${failLabel} failed: ${describeSyncError(res.status, res.responseText)}`);
+            logDiagnostic(diagKey, { status: res.status, body: String(res.responseText || '').slice(0, 300) });
+            return { ok: false };
+        } catch (err) {
+            setSyncStatus(retryStatus);
+            let errText;
+            try { errText = err && err.message ? String(err.message) : JSON.stringify(err, Object.getOwnPropertyNames(Object(err))); } catch (_) { errText = String(err); }
+            logDiagnostic(diagErrKey, errText);
+            return { ok: false };
+        }
+    }
+
+    async function pushProfitRecords() {
+        if (!syncEnabled || !syncToken || !profitRecords.length) return;
+
+        const pending = profitRecords            .filter((r) => new Date(r.ts).getTime() > syncPushCursor)
+            .sort((a, b) => new Date(a.ts) - new Date(b.ts))
+            .slice(0, SYNC_PUSH_BATCH_MAX);
+        if (!pending.length) return;
+
+        const result = await syncRequest('POST', '/records', {
+            data: JSON.stringify({ token: syncToken, records: pending }),
+            failLabel: 'Push',
+            diagKey: 'sync-push-failed',
+            retryStatus: 'Push failed — will retry',
+            diagErrKey: 'sync-push-error',
+        });
+        if (!result.ok) return;
+
+        const newest = Math.max(...pending.map((r) => new Date(r.ts).getTime()));
+        saveSyncPushCursor(newest);
+        setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
+    }
+
+    async function pullProfitRecords() {
+        if (!syncEnabled || !syncToken) return;
+
+        const result = await syncRequest('GET', `/records?token=${encodeURIComponent(syncToken)}`, {
+            failLabel: 'Pull',
+            diagKey: 'sync-pull-failed',
+            retryStatus: 'Pull failed — will retry',
+            diagErrKey: 'sync-pull-error',
+        });
+        if (!result.ok) return;
+
+        let body;
+        try { body = JSON.parse(result.res.responseText); } catch (_) { body = null; }
+        const incoming = (body && Array.isArray(body.records)) ? body.records : [];
+        if (!incoming.length) {
+            setSyncStatus(`Synced ✓ ${relativeTime(Date.now())}`);
+            return;
+        }
+
+        const existingIds = new Set(profitRecords.map((r) => r.id));
+        let mergedCount = 0;
+        for (const r of incoming) {
+            if (existingIds.has(r.id)) continue;
+            profitRecords.push(r);
+            existingIds.add(r.id);
+            mergedCount++;
+        }
+
+        if (mergedCount > 0) {
+            profitRecords.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+            saveProfitData();
+            renderProfitPopover();
+        }
+        setSyncStatus(mergedCount
+            ? `Synced ✓ pulled ${mergedCount} from other device${mergedCount === 1 ? '' : 's'}`
+            : `Synced ✓ ${relativeTime(Date.now())}`);
+    }
+
+    async function runCrossDeviceSync() {
+        if (!syncEnabled || !syncToken || crossSyncInFlight) return;
+        crossSyncInFlight = true;
+        setSyncStatus('Syncing…');
+        try {
+            await pushProfitRecords();
+            await pullProfitRecords();
+        } finally {
+            crossSyncInFlight = false;
+        }
+    }
+
+    function stopCrossDeviceSync() {
+        clearInterval(crossSyncPushTimer);
+        clearInterval(crossSyncPullTimer);
+        crossSyncPushTimer = null;
+        crossSyncPullTimer = null;
+    }
+
+    function startCrossDeviceSync() {
+        stopCrossDeviceSync();
+        if (!syncEnabled || !syncToken) return;
+        crossSyncPushTimer = setInterval(pushProfitRecords, SYNC_PUSH_INTERVAL_MS);
+        crossSyncPullTimer = setInterval(pullProfitRecords, SYNC_PULL_INTERVAL_MS);
+        runCrossDeviceSync();
+    }
+
+    function parseCurrency(text) {
+        const found = String(text || '').replace(/,/g, '').match(/\$(\d+(?:\.\d{1,2})?)/);
+        return found ? Number(found[1]) : null;
+    }
+
+    function profitPeriodKey(timestamp, period) {
+        const d = new Date(timestamp);
+        const day = d.toISOString().slice(0, 10);
+        if (period === 'year') return day.slice(0, 4);
+        if (period === 'month') return day.slice(0, 7);
+        if (period === 'week') {
+            const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+            const n = x.getUTCDay() || 7;
+            x.setUTCDate(x.getUTCDate() + 4 - n);
+            const first = new Date(Date.UTC(x.getUTCFullYear(), 0, 1));
+            const week = Math.ceil((((x - first) / 86400000) + 1) / 7);
+            return `${x.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+        }
+        return day;
+    }
+
+    function money(value) {
+        return Number(value || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+    }
+
+    function ratioText(totalWithNerve, nerve) {
+        if (!nerve) return '—';
+        return `$${Math.round(totalWithNerve / nerve).toLocaleString('en-US')}`;
+    }
+
+    const NERVE_SELECTORS = [
+        '[class*="nerve" i] [class*="bar-value" i]',
+        '[class*="nerve" i][title*="/"]',
+        '[class*="nerve" i][aria-label*="/"]',
+        '.bar-nerve[title]',
+        '[data-bar="nerve" i]',
+        '[class*="nerveBar" i]',
+        '[class*="nerve" i]',
+    ];
+
+    function parseNerveText(raw) {
+        const text = normalizeText(raw);
+        const match = text.match(/(\d+)\s*\/\s*\d+/) || text.match(/^(\d+)$/);
+        if (!match) return null;
+        const value = Number(match[1]);
+        return Number.isFinite(value) && value >= 0 ? value : null;
+    }
+
+    function nerveRawText(el) {
+        return el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '';
+    }
+
+    // Returns the first element that actually carries a "N/MAX" nerve reading. The broad class*="nerve" fallback also
+    // matches <html> (TornTools adds tt-highlight-nerve-refill there), so unparseable/oversized hits are skipped.
+    function findNerveElement() {
+        for (const sel of NERVE_SELECTORS) {
+            let list;
+            try { list = document.querySelectorAll(sel); } catch (_) { continue; }
+            const limit = Math.min(list.length, 60);
+            for (let i = 0; i < limit; i++) {
+                const el = list[i];
+                if (el === document.documentElement || el === document.body) continue;
+                if (el.closest && el.closest('#cct-root')) continue;
+                const raw = nerveRawText(el);
+                if (raw.length > 80) continue;
+                if (parseNerveText(raw) !== null) return el;
+            }
+        }
+        return null;
+    }
+
+    function readNerveValue() {
+        const el = findNerveElement();
+        if (!el) return null;
+        return parseNerveText(nerveRawText(el));
+    }
+
+    function pollNerve(source) {
+        const value = readNerveValue();
+        if (value === null) {
+            if (!nerveTracker.warnedMissing) {
+                nerveTracker.warnedMissing = true;
+                logDiagnostic('nerve-element-not-found', 'Could not locate a nerve bar element on the page — $/nerve will show "—" until this selector is fixed.');
+                traceEvent('nerve-missing', 'no nerve element/value found');
+            }
+            return;
+        }
+        if (nerveTracker.last === null) {
+            traceEvent('nerve-init', { value });
+        } else if (value !== nerveTracker.last) {
+            const diff = value - nerveTracker.last;
+            if (diff < 0) {
+                nerveTracker.pendingSpend = (nerveTracker.pendingSpend || 0) - diff;
+                nerveTracker.pendingAt = Date.now();
+                nerveTracker.totalDrops += -diff;
+            } else {
+                nerveTracker.totalRegen += diff;
+            }
+            traceEvent('nerve', { from: nerveTracker.last, to: value, diff, src: source || 'poll', pending: nerveTracker.pendingSpend });
+        }
+        nerveTracker.last = value;
+    }
+
+    function consumeNerveSpend() {
+        if (nerveTracker.pendingSpend === null) return null;
+        const age = Date.now() - nerveTracker.pendingAt;
+        if (age > NERVE_PENDING_WINDOW_MS) {
+            nerveTracker.totalExpired += nerveTracker.pendingSpend;
+            traceEvent('nerve-expired', { spend: nerveTracker.pendingSpend, ageMs: age });
+            nerveTracker.pendingSpend = null;
+            return null;
+        }
+        const spend = nerveTracker.pendingSpend;
+        nerveTracker.totalConsumed += spend;
+        nerveTracker.pendingSpend = null;
+        return spend;
+    }
+
+    // =========================================================================
+    // DEBUG PANEL
+    // =========================================================================
+    function traceEvent(kind, detail) {
+        nerveTrace.unshift({ t: Date.now(), kind, detail });
+        while (nerveTrace.length > TRACE_MAX) nerveTrace.pop();
+        refreshDebugIfOpen();
+    }
+
+    function resolveServerNerveSpend(data, requestUrl) {
+        const used = Number(data && data.DB && data.DB.currentUserStats && data.DB.currentUserStats.nerveUsed);
+        const userNerve = Number(data && data.DB && data.DB.user && data.DB.user.nerve);
+        const typeMatch = String(requestUrl || '').match(/[?&]typeID=(\d+)/i);
+        const typeKey = typeMatch ? typeMatch[1] : 'unknown';
+        let spent = null;
+
+        if (Number.isFinite(used) && used >= 0) {
+            const prev = Number.isFinite(Number(nerveUsedByType[typeKey])) ? Number(nerveUsedByType[typeKey]) : null;
+            if (prev !== null) {
+                const delta = used - prev;
+                if (delta >= 0 && delta <= NERVE_MAX_SPEND_PER_RESPONSE) {
+                    spent = delta;
+                } else {
+                    // Crimes done elsewhere (other device/tab) or responses arriving out of order: don't guess from this counter.
+                    traceEvent('nerve-baseline-skip', { type: typeKey, prev, used, delta });
+                }
+            }
+            if (prev === null || used > prev) {
+                nerveUsedByType[typeKey] = used;
+                safeSet(STORAGE_KEY_NERVE_USED, JSON.stringify(nerveUsedByType));
+            }
+        }
+
+        // Bootstrap: first attempt of a crime type (no baseline yet). Use the drop in the user's nerve since the last response.
+        if (spent === null && Number.isFinite(userNerve) && lastUserNerveSeen && Date.now() - lastUserNerveSeen.at < 5 * 60 * 1000) {
+            const d = lastUserNerveSeen.value - userNerve;
+            if (d > 0 && d <= NERVE_MAX_SPEND_PER_RESPONSE) {
+                spent = d;
+                traceEvent('nerve-bootstrap', { type: typeKey, from: lastUserNerveSeen.value, to: userNerve, spent: d });
+            }
+        }
+        if (Number.isFinite(userNerve)) lastUserNerveSeen = { value: userNerve, at: Date.now() };
+        return spent;
+    }
+
+    // Server delta is authoritative; if the DOM saw a smaller drop, the extra was spent elsewhere, so trust the DOM.
+    function reconcileNerve(serverSpend, domSpend) {
+        if (typeof serverSpend !== 'number') return typeof domSpend === 'number' ? domSpend : null;
+        if (typeof domSpend === 'number' && domSpend > 0 && domSpend < serverSpend) return domSpend;
+        return serverSpend;
+    }
+
+    // Attempts that paid nothing but cost nerve (fails, critical fails, steps with no outcome object).
+    function recordNerveOnlyRecord(serverSpend, label) {
+        pollNerve('nerve-only');
+        const dom = consumeNerveSpend();
+        const nerve = reconcileNerve(serverSpend, dom);
+        traceEvent('nerve-only', { label, serverSpend, dom, nerve });
+        const id = `profit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const record = { id, ts: new Date().toISOString(), cash: 0, itemValue: 0, total: 0, items: [], nerve };
+        profitRecords.unshift(record);
+        saveProfitData();
+        renderProfitPopover();
+    }
+
+    function findNerveFields(obj, path = '', depth = 0, out = []) {
+        if (!obj || typeof obj !== 'object' || depth > 4 || out.length >= 8) return out;
+        for (const [k, v] of Object.entries(obj)) {
+            const p = path ? `${path}.${k}` : k;
+            if (/nerve/i.test(k) && out.length < 8) {
+                out.push(`${p}=${v && typeof v === 'object' ? JSON.stringify(v).slice(0, 80) : v}`);
+            }
+            if (v && typeof v === 'object' && !Array.isArray(v)) findNerveFields(v, p, depth + 1, out);
+        }
+        return out;
+    }
+
+    function buildDebugReport() {
+        const pad = (n, w = 2) => String(n).padStart(w, '0');
+        const fmtT = (ts) => {
+            const d = new Date(ts);
+            return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}`;
+        };
+        const L = [];
+        L.push(`CCT v${VERSION} debug — ${new Date().toISOString()} (times are TCT/UTC)`);
+        L.push(`URL: ${location.href}`);
+        L.push('');
+        L.push('== Nerve bar ==');
+        const el = findNerveElement();
+        if (el) {
+            const d = describeElement(el);
+            L.push(`Element: ${d.path}`);
+            L.push(`  title="${el.getAttribute('title') || ''}" aria-label="${el.getAttribute('aria-label') || ''}"`);
+            L.push(`  text="${normalizeText(el.textContent).slice(0, 80)}"`);
+        } else {
+            L.push('Element: NOT FOUND');
+        }
+        L.push(`Parsed value now: ${readNerveValue()}`);
+        L.push('Selector hits:');
+        NERVE_SELECTORS.forEach((sel, i) => {
+            let n = 0;
+            try { n = document.querySelectorAll(sel).length; } catch (_) { /* ignore */ }
+            L.push(`  ${i + 1}. ${n}x  ${sel}`);
+        });
+        L.push('');
+        L.push('== Tracker (since page load / last reset) ==');
+        const age = nerveTracker.pendingSpend !== null ? `${Math.round((Date.now() - nerveTracker.pendingAt) / 1000)}s ago` : '-';
+        L.push(`last bar value: ${nerveTracker.last}   pending spend: ${nerveTracker.pendingSpend} (${age})`);
+        L.push(`drops observed: ${nerveTracker.totalDrops}   regen observed: ${nerveTracker.totalRegen}`);
+        L.push(`nerveUsed baselines by crime type: ${JSON.stringify(nerveUsedByType)}`);
+        L.push(`credited to records: ${nerveTracker.totalConsumed}   expired/discarded: ${nerveTracker.totalExpired}   still pending: ${nerveTracker.pendingSpend || 0}`);
+        L.push('');
+        const today = new Date().toISOString().slice(0, 10);
+        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        for (const day of [today, yesterday]) {
+            const recs = profitRecords.filter((r) => String(r.ts).slice(0, 10) === day);
+            const withNerve = recs.filter((r) => typeof r.nerve === 'number' && r.nerve > 0);
+            const nerveSum = withNerve.reduce((s, r) => s + r.nerve, 0);
+            const nullCount = recs.filter((r) => typeof r.nerve !== 'number').length;
+            L.push(`== ${day}: ${recs.length} records | nerve sum ${nerveSum} | records w/ nerve ${withNerve.length} | null ${nullCount} ==`);
+        }
+        L.push('');
+        L.push('== Last 12 records (newest first) ==');
+        profitRecords.slice(0, 12).forEach((r) => {
+            L.push(`${String(r.ts).slice(5, 19).replace('T', ' ')}  cash ${r.cash}  items ${r.itemValue}  nerve ${r.nerve}  (${r.items.length} item stacks)`);
+        });
+        L.push('');
+        L.push(`== Trace (newest first, max ${TRACE_MAX}) ==`);
+        if (!nerveTrace.length) L.push('(empty — do a crime with this panel open)');
+        nerveTrace.slice(0, 60).forEach((e) => {
+            const detail = typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail);
+            L.push(`${fmtT(e.t)}  ${String(e.kind).padEnd(13)} ${detail}`);
+        });
+        L.push('');
+        L.push('== Diagnostics (latest 5) ==');
+        const diags = readDiagnostics().slice(0, 5);
+        if (!diags.length) L.push('(none)');
+        diags.forEach((d) => L.push(`${fmtT(d.time)}  ${d.type}  ${JSON.stringify(d.detail).slice(0, 160)}`));
+        return L.join('\n');
+    }
+
+    function renderDebugPanel() {
+        const out = document.querySelector('#cct-debug-output');
+        if (out) out.textContent = buildDebugReport();
+    }
+
+    function refreshDebugIfOpen() {
+        const p = document.querySelector('#cct-profit-popover');
+        if (!p || !p.classList.contains('cct-debug-open')) return;
+        try {
+            const sel = window.getSelection && window.getSelection().toString();
+            if (sel) return; // don't clobber text the user is selecting
+        } catch (_) { /* ignore */ }
+        renderDebugPanel();
+    }
+
+    async function copyDebugReport(btn) {
+        const text = buildDebugReport();
+        let ok = false;
+        try {
+            await navigator.clipboard.writeText(text);
+            ok = true;
+        } catch (_) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                ok = document.execCommand('copy');
+                ta.remove();
+            } catch (__) { /* ignore */ }
+        }
+        const old = btn.textContent;
+        btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
+        setTimeout(() => { btn.textContent = old; }, 1500);
+    }
+
+    function wireDebugUI(popover) {
+        popover.querySelector('#cct-debug-toggle').addEventListener('click', (e) => {
+            e.stopPropagation();
+            popover.classList.toggle('cct-debug-open');
+            if (popover.classList.contains('cct-debug-open')) renderDebugPanel();
+        });
+        popover.querySelector('#cct-debug-refresh').addEventListener('click', (e) => {
+            e.stopPropagation();
+            renderDebugPanel();
+        });
+        popover.querySelector('#cct-debug-copy').addEventListener('click', (e) => {
+            e.stopPropagation();
+            copyDebugReport(e.currentTarget);
+        });
+        popover.querySelector('#cct-debug-clear').addEventListener('click', (e) => {
+            e.stopPropagation();
+            nerveTrace.length = 0;
+            nerveTracker.totalDrops = 0;
+            nerveTracker.totalRegen = 0;
+            nerveTracker.totalConsumed = 0;
+            nerveTracker.totalExpired = 0;
+            renderDebugPanel();
+        });
+    }
+
+    function installCrimeAttemptInterceptor() {
+        const isSandboxed = typeof unsafeWindow !== 'undefined';
+        const win = isSandboxed ? unsafeWindow : window;
+        if (win.__cctFetchWrapped) return;
+        win.__cctFetchWrapped = true;
+        const originalFetch = win.fetch;
+        win.fetch = function (...args) {
+            return originalFetch.apply(this, args).then((response) => {
+                try {
+                    const resource = args[0];
+                    const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+                    if (url.includes('sid=crimesData') && (url.includes('step=attempt') || url.includes('step=collect') || url.includes('step=claim'))) {
+                        response.clone().text()
+                            .then((body) => handleCrimeAttemptResponseBody(body, url))
+                            .catch((err) => {
+                                logDiagnostic('crime-attempt-clone-failed', {
+                                    url: String(url).slice(0, 300),
+                                    error: String(err && err.message || err),
+                                });
+                            });
+                    }
+                } catch (err) {
+                    try {
+                        logDiagnostic('crime-attempt-intercept-error', String(err && err.message || err));
+                    } catch (_) { /* diagnostics themselves must never throw */ }
+                }
+                return response;
+            });
+        };
+    }
+
+    let lastCrimeOutcomeSignature = null;
+    let lastCrimeOutcomeTime = 0;
+    const CRIME_OUTCOME_DEDUPE_MS = 2000;
+
+    function extractOutcomesFromResponse(data) {
+        const found = [];
+        if (!data || typeof data !== 'object') return found;
+
+        const db = data.DB;
+        if (db && typeof db === 'object') {
+            if (db.outcome && typeof db.outcome === 'object' && db.outcome.result !== undefined) {
+                found.push(db.outcome);
+            }
+            for (const key of ['outcomes', 'results', 'claims', 'rewards']) {
+                const arr = db[key];
+                if (Array.isArray(arr)) {
+                    for (const item of arr) {
+                        if (item && typeof item === 'object' && item.result !== undefined) {
+                            found.push(item);
+                        } else if (item && typeof item === 'object' && item.outcome && item.outcome.result !== undefined) {
+                            found.push(item.outcome);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (data.outcome && typeof data.outcome === 'object' && data.outcome.result !== undefined) {
+            found.push(data.outcome);
+        }
+        if (Array.isArray(data.outcomes)) {
+            for (const item of data.outcomes) {
+                if (item && typeof item === 'object' && item.result !== undefined) found.push(item);
+            }
+        }
+
+        return found;
+    }
+
+    function handleCrimeAttemptResponseBody(body, requestUrl) {
+        if (!body || /<!doctype|<html[\s>]|<head[\s>]|<body[\s>]/i.test(body)) {
+            logDiagnostic('crime-attempt-non-json', {
+                url: String(requestUrl || '').slice(0, 300),
+                bodyPreview: String(body || '').slice(0, 120),
+            });
+            return;
+        }
+        let data;
+        try {
+            data = JSON.parse(body);
+        } catch (err) {
+            logDiagnostic('crime-attempt-parse-failed', {
+                url: String(requestUrl || '').slice(0, 300),
+                error: String(err && err.message || err),
+                bodyPreview: String(body).slice(0, 200),
+            });
+            return;
+        }
+
+        const outcomes = extractOutcomesFromResponse(data);
+        const successOutcomes = outcomes.filter((o) => o && o.result === 'success');
+        const serverSpend = resolveServerNerveSpend(data, requestUrl);
+        traceEvent('fetch', {
+            req: String(requestUrl || '').replace(/^.*?page\.php\?/, '').slice(0, 90),
+            results: outcomes.map((o) => o && o.result),
+            serverSpend,
+            nerveUsed: data && data.DB && data.DB.currentUserStats ? data.DB.currentUserStats.nerveUsed : undefined,
+        });
+
+        if (!successOutcomes.length) {
+            if (serverSpend > 0) {
+                recordNerveOnlyRecord(serverSpend, outcomes.map((o) => o && o.result).join(',') || 'no-outcome');
+            }
+            if (outcomes.length === 0) {
+                const dbKeys = (data && data.DB && typeof data.DB === 'object')
+                    ? Object.keys(data.DB).slice(0, 20)
+                    : [];
+                const topKeys = data && typeof data === 'object' ? Object.keys(data).slice(0, 15) : [];
+                logDiagnostic('crime-attempt-no-outcome-found', {
+                    url: String(requestUrl || '').slice(0, 300),
+                    topKeys,
+                    dbKeys,
+                });
+            }
+            return;
+        }
+
+        let spendLeft = serverSpend;
+        for (const outcome of successOutcomes) {
+            const signature = hashText(JSON.stringify(outcome));
+            // A real new attempt always moves Torn's nerveUsed counter; only dedupe when it didn't (or is unknown).
+            const nerveProvesNewAttempt = typeof serverSpend === 'number' && serverSpend > 0;
+            if (!nerveProvesNewAttempt && signature === lastCrimeOutcomeSignature && Date.now() - lastCrimeOutcomeTime < CRIME_OUTCOME_DEDUPE_MS) {
+                continue;
+            }
+            lastCrimeOutcomeSignature = signature;
+            lastCrimeOutcomeTime = Date.now();
+            recordProfitFromOutcomeJSON(outcome, spendLeft);
+            if (typeof spendLeft === 'number') spendLeft = 0; // one response = one nerve charge; don't repeat it per outcome
+        }
+        if (typeof spendLeft === 'number' && spendLeft > 0) {
+            // every success was a duplicate-skip but nerve was still spent
+            recordNerveOnlyRecord(spendLeft, 'dup-skip');
+        }
+    }
+
+    function recomputeRecordTotals(record) {
+        record.itemValue = record.items.reduce((total, item) => total + (typeof item.unitValue === 'number' ? item.unitValue * item.quantity : 0), 0);
+        record.total = record.cash + record.itemValue;
+    }
+
+    function recordProfitFromOutcomeJSON(outcome, serverSpend) {
+        for (const [id, cached] of Object.entries(itemPriceCache)) {
+            if (!cached || Date.now() - Number(cached.at || 0) > ITEM_PRICE_CACHE_MS) delete itemPriceCache[id];
+        }
+
+        const rewards = Array.isArray(outcome.rewards) ? outcome.rewards : [];
+        const items = [];
+        let cash = 0;
+        for (const entry of rewards) {
+            if (entry && entry.type === 'money') {
+                const value = Number(entry.value);
+                if (Number.isFinite(value)) cash += value;
+                continue;
+            }
+            if (entry && entry.type === 'items' && Array.isArray(entry.value)) {
+                for (const it of entry.value) {
+                    const id = it && it.id !== undefined && it.id !== null ? String(it.id) : '';
+                    const quantity = Number(it && it.amount);
+                    const name = normalizeText(it && it.name);
+                    if (!id || !name || !Number.isInteger(quantity) || quantity < 1) continue;
+                    const unitValue = (itemPriceCache[id] && typeof itemPriceCache[id].value === 'number') ? itemPriceCache[id].value : null;
+                    items.push({ id, name, quantity, unitValue });
+                }
+            }
+        }
+
+        pollNerve('outcome');
+        const domNerve = consumeNerveSpend();
+        const nerve = reconcileNerve(serverSpend, domNerve);
+        traceEvent('outcome', { cash, items: items.length, nerve, server: serverSpend, dom: domNerve, barNow: nerveTracker.last });
+        if (!rewards.length) {
+            console.log(`[CCT v${VERSION}] captured a zero-reward success (e.g. Cracking brute-force step) — nerve counted, $0 payout.`);
+        }
+        const id = `profit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const record = { id, ts: new Date().toISOString(), cash, itemValue: 0, total: 0, items, nerve };
+        recomputeRecordTotals(record);
+        profitRecords.unshift(record);
+        saveProfitData();
+        renderProfitPopover();
+
+        if (items.some((item) => typeof item.unitValue !== 'number')) {
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+                tryEnrichItemPricesFromDOM(record);
+                if (record.items.some((item) => typeof item.unitValue !== 'number')) resolveUnknownItemPrices();
+            }));
+        }
+    }
+
+    function tryEnrichItemPricesFromDOM(record) {
+        const app = findCrimesApp();
+        if (!app) return;
+        const panels = app.querySelectorAll('.outcome-content.crimes-outcome-success');
+        if (panels.length !== 1) return;
+        const panel = panels[0];
+        let changed = false;
+        for (const item of record.items) {
+            if (typeof item.unitValue === 'number') continue;
+            const image = panel.querySelector(`img[src*="/images/items/${item.id}/"]`);
+            if (!image) continue;
+            const rewardEl = image.closest('[class*="reward"]') || image.parentElement;
+            const displayedTotal = parseCurrency(rewardEl?.querySelector('.tt-crime-value-text')?.textContent);
+            if (displayedTotal === null) continue;
+            const unitValue = displayedTotal / item.quantity;
+            item.unitValue = unitValue;
+            itemPriceCache[item.id] = { name: item.name, value: unitValue, at: Date.now(), source: 'displayed' };
+            changed = true;
+        }
+        if (changed) {
+            recomputeRecordTotals(record);
+            saveProfitData();
+            renderProfitPopover();
+        }
+    }
+
+    async function fetchOfficialItemPrice(id) {
+        const key = getLogApiKey();
+        if (!key) {
+            itemPriceFetchFailureReason.set(id, 'no-key');
+            return null;
+        }
+        try {
+            const res = await fetchWithTimeout(`https://api.torn.com/torn/${encodeURIComponent(id)}?selections=items&key=${encodeURIComponent(key)}`);
+            const data = await res.json();
+            if (data?.error) {
+                itemPriceFetchFailureReason.set(id, data.error.code === 16 ? 'permissions' : 'api-error');
+                logDiagnostic('item-price-fetch-error', `Item ${id}: ${data.error.error || 'API error'}`);
+                return null;
+            }
+            itemPriceFetchFailureReason.delete(id);
+            const item = data?.items?.[id];
+            const marketValue = Number(item?.market_value);
+            if (Number.isFinite(marketValue) && marketValue > 0) return marketValue;
+            const sellPrice = Number(item?.sell_price);
+            if (Number.isFinite(sellPrice) && sellPrice > 0) return sellPrice;
+            return Number.isFinite(marketValue) && marketValue >= 0 ? marketValue : null;
+        } catch (err) {
+            itemPriceFetchFailureReason.set(id, 'api-error');
+            logDiagnostic('item-price-fetch-error', `Item ${id}: ${String(err)}`);
+            return null;
+        }
+    }
+
+    async function resolveUnknownItemPrices() {
+        const unresolvedIds = [...new Set(
+            profitRecords.flatMap((rec) => rec.items.filter((it) => typeof it.unitValue !== 'number').map((it) => it.id))
+        )].filter((itemId) => !itemPriceFetchAttempted.has(itemId));
+        if (!unresolvedIds.length) return;
+        for (const itemId of unresolvedIds) {
+            itemPriceFetchAttempted.add(itemId);
+            const price = await fetchOfficialItemPrice(itemId);
+            if (price === null) {
+                const reason = itemPriceFetchFailureReason.get(itemId);
+                const reasonText = reason === 'permissions'
+                    ? 'this key is missing the "Items" selection under the Torn category — the log selection alone isn\'t enough. Edit the key in Preferences > API Keys and check Torn > Items.'
+                    : reason === 'no-key'
+                        ? 'no log-scoped API key is set.'
+                        : 'either the item has no listed Torn price, or the request failed.';
+                logDiagnostic('item-price-unresolved', `Could not resolve a price for item ${itemId} — it will show as unpriced. Reason: ${reasonText}`);
+                continue;
+            }
+            const name = profitRecords.flatMap((rec) => rec.items).find((it) => it.id === itemId)?.name || `item ${itemId}`;
+            itemPriceCache[itemId] = { name, value: price, at: Date.now(), source: 'api' };
+        }
+        let changed = false;
+        for (const rec of profitRecords) {
+            let recItemValue = 0;
+            for (const it of rec.items) {
+                if (typeof it.unitValue !== 'number' && itemPriceCache[it.id]) {
+                    it.unitValue = itemPriceCache[it.id].value;
+                    changed = true;
+                }
+                if (typeof it.unitValue === 'number') recItemValue += it.unitValue * it.quantity;
+            }
+            const newTotal = rec.cash + recItemValue;
+            if (rec.itemValue !== recItemValue || rec.total !== newTotal) {
+                rec.itemValue = recItemValue;
+                rec.total = newTotal;
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveProfitData();
+            renderProfitPopover();
+        }
+    }
+
+    function profitRows(period) {
+        const grouped = new Map();
+        for (const record of profitRecords) {
+            const key = profitPeriodKey(record.ts, period);
+            const row = grouped.get(key) || { key, cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, nerveSpent: 0, unresolvedCount: 0, permissionsBlocked: false };
+            row.cash += record.cash; row.itemValue += record.itemValue; row.total += record.total; row.count += 1;
+            if (typeof record.nerve === 'number' && record.nerve > 0) {
+                row.nerve += record.nerve;
+                row.totalWithNerve += record.total;
+                row.nerveSpent += record.nerve;
+            }
+            for (const it of record.items) {
+                if (typeof it.unitValue !== 'number') {
+                    row.unresolvedCount += 1;
+                    if (itemPriceFetchFailureReason.get(it.id) === 'permissions') row.permissionsBlocked = true;
+                }
+            }
+            grouped.set(key, row);
+        }
+        return [...grouped.values()].sort((a, b) => b.key.localeCompare(a.key));
+    }
+
+    function buildGraphSVG(rows) {
+        const sorted = [...rows].sort((a, b) => a.key.localeCompare(b.key));
+
+        const width = 460;
+        const height = 220;
+        const padding = { top: 15, right: 25, bottom: 30, left: 50 };
+
+        const innerWidth = width - padding.left - padding.right;
+        const innerHeight = height - padding.top - padding.bottom;
+
+        const visibleMaxima = [];
+
+        if (graphVisibility.cash) {
+            visibleMaxima.push(...sorted.map(r => r.cash));
+        }
+        if (graphVisibility.items) {
+            visibleMaxima.push(...sorted.map(r => r.itemValue));
+        }
+        if (graphVisibility.total) {
+            visibleMaxima.push(...sorted.map(r => r.total));
+        }
+
+        const maxVal = Math.max(1, ...visibleMaxima);
+
+        const getX = (i) => padding.left + (i / (sorted.length - 1)) * innerWidth;
+        const getY = (val) => padding.top + innerHeight - (val / maxVal) * innerHeight;
+
+        const cashPath = sorted.map((r, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(r.cash)}`).join(' ');
+        const itemsPath = sorted.map((r, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(r.itemValue)}`).join(' ');
+        const totalPath = sorted.map((r, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(r.total)}`).join(' ');
+
+        const yTicks = 4;
+        let gridLines = '';
+        for (let i = 0; i <= yTicks; i++) {
+            const val = (maxVal / yTicks) * i;
+            const y = getY(val);
+            gridLines += `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" class="cct-graph-grid" />`;
+            gridLines += `<text x="${padding.left - 5}" y="${y + 3}" text-anchor="end" class="cct-graph-label">${money(val)}</text>`;
+        }
+
+        const step = Math.ceil(sorted.length / 6);
+        let xLabels = '';
+        sorted.forEach((r, i) => {
+            if (i % step === 0 || i === sorted.length - 1) {
+                const anchor = (i === sorted.length - 1) ? 'end' : 'middle';
+                xLabels += `<text x="${getX(i)}" y="${height - 5}" text-anchor="${anchor}" class="cct-graph-label">${r.key}</text>`;
+            }
+        });
+
+        let dots = '';
+        sorted.forEach((r, i) => {
+            const x = getX(i);
+            if (graphVisibility.cash) dots += `<circle cx="${x}" cy="${getY(r.cash)}" r="3" fill="#00ff66" class="cct-graph-dot"><title>${r.key} Cash: ${money(r.cash)}</title></circle>`;
+            if (graphVisibility.items) dots += `<circle cx="${x}" cy="${getY(r.itemValue)}" r="3" fill="#4ea8de" class="cct-graph-dot"><title>${r.key} Items: ${money(r.itemValue)}</title></circle>`;
+            if (graphVisibility.total) dots += `<circle cx="${x}" cy="${getY(r.total)}" r="3" fill="#ffaa00" class="cct-graph-dot"><title>${r.key} Total: ${money(r.total)}</title></circle>`;
+        });
+
+        return `
+            <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
+                <!-- Axes -->
+                <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}" class="cct-graph-axis" />
+                <line x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}" class="cct-graph-axis" />
+
+                <!-- Grid & Labels -->
+                ${gridLines}
+                ${xLabels}
+
+                <!-- Data Lines -->
+                ${graphVisibility.total ? `<path d="${totalPath}" stroke="#ffaa00" class="cct-graph-line" />` : ''}
+                ${graphVisibility.items ? `<path d="${itemsPath}" stroke="#4ea8de" class="cct-graph-line" />` : ''}
+                ${graphVisibility.cash ? `<path d="${cashPath}" stroke="#00ff66" class="cct-graph-line" />` : ''}
+
+                <!-- Dots -->
+                ${dots}
+            </svg>
+            <div class="cct-graph-legend">
+                <span data-graph-toggle="cash" class="${graphVisibility.cash ? '' : 'cct-graph-legend-off'}"><span class="dot" style="background:#00ff66"></span> Cash</span>
+                <span data-graph-toggle="items" class="${graphVisibility.items ? '' : 'cct-graph-legend-off'}"><span class="dot" style="background:#4ea8de"></span> Items</span>
+                <span data-graph-toggle="total" class="${graphVisibility.total ? '' : 'cct-graph-legend-off'}"><span class="dot" style="background:#ffaa00"></span> Total</span>
+            </div>
+        `;
+    }
+
+    function renderProfitPopover() {
+        const popover = document.querySelector('#cct-profit-popover');
+        if (!popover) return;
+        const period = popover.dataset.period || 'day';
+        const rows = profitRows(period);
+
+        // Totals for the summary block (stays the same regardless of view)
+        const totals = rows.reduce((sum, row) => ({
+            cash: sum.cash + row.cash,
+            itemValue: sum.itemValue + row.itemValue,
+            total: sum.total + row.total,
+            count: sum.count + row.count,
+            nerve: sum.nerve + row.nerve,
+            totalWithNerve: sum.totalWithNerve + row.totalWithNerve,
+            nerveSpent: sum.nerveSpent + row.nerveSpent,
+        }), { cash: 0, itemValue: 0, total: 0, count: 0, nerve: 0, totalWithNerve: 0, nerveSpent: 0 });
+
+        popover.querySelector('#cct-profit-summary').innerHTML = `<div><small>Cash</small><strong>${money(totals.cash)}</strong></div><div><small>Items</small><strong>${money(totals.itemValue)}</strong></div><div><small>Total</small><strong>${money(totals.total)}</strong></div><div><small>Nerve</small><strong>${totals.nerveSpent.toLocaleString('en-US')}</strong></div><div><small>$ / Nerve</small><strong>${ratioText(totals.totalWithNerve, totals.nerve)}</strong></div>`;
+
+        const tableEl = popover.querySelector('#cct-profit-rows');
+        const graphEl = popover.querySelector('#cct-profit-graph');
+        const scrollArea = popover.querySelector('#cct-profit-scroll-area');
+        const toggleBtn = popover.querySelector('#cct-profit-view-toggle');
+        const isGraphView = popover.dataset.view === 'graph';
+
+        if (isGraphView) {
+            tableEl.style.display = 'none';
+            graphEl.classList.add('cct-open');
+            scrollArea.classList.add('cct-hide-scrollbar'); // Hide scrollbar only in graph view
+            toggleBtn.innerHTML = CHART_ICON;
+            toggleBtn.style.opacity = '1';
+        } else {
+            tableEl.style.display = 'grid';
+            graphEl.classList.remove('cct-open');
+            scrollArea.classList.remove('cct-hide-scrollbar'); // Restore scrollbar in table view
+            toggleBtn.innerHTML = CHART_ICON;
+            toggleBtn.style.opacity = '0.6';
+        }
+
+        tableEl.innerHTML = rows.length ? `<div class="cct-profit-row cct-profit-row-header">
+                <span class="cct-profit-col-date"></span>
+                <span class="cct-profit-col-val">Cash</span>
+                <span class="cct-profit-col-val">Items</span>
+                <span class="cct-profit-col-val">Nerve</span>
+                <span class="cct-profit-col-val">$/N</span>
+            </div>` + rows.map((row) => {
+            const pendingTag = row.permissionsBlocked
+                ? `<span class="cct-profit-warn" title="Your API key is missing the &quot;Items&quot; selection under the Torn category. Edit it in Preferences &gt; API Keys, check Torn &gt; Items, then reopen this panel.">⚠️ key missing Items access</span>`
+                : row.unresolvedCount ? `<span class="cct-profit-pending">⏳ ${row.unresolvedCount} pending price</span>` : '';
+            return `<div class="cct-profit-row">
+                <span class="cct-profit-col-date">${escapeHTML(row.key)}</span>
+                <span class="cct-profit-col-val">${money(row.cash)}</span>
+                <span class="cct-profit-col-val">${money(row.itemValue)}</span>
+                <span class="cct-profit-col-val">${(row.nerveSpent || 0).toLocaleString('en-US')}</span>
+                <span class="cct-profit-col-val">${ratioText(row.totalWithNerve, row.nerve)}/N</span>
+                ${pendingTag ? `<span class="cct-profit-col-tag">${pendingTag}</span>` : ''}
+            </div>`;
+        }).join('') : '<div class="cct-profit-empty">No successful outcomes captured yet.</div>';
+
+        if (isGraphView && rows.length > 1) {
+            graphEl.innerHTML = buildGraphSVG(rows);
+            // Wire up the legend toggles
+            graphEl.querySelectorAll('[data-graph-toggle]').forEach(span => {
+                span.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const key = span.dataset.graphToggle;
+                    graphVisibility[key] = !graphVisibility[key];
+                    renderProfitPopover();
+                });
+            });
+        } else if (isGraphView) {
+            graphEl.innerHTML = '<div class="cct-profit-empty" style="text-align:center;">Not enough data to graph yet.</div>';
+        }
+
+        popover.querySelectorAll('[data-profit-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.profitPeriod === period));
+        const resetBtn = popover.querySelector('#cct-profit-reset');
+        if (resetBtn) resetBtn.disabled = profitRecords.length === 0;
+    }
+
+    function hashText(text) {
+        let hash = 0;
+        for (let i = 0; i < text.length; i++) {
+            hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+        }
+        return String(hash);
+    }
+
+    function t() {
+        return isDark ? THEME.dark : THEME.light;
+    }
+
+    function classifyOutcome(text) {
+        const clean = normalizeText(text);
+        if (!clean) return null;
+
+        if (/\b(?:jail\s*)?bust(?:ed|s|ing)?\b/i.test(clean)) return null;
+
+        for (const rule of OUTCOME_RULES) {
+            if (rule.re.test(clean)) return { type: rule.type, text: clean };
+        }
+        return null;
+    }
+
+    function isDuplicateOutcome(outcome) {
+        const now = Date.now();
+        const signature = `${outcome.type}:${hashText(outcome.text)}`;
+        return lastEvent.signature === signature && now - Number(lastEvent.time || 0) < OUTCOME_DEDUPE_MS;
+    }
+
+    function applyOutcomeFromText(text) {
+        const outcome = classifyOutcome(text);
+        if (!outcome || isDuplicateOutcome(outcome)) return;
+
+        const oldChain = chain;
+
+        if (outcome.type === 'critical') {
+            chain = 0;
+        } else if (outcome.type === 'fail') {
+            chain = Math.floor(chain / 2);
+        } else if (outcome.type === 'success') {
+            chain += 1;
+        }
+
+        chain = clampChain(chain);
+        const reasonMap = { critical: 'Detected critical fail message', fail: 'Detected fail message', success: 'Detected success message' };
+        if (commitChainAlways('text', oldChain, outcome.text, reasonMap[outcome.type] || 'Detected outcome message')) {
+            resetResultCounterTracking();
+        }
+        saveLastEvent({
+            signature: `${outcome.type}:${hashText(outcome.text)}`,
+            time: Date.now(),
+            type: outcome.type,
+        });
+    }
+
+    function chainColor(n) {
+        const th = t();
+        if (n < 30) return th.chainLow;
+        if (n < 60) return th.chainMid;
+        return th.chainHigh;
+    }
+
+    function statusText(n) {
+        if (n === 0) return 'No active chain';
+        if (n < 10) return 'Building...';
+        if (n < 30) return 'On a roll';
+        if (n < 60) return 'Hot streak';
+        return 'Unstoppable';
+    }
+
+    function findCrimesApp() {
+        return document.querySelector('.crimes-app') || document.querySelector('[class*="crimes-app"]') || document.querySelector('main');
+    }
+
+    function findWidgetAnchor(root) {
+        return root.querySelector('[class*="heading" i]') ||
+            root.querySelector('[class*="appHeader" i]') ||
+            root.querySelector('h1,h2,h3,h4') ||
+            root;
+    }
+
+    function isExcludedNativeBadgeContext(el) {
+        if (!el || !el.closest) return true;
+        if (el.closest('#cct-root')) return true;
+        if (el.closest('#header, #top-header, .header, .top-header, #sidebar, .sidebar, #nav, nav')) return true;
+        if (el.closest('[class*="header-wrapper" i], [class*="top-banner" i], [class*="menu-items" i]')) return true;
+        if (el.closest('[class*="point" i][class*="value" i], [class*="user-info" i]')) return true;
+        return false;
+    }
+
+    function scoreNativeBadgeCandidate(el, labelEl) {
+        let score = 0;
+        const cls = String(el.className || '');
+        if (/chain|value|count|badge/i.test(cls)) score += 8;
+        if (labelEl && el.parentElement && el.parentElement === labelEl.parentElement) score += 6;
+        if (labelEl && (el.previousElementSibling === labelEl || el.nextElementSibling === labelEl)) score += 10;
+        if (labelEl && labelEl.contains(el)) score += 4;
+        try {
+            const labelRect = labelEl.getBoundingClientRect();
+            const elRect = el.getBoundingClientRect();
+            const dist = Math.abs(elRect.left - labelRect.left) + Math.abs(elRect.top - labelRect.top);
+            if (dist < 80) score += 5;
+            else if (dist < 160) score += 2;
+            else score -= 4;
+        } catch (_) {}
+        return score;
+    }
+
+    function findNativeChainBadge() {
+        if (
+            cachedNativeChainValueEl &&
+            cachedNativeChainValueEl.isConnected &&
+            !isExcludedNativeBadgeContext(cachedNativeChainValueEl)
+        ) {
+            const text = (cachedNativeChainValueEl.textContent || '').trim();
+            if (/^\d{1,4}$/.test(text)) {
+                return { element: cachedNativeChainValueEl, value: parseInt(text, 10) };
+            }
+        }
+        cachedNativeChainValueEl = null;
+
+        const scope =
+            document.querySelector('.crimes-app') ||
+            document.querySelector('[class*="crimes-app"]') ||
+            document.querySelector('#mainContainer') ||
+            document.body;
+
+        const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+        let labelNode = null;
+        let node;
+        while ((node = walker.nextNode())) {
+            const txt = node.nodeValue;
+            if (!txt || !/crime\s*chain/i.test(txt)) continue;
+            if (!node.parentElement || isExcludedNativeBadgeContext(node.parentElement)) continue;
+            // Exact-ish label text, not a long paragraph that merely mentions it
+            if (txt.trim().length > 24) continue;
+            labelNode = node;
+            break;
+        }
+        if (!labelNode) return null;
+        const labelEl = labelNode.parentElement;
+        if (!labelEl) return null;
+
+        let container = labelEl;
+        let best = null;
+        let bestScore = -Infinity;
+        for (let depth = 0; depth < 4 && container; depth += 1) {
+            if (isExcludedNativeBadgeContext(container) && container !== labelEl) break;
+
+            const candidates = Array.from(container.querySelectorAll('*')).filter((el) => {
+                if (isExcludedNativeBadgeContext(el)) return false;
+                if (el.children.length > 0) return false;
+                return /^\d{1,4}$/.test((el.textContent || '').trim());
+            });
+
+            for (const el of candidates) {
+                const score = scoreNativeBadgeCandidate(el, labelEl) - depth;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = el;
+                }
+            }
+            container = container.parentElement;
+        }
+
+        if (!best || bestScore < 4) return null;
+
+        cachedNativeChainValueEl = best;
+        return { element: best, value: parseInt(best.textContent.trim(), 10) };
+    }
+
+    function syncFromNativeBadge() {
+        const badge = findNativeChainBadge();
+        if (!badge) return false;
+        if (!Number.isFinite(badge.value) || badge.value < 0) return false;
+
+        const current = Number.isFinite(chain) ? chain : 0;
+
+        if (badge.value === CHAIN_CAP_DISPLAY && current > 0 && current !== CHAIN_CAP_DISPLAY) {
+            logDiagnostic('native-badge-rejected', {
+                reason: 'value equals display cap while current chain differs',
+                badgeValue: badge.value,
+                currentChain: current,
+            });
+            cachedNativeChainValueEl = null;
+            return false;
+        }
+
+        const delta = Math.abs(badge.value - current);
+        if (!Number.isFinite(delta) || (delta > MAX_REASONABLE_COUNTER_DELTA && badge.value !== 0)) {
+            logDiagnostic('native-badge-rejected', {
+                reason: 'implausible jump from current chain',
+                badgeValue: badge.value,
+                currentChain: current,
+                delta,
+            });
+            cachedNativeChainValueEl = null;
+            return false;
+        }
+
+        pendingCriticalConfirm = null;
+        pendingResultCountReseed = null;
+        const oldChain = chain;
+        chain = clampChain(badge.value);
+        commitChainIfChanged('native', oldChain, null, `Torn's own chain badge read ${badge.value}`);
+        return true;
+    }
+
+    function parseResultCount(value) {
+        const n = parseInt(String(value || '').replace(/,/g, ''), 10);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    function describeElement(el) {
+        if (!el) return null;
+        const parts = [];
+        let current = el;
+        for (let i = 0; i < 4 && current && current.nodeType === Node.ELEMENT_NODE; i++) {
+            let part = current.tagName.toLowerCase();
+            if (current.id) part += `#${current.id}`;
+            if (current.className && typeof current.className === 'string') {
+                part += `.${current.className.trim().replace(/\s+/g, '.').slice(0, 120)}`;
+            }
+            parts.unshift(part);
+            current = current.parentElement;
+        }
+        return {
+            path: parts.join(' > '),
+            text: normalizeText(el.textContent).slice(0, 250),
+            className: String(el.className || '').slice(0, 250),
+        };
+    }
+
+    function summarizeMutations(mutations) {
+        if (!mutations) return null;
+        const summary = {
+            count: mutations.length,
+            childList: 0,
+            characterData: 0,
+            attributes: 0,
+            addedNodes: [],
+            targets: [],
+        };
+        for (const mutation of mutations) {
+            summary[mutation.type] = (summary[mutation.type] || 0) + 1;
+            if (summary.targets.length < 6) summary.targets.push(describeElement(mutation.target));
+            for (const node of Array.from(mutation.addedNodes || [])) {
+                if (summary.addedNodes.length >= 6) break;
+                const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+                summary.addedNodes.push(describeElement(el));
+            }
+        }
+        return summary;
+    }
+
+    function readResultCounts() {
+        const root = findCrimesApp();
+        if (!root) return null;
+
+        const countsRoot = root.querySelector('[class*="resultCounts" i]');
+        if (!countsRoot) return null;
+
+        const successEl = countsRoot.querySelector('[class*="successes" i] span, [class*="successes" i]');
+        const failEl = countsRoot.querySelector('[class*="fails" i] span, [class*="fails" i]');
+        const criticalEl = countsRoot.querySelector('[class*="criticalFails" i] span, [class*="criticalFails" i], [class*="critical-fails" i] span, [class*="critical-fails" i]');
+
+        const successes = parseResultCount(successEl && successEl.textContent);
+        const fails = parseResultCount(failEl && failEl.textContent);
+        const criticalFails = parseResultCount(criticalEl && criticalEl.textContent);
+
+        if (successes === null || fails === null || criticalFails === null) return null;
+        return {
+            successes,
+            fails,
+            criticalFails,
+            debug: {
+                countsRoot: describeElement(countsRoot),
+                successEl: describeElement(successEl),
+                failEl: describeElement(failEl),
+                criticalEl: describeElement(criticalEl),
+            },
+        };
+    }
+
+    function buildCountsReason({ dSuccess, dFail, criticalConfirmedReset }) {
+        if (criticalConfirmedReset) return 'Critical fail confirmed (2 consecutive reads)';
+        if (dSuccess === 1 && dFail === 0) return '';
+
+        const parts = [];
+        if (dSuccess > 0) parts.push(`+${dSuccess} success${dSuccess === 1 ? '' : 'es'}`);
+        if (dFail > 0) parts.push(`${dFail} fail${dFail === 1 ? '' : 's'}`);
+        return parts.length ? parts.join(', ') : 'Counter change';
+    }
+
+    function applyResultCountDeltaFallback(context = {}) {
+        const current = readResultCounts();
+        if (!current) return false;
+
+        if (!lastResultCounts) {
+            lastResultCounts = current;
+            confirmedCriticalFails = current.criticalFails;
+            pendingResultCountReseed = null;
+            return true;
+        }
+
+        const wasTrackingRealCounts = lastResultCounts.successes > 0 || lastResultCounts.fails > 0 || lastResultCounts.criticalFails > 0;
+        const isBlankFrame = current.successes === 0 && current.fails === 0 && current.criticalFails === 0;
+        if (wasTrackingRealCounts && isBlankFrame) return true;
+
+        const dSuccess = current.successes - lastResultCounts.successes;
+        const dFail = current.fails - lastResultCounts.fails;
+        const criticalDelta = current.criticalFails - confirmedCriticalFails;
+        const isImplausiblePositiveJump =
+            dSuccess > MAX_REASONABLE_COUNTER_DELTA ||
+            dFail > MAX_REASONABLE_COUNTER_DELTA;
+
+        if (isImplausiblePositiveJump) {
+            logDiagnostic('implausible-counter-jump', {
+                context: {
+                    source: context.source || 'unknown',
+                    mutations: summarizeMutations(context.mutations),
+                },
+                previous: lastResultCounts,
+                current,
+                dSuccess,
+                dFail,
+            });
+            lastResultCounts = current;
+            confirmedCriticalFails = current.criticalFails;
+            pendingCriticalConfirm = null;
+            pendingResultCountReseed = null;
+            return true;
+        }
+
+        if ((dSuccess < 0 || dFail < 0) && criticalDelta <= 0) {
+            const sameReseedCandidate = pendingResultCountReseed &&
+                pendingResultCountReseed.successes === current.successes &&
+                pendingResultCountReseed.fails === current.fails &&
+                pendingResultCountReseed.criticalFails === current.criticalFails;
+
+            if (sameReseedCandidate) {
+                lastResultCounts = current;
+                confirmedCriticalFails = current.criticalFails;
+                pendingCriticalConfirm = null;
+                pendingResultCountReseed = null;
+            } else {
+                pendingResultCountReseed = {
+                    successes: current.successes,
+                    fails: current.fails,
+                    criticalFails: current.criticalFails,
+                    detectedAt: Date.now(),
+                };
+            }
+            return true;
+        }
+
+        const canApplyResultDeltas = dSuccess >= 0 && dFail >= 0;
+        if (canApplyResultDeltas) {
+            lastResultCounts = current;
+            pendingResultCountReseed = null;
+        }
+
+        const oldChain = chain;
+        let criticalConfirmedReset = false;
+
+        if (criticalDelta < 0) {
+            confirmedCriticalFails = current.criticalFails;
+            pendingCriticalConfirm = null;
+            pendingResultCountReseed = null;
+        } else if (criticalDelta > 0) {
+            if (pendingCriticalConfirm && pendingCriticalConfirm.criticalFails === current.criticalFails) {
+                chain = 0;
+                criticalConfirmedReset = true;
+                logDiagnostic('critical-counter-reset-confirmed', {
+                    context: {
+                        source: context.source || 'unknown',
+                        route: currentCrimesRoute(),
+                        mutations: summarizeMutations(context.mutations),
+                    },
+                    previous: lastResultCounts,
+                    current,
+                    criticalDelta,
+                    pendingCriticalConfirm,
+                });
+                lastResultCounts = current;
+                confirmedCriticalFails = current.criticalFails;
+                pendingCriticalConfirm = null;
+                pendingResultCountReseed = null;
+            } else {
+                pendingCriticalConfirm = { detectedAt: Date.now(), criticalFails: current.criticalFails };
+                logDiagnostic('critical-counter-reset-pending', {
+                    context: {
+                        source: context.source || 'unknown',
+                        route: currentCrimesRoute(),
+                        mutations: summarizeMutations(context.mutations),
+                    },
+                    previous: lastResultCounts,
+                    current,
+                    criticalDelta,
+                    pendingCriticalConfirm,
+                });
+            }
+        } else {
+            pendingCriticalConfirm = null;
+        }
+
+        if (canApplyResultDeltas) {
+            if (dFail > 0) chain = Math.floor(chain / Math.pow(2, dFail));
+            if (dSuccess > 0) chain += dSuccess;
+        }
+
+        chain = clampChain(chain);
+        const reason = buildCountsReason({ dSuccess, dFail, criticalConfirmedReset });
+        if (commitChainIfChanged('counts', oldChain, { dSuccess, dFail, criticalDelta, current }, reason)) {
+            saveLastEvent({
+                signature: `counts:${current.successes}:${current.fails}:${current.criticalFails}`,
+                time: Date.now(),
+                type: 'counts',
+            });
+        }
+        return true;
+    }
+
+    function injectCSS() {
+        if (document.querySelector('#cct-global-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'cct-global-styles';
+        style.textContent = `
+            #cct-root {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                margin-left: 12px;
+                vertical-align: middle;
+                font-family: inherit;
+                position: relative;
+                z-index: 20;
+            }
+            #cct-widget {
+                display: inline-flex;
+                align-items: center;
+                gap: 9px;
+                padding: 4px 10px 4px 5px;
+                border-radius: 20px;
+                cursor: default;
+                user-select: none;
+            }
+            #cct-ring-wrap {
+                position: relative;
+                width: 28px;
+                height: 28px;
+                flex-shrink: 0;
+            }
+            #cct-ring-wrap svg { transform: rotate(-90deg); }
+            #cct-ring-bg,
+            #cct-ring-arc {
+                fill: none;
+                stroke-width: 2;
+            }
+            #cct-ring-arc {
+                stroke-linecap: round;
+                opacity: 0.82;
+                transition: stroke-dashoffset 0.4s ease, stroke 0.4s ease;
+            }
+            #cct-ring-label {
+                position: absolute;
+                inset: 3px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-width: 22px;
+                min-height: 22px;
+                border-radius: 50%;
+                font-size: 11px;
+                font-weight: 500;
+                pointer-events: none;
+                line-height: 1;
+                box-sizing: border-box;
+                font-variant-numeric: tabular-nums;
+                text-shadow: none;
+            }
+            #cct-text {
+                display: flex;
+                flex-direction: column;
+                line-height: 1.15;
+            }
+            #cct-label {
+                font-size: 9px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.07em;
+                color: inherit;
+            }
+            #cct-status {
+                font-size: 11px;
+                font-weight: 600;
+                color: inherit;
+                min-width: 74px;
+            }
+            @keyframes cct-flash {
+                0% { opacity: 1; }
+                40% { opacity: 0.25; }
+                100% { opacity: 1; }
+            }
+            #cct-status.cct-flash { animation: cct-flash 0.35s ease; }
+            .cct-icon-btn {
+                font-size: 11px;
+                cursor: pointer;
+                line-height: 1;
+                transition: opacity 0.15s, background 0.15s;
+                background: none;
+                border: none;
+                color: inherit;
+                padding: 3px 5px;
+                border-radius: 4px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .cct-icon-btn svg { display: block; }
+            @media (max-width: 480px) {
+                #cct-root { margin-left: 8px; gap: 4px; }
+                #cct-widget { gap: 6px; padding: 3px 8px 3px 4px; }
+                #cct-ring-wrap { width: 22px; height: 22px; }
+                #cct-ring-wrap svg { width: 22px; height: 22px; }
+                #cct-ring-label { font-size: 9px; min-width: 17px; min-height: 17px; inset: 2px; }
+                #cct-label { font-size: 8px; }
+                #cct-status { font-size: 10px; min-width: 58px; }
+                .cct-icon-btn { font-size: 10px; padding: 2px 4px; }
+            }
+            #cct-settings-popover {
+                display: none;
+                position: absolute;
+                top: calc(100% + 6px);
+                left: 0;
+                z-index: 9999;
+                width: 380px;
+                max-width: calc(100vw - 24px);
+                box-sizing: border-box;
+                padding: 10px 12px;
+                border-radius: 8px;
+                box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+                flex-direction: column;
+                gap: 8px;
+                font-size: 12px;
+            }
+            #cct-settings-popover.cct-open { display: flex; }
+            #cct-settings-popover label {
+                font-size: 10px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.07em;
+                opacity: 0.5;
+                color: inherit;
+            }
+            #cct-manual-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            #cct-chain-input {
+                padding: 4px 7px;
+                font-size: 12px;
+                border-radius: 5px;
+                outline: none;
+            }
+            #cct-chain-input { width: 54px; }
+            #cct-chain-save {
+                padding: 4px 9px;
+                font-size: 11px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: background 0.15s;
+                white-space: nowrap;
+            }
+            #cct-sync-row {
+                margin-top: 2px;
+            }
+            #cct-sync-row label {
+                display: block;
+                margin-bottom: 6px;
+            }
+            #cct-log-key-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            #cct-log-key-input {
+                flex: 1;
+                min-width: 0;
+                padding: 4px 7px;
+                font-size: 12px;
+                border-radius: 5px;
+                outline: none;
+            }
+            #cct-log-key-save,
+            #cct-log-sync-now,
+            #cct-create-log-key-btn {
+                padding: 4px 9px;
+                font-size: 11px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: background 0.15s;
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                white-space: nowrap;
+            }
+            #cct-log-sync-btn-row {
+                display: flex;
+                gap: 6px;
+                flex-wrap: wrap;
+            }
+            #cct-log-sync-hint {
+                display: block;
+                margin-top: 6px;
+                font-size: 10px;
+                opacity: 0.55;
+                white-space: normal;
+                line-height: 1.4;
+            }
+            .cct-manual-label-row {
+                display: flex;
+                align-items: center;
+            }
+            .cct-info-icon {
+                position: relative;
+                display: inline-block;
+                margin-left: 3px;
+                font-size: 10px;
+                font-weight: 400;
+                text-transform: none;
+                letter-spacing: normal;
+                cursor: help;
+                outline: none;
+            }
+            .cct-info-glyph {
+                opacity: 0.55;
+            }
+            .cct-info-icon:hover .cct-info-glyph,
+            .cct-info-icon:focus .cct-info-glyph,
+            .cct-info-icon.cct-info-open .cct-info-glyph {
+                opacity: 1;
+            }
+            .cct-info-icon .cct-tooltip {
+                display: none;
+                position: absolute;
+                bottom: calc(100% + 7px);
+                left: 50%;
+                transform: translateX(-50%);
+                z-index: 10001;
+                width: 190px;
+                padding: 8px 10px;
+                /* Fixed, fully-opaque surface deliberately independent of the
+                   dark/light theme vars — guarantees readable contrast either way
+                   instead of inheriting a color that can wash out against the
+                   popover background. */
+                background-color: #0a0a0a;
+                opacity: 1;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 500;
+                line-height: 1.45;
+                white-space: normal;
+                text-transform: none;
+                letter-spacing: normal;
+                border-radius: 5px;
+            }
+            .cct-info-icon:hover .cct-tooltip,
+            .cct-info-icon:focus .cct-tooltip,
+            .cct-info-icon.cct-info-open .cct-tooltip {
+                display: block;
+            }
+            #cct-log-details {
+                margin-top: 2px;
+                border-top: 1px solid rgba(128,128,128,0.25);
+                padding-top: 8px;
+            }
+            #cct-log-details summary {
+                cursor: pointer;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                opacity: 0.75;
+                outline: none;
+                user-select: none;
+            }
+            #cct-log-details summary:hover { opacity: 1; }
+            #cct-log-list {
+                list-style: none;
+                margin: 8px 0 0;
+                padding: 0;
+                max-height: 150px;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 5px;
+                white-space: nowrap;
+            }
+            #cct-log-list li {
+                display: flex;
+                align-items: baseline;
+                gap: 6px;
+                font-size: 11px;
+                line-height: 1.4;
+            }
+            #cct-log-empty {
+                opacity: 0.55;
+                font-style: italic;
+            }
+            .cct-log-detail {
+                flex: 1;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .cct-log-reason {
+                display: inline;
+                font-size: 10px;
+                opacity: 0.6;
+                margin-left: 6px;
+            }
+            .cct-log-time {
+                font-size: 10px;
+                opacity: 0.5;
+                white-space: nowrap;
+            }
+            #cct-log-clear {
+                margin-top: 8px;
+                padding: 4px 9px;
+                font-size: 11px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: background 0.15s;
+            }
+            #cct-profit-reset-row {
+                margin-top: 10px;
+                padding-top: 8px;
+                border-top: 1px solid rgba(128,128,128,0.18);
+                text-align: right;
+            }
+            #cct-profit-reset {
+                padding: 4px 9px;
+                font-size: 10px;
+                border-radius: 5px;
+                cursor: pointer;
+                opacity: 0.55;
+                background: transparent;
+                border: 1px solid rgba(255,60,60,0.35);
+                color: #ff5555;
+                transition: opacity 0.15s, background 0.15s;
+            }
+            #cct-profit-reset:hover { opacity: 1; background: rgba(255,60,60,0.12); }
+            #cct-profit-reset:disabled { opacity: 0.25; cursor: default; background: transparent; }
+            #cct-sync-section {
+                margin-top: 10px;
+                padding-top: 8px;
+                border-top: 1px solid rgba(128,128,128,0.18);
+            }
+            #cct-sync-section summary {
+                cursor: pointer;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                opacity: 0.75;
+                outline: none;
+                user-select: none;
+            }
+            #cct-sync-section summary:hover { opacity: 1; }
+            #cct-sync-section[open] summary { margin-bottom: 8px; }
+            .cct-sync-on-dot {
+                display: inline-block;
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: #16a34a;
+                margin-left: 4px;
+                vertical-align: middle;
+            }
+            #cct-sync-toggle-row { margin: 6px 0; }
+            .cct-sync-toggle-label {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 11px;
+                cursor: pointer;
+                opacity: 0.9;
+            }
+            .cct-sync-toggle-label input { cursor: pointer; }
+            #cct-sync-token-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            #cct-sync-token-input {
+                flex: 1;
+                min-width: 0;
+                padding: 4px 7px;
+                font-size: 12px;
+                border-radius: 5px;
+                outline: none;
+            }
+            #cct-sync-token-generate,
+            #cct-sync-token-save,
+            #cct-sync-now {
+                padding: 4px 9px;
+                font-size: 11px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: background 0.15s;
+                white-space: nowrap;
+            }
+            #cct-sync-action-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 2px;
+            }
+            #cct-sync-status {
+                font-size: 10px;
+                opacity: 0.65;
+                white-space: normal;
+                line-height: 1.4;
+            }
+            #cct-sync-hint {
+                display: block;
+                margin-top: 6px;
+                font-size: 10px;
+                opacity: 0.55;
+                white-space: normal;
+                line-height: 1.4;
+            }
+            .cct-version-footer {
+                white-space: normal;
+                font-size: 10px;
+                opacity: 0.4;
+                text-align: right;
+                margin-top: 4px;
+            }
+            #cct-profit-popover {
+                display: none;
+                position: absolute;
+                top: calc(100% + 6px);
+                right: 0;
+                z-index: 9999;
+                width: 400px;
+                max-width: calc(100vw - 16px);
+                box-sizing: border-box;
+                max-height: min(68vh, 620px);
+                overflow: hidden;
+                padding: 10px 12px;
+                border-radius: 8px;
+                box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+                font-size: 12px;
+                flex-direction: column;
+            }
+            #cct-profit-popover.cct-open { display: flex; }
+            #cct-profit-scroll-area {
+                overflow-y: auto;
+                overflow-x: hidden; /* Prevents horizontal window break */
+                flex: 1;
+                min-height: 0;
+            }
+            /* Hide scrollbar only when the graph is active */
+            #cct-profit-scroll-area.cct-hide-scrollbar::-webkit-scrollbar {
+                display: none;
+            }
+            #cct-profit-scroll-area.cct-hide-scrollbar {
+                -ms-overflow-style: none;
+                scrollbar-width: none;
+            }
+            #cct-profit-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 4px; }
+            #cct-debug-toggle { padding: 2px 4px; }
+            #cct-profit-popover.cct-debug-open #cct-debug-toggle { opacity: 1 !important; }
+            #cct-profit-popover.cct-debug-open #cct-profit-periods,
+            #cct-profit-popover.cct-debug-open #cct-profit-scroll-area,
+            #cct-profit-popover.cct-debug-open #cct-profit-reset-row,
+            #cct-profit-popover.cct-debug-open #cct-sync-section { display: none; }
+            #cct-debug-panel { display: none; flex-direction: column; gap: 6px; margin-top: 8px; flex: 1; min-height: 0; }
+            #cct-profit-popover.cct-debug-open #cct-debug-panel { display: flex; }
+            #cct-debug-actions { display: flex; gap: 6px; }
+            #cct-debug-refresh, #cct-debug-copy, #cct-debug-clear {
+                padding: 4px 9px; font-size: 11px; border-radius: 5px; cursor: pointer;
+                transition: background 0.15s; white-space: nowrap;
+            }
+            #cct-debug-output {
+                margin: 0; padding: 8px; border-radius: 5px;
+                font-family: ui-monospace, Consolas, monospace; font-size: 10px; line-height: 1.4;
+                white-space: pre-wrap; word-break: break-all;
+                overflow: auto; flex: 1; min-height: 0; max-height: 46vh; user-select: text;
+            }
+            #cct-profit-periods { display: flex; gap: 5px; margin: 9px 0; align-items: center; }
+            .cct-profit-period { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 0; font-size: 11px; opacity: 0.6; }
+            .cct-profit-period:not(:last-child)::after { content: '·'; margin-left: 5px; }
+            .cct-profit-period.cct-profit-active { font-weight: 700; opacity: 1; }
+            #cct-profit-summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+            #cct-profit-summary > div { padding: 7px 5px; border-radius: 5px; }
+            #cct-profit-summary small { display: block; opacity: 0.55; font-size: 9px; white-space: nowrap; }
+            #cct-profit-summary strong { font-size: 11px; white-space: nowrap; }
+            #cct-profit-rows { display: grid; gap: 2px; margin-top: 8px; }
+            #cct-profit-graph {
+                display: none;
+                margin-top: 10px;
+                width: 100%;
+                box-sizing: border-box;
+                flex: 1;
+                min-height: 0;
+            }
+            #cct-profit-graph.cct-open { display: flex; flex-direction: column; }
+            #cct-profit-graph svg {
+                width: 100%;
+                flex: 1;
+                min-height: 0;
+                max-width: 100%;
+                display: block;
+                overflow: visible;
+            }
+            .cct-graph-axis { stroke: rgba(128,128,128,0.3); stroke-width: 1; }
+            .cct-graph-grid { stroke: rgba(128,128,128,0.1); stroke-width: 1; stroke-dasharray: 2 2; }
+            .cct-graph-label { font-size: 9px; fill: inherit; opacity: 0.6; }
+            .cct-graph-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+            .cct-graph-dot { stroke: #1e1e1e; stroke-width: 1.5; transition: r 0.15s; }
+            .cct-graph-dot:hover { r: 4; }
+            .cct-graph-legend { display: flex; justify-content: center; gap: 10px; margin-top: 5px; font-size: 10px; opacity: 0.8; }
+            .cct-graph-legend span { display: flex; align-items: center; gap: 4px; cursor: pointer; transition: opacity 0.2s; user-select: none; }
+            .cct-graph-legend span:hover { opacity: 1; }
+            .cct-graph-legend span.cct-graph-legend-off { opacity: 0.3; text-decoration: line-through; }
+            .cct-graph-legend .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+            .cct-profit-row {
+                display: grid;
+                grid-template-columns: 1fr 1fr 1fr 0.8fr 0.8fr;
+                align-items: baseline;
+                gap: 4px 10px;
+                font-size: 10px;
+                padding: 4px 5px;
+                border-radius: 5px;
+            }
+            .cct-profit-row-header {
+                padding-top: 0;
+                padding-bottom: 2px;
+                opacity: 0.5;
+                font-size: 9px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .cct-profit-col-date { text-align: left; font-weight: 600; }
+            .cct-profit-row-header .cct-profit-col-date { font-weight: 600; }
+            .cct-profit-col-val { text-align: right; opacity: 0.85; font-variant-numeric: tabular-nums; white-space: nowrap; }
+            .cct-profit-col-tag { grid-column: 1 / -1; text-align: right; font-size: 9px; opacity: 0.75; }
+            .cct-profit-warn { opacity: 1 !important; color: #ff9a3c; cursor: help; }
+            .cct-profit-empty { font-size: 11px; opacity: 0.65; padding: 8px 0; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function applyTheme() {
+        const th = t();
+        const widget = document.querySelector('#cct-widget');
+        if (widget) {
+            widget.style.background = th.widgetBg;
+            widget.style.border = `1px solid ${th.widgetBorder}`;
+        }
+
+        const ringBg = document.querySelector('#cct-ring-bg');
+        if (ringBg) ringBg.style.stroke = th.ringTrack;
+
+        const ringLabel = document.querySelector('#cct-ring-label');
+        if (ringLabel) {
+            ringLabel.style.background = th.ringInnerBg;
+            ringLabel.style.border = `1px solid ${th.ringInnerBorder}`;
+            ringLabel.style.boxShadow = th.ringInnerShadow;
+            ringLabel.style.color = th.ringText;
+        }
+
+        const lbl = document.querySelector('#cct-label');
+        if (lbl) lbl.style.opacity = th.labelOpacity;
+
+        const status = document.querySelector('#cct-status');
+        if (status) status.style.opacity = th.statusOpacity;
+
+        const popover = document.querySelector('#cct-settings-popover');
+        if (popover) {
+            popover.style.background = th.popoverBg;
+            popover.style.border = `1px solid ${th.popoverBorder}`;
+            popover.style.color = th.popoverColor;
+        }
+
+        const profitPopover = document.querySelector('#cct-profit-popover');
+        if (profitPopover) {
+            profitPopover.style.background = th.popoverBg;
+            profitPopover.style.border = `1px solid ${th.popoverBorder}`;
+            profitPopover.style.color = th.popoverColor;
+            profitPopover.querySelectorAll('#cct-profit-summary > div,.cct-profit-row:not(.cct-profit-row-header)').forEach((el) => {
+                el.style.background = th.saveBg;
+                el.style.border = `1px solid ${th.saveBorder}`;
+            });
+            const dbgOut = profitPopover.querySelector('#cct-debug-output');
+            if (dbgOut) {
+                dbgOut.style.background = th.saveBg;
+                dbgOut.style.border = `1px solid ${th.saveBorder}`;
+            }
+        }
+
+        document.querySelectorAll('#cct-chain-input,#cct-log-key-input,#cct-sync-token-input').forEach((input) => {
+            input.style.background = th.inputBg;
+            input.style.border = `1px solid ${th.inputBorder}`;
+            input.style.color = th.popoverColor;
+            input.onfocus = () => { input.style.borderColor = th.inputFocus; };
+            input.onblur = () => { input.style.borderColor = th.inputBorder; };
+        });
+
+        document.querySelectorAll('#cct-chain-save,#cct-log-clear,#cct-log-key-save,#cct-log-sync-now,#cct-create-log-key-btn,#cct-sync-token-generate,#cct-sync-token-save,#cct-sync-now,#cct-debug-refresh,#cct-debug-copy,#cct-debug-clear').forEach((btn) => {
+            btn.style.background = th.saveBg;
+            btn.style.border = `1px solid ${th.saveBorder}`;
+            btn.style.color = th.popoverColor;
+            btn.onmouseenter = () => { btn.style.background = th.saveBgHover; };
+            btn.onmouseleave = () => { btn.style.background = th.saveBg; };
+        });
+
+        document.querySelectorAll('.cct-icon-btn').forEach((btn) => {
+            btn.style.opacity = th.gearOpacity;
+            btn.onmouseenter = () => { btn.style.opacity = th.gearHover; };
+            btn.onmouseleave = () => { btn.style.opacity = th.gearOpacity; };
+        });
+
+        const toggle = document.querySelector('#cct-theme-toggle');
+        if (toggle) toggle.innerHTML = isDark ? SUN_ICON : MOON_ICON;
+
+        render(false);
+    }
+
+    function renderWidget() {
+        if (document.querySelector('#cct-root')) return;
+
+        const root = findCrimesApp();
+        if (!root) return;
+
+        const anchor = findWidgetAnchor(root);
+        if (!anchor) return;
+
+        const logKey = getLogApiKey();
+        const el = document.createElement('span');
+        el.id = 'cct-root';
+        el.innerHTML = `
+            <div id="cct-widget">
+                <div id="cct-ring-wrap">
+                    <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+                        <circle id="cct-ring-bg" cx="14" cy="14" r="${RADIUS}"></circle>
+                        <circle id="cct-ring-arc" cx="14" cy="14" r="${RADIUS}"
+                            stroke-dasharray="${CIRC}"
+                            stroke-dashoffset="${CIRC}"
+                            stroke="#00ff66"></circle>
+                    </svg>
+                    <div id="cct-ring-label">0</div>
+                </div>
+                <div id="cct-text">
+                    <div id="cct-label">Crime Chain</div>
+                    <div id="cct-status">No active chain</div>
+                </div>
+            </div>
+            <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? SUN_ICON : MOON_ICON}</button>
+            <button id="cct-profit-toggle" class="cct-icon-btn" type="button" title="Crime Profit">$</button>
+            <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">${GEAR_ICON}</button>
+            <div id="cct-settings-popover">
+                <div class="cct-manual-label-row"><label>Manual correction</label><span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Use this only if the displayed chain is wrong.</span></span></div>
+                <div id="cct-manual-row">
+                    <input id="cct-chain-input" type="number" min="0" step="1" value="${chain}">
+                    <button id="cct-chain-save" type="button">Set Chain</button>
+                </div>
+                <div id="cct-sync-row">
+                    <label>API Key</label>
+                    <div id="cct-log-key-row">
+                        <input id="cct-log-key-input" type="password" placeholder="log key"
+                            value="${escapeHTML(logKey)}" spellcheck="false" autocomplete="off">
+                        <button id="cct-log-key-save" type="button">Save</button>
+                    </div>
+                    <div id="cct-log-sync-btn-row">
+                        <button id="cct-log-sync-now" type="button">Verify from Logs</button>
+                        <a id="cct-create-log-key-btn" href="https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=CrimeChainTracker&user=log&torn=items" target="_blank" rel="noopener">Create Key</a>
+                    </div>
+                    <span id="cct-log-sync-hint">Also used to verify/repair the chain from crime logs, and to price items for Crime Profit. Needs both "log" (User) and "items" (Torn) selections — the button below requests both.</span>
+                </div>
+                <details id="cct-log-details">
+                    <summary>🛠️ Chain update log</summary>
+                    <ul id="cct-log-list"></ul>
+                    <button id="cct-log-clear" type="button">Clear log</button>
+                </details>
+                <div class="cct-version-footer">Version ${VERSION}</div>
+            </div>
+            <div id="cct-profit-popover" data-period="day" data-view="table">
+                <div id="cct-profit-title">Crime Profit <span style="font-size: 9px; opacity: 0.5; font-weight: normal; margin-left: 4px;">v${VERSION}</span><button id="cct-debug-toggle" class="cct-icon-btn" type="button" title="Debug nerve tracking">${BUG_ICON}</button></div>
+                <div id="cct-profit-periods">
+                    <button class="cct-profit-period" data-profit-period="day" type="button">Day</button>
+                    <button class="cct-profit-period" data-profit-period="week" type="button">Week</button>
+                    <button class="cct-profit-period" data-profit-period="month" type="button">Month</button>
+                    <button class="cct-profit-period" data-profit-period="year" type="button">Year</button>
+                    <button id="cct-profit-view-toggle" class="cct-icon-btn" type="button" title="Toggle Graph View" style="margin-left: auto; opacity: 0.6;">${CHART_ICON}</button>
+                </div>
+                <div id="cct-profit-scroll-area">
+                    <div id="cct-profit-summary"></div>
+                    <div id="cct-profit-rows"></div>
+                    <div id="cct-profit-graph"></div>
+                </div>
+                <div id="cct-debug-panel">
+                    <div id="cct-debug-actions">
+                        <button id="cct-debug-refresh" type="button">Refresh</button>
+                        <button id="cct-debug-copy" type="button">Copy report</button>
+                        <button id="cct-debug-clear" type="button">Reset trace</button>
+                    </div>
+                    <pre id="cct-debug-output"></pre>
+                </div>
+                <div id="cct-profit-reset-row">
+                    <button id="cct-profit-reset" type="button">Reset profit history</button>
+                </div>
+                <details id="cct-onedrive-section">
+                    <summary>☁ OneDrive backup</summary>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin:7px 0;">
+                        <button id="cct-onedrive-connect" type="button">Connect OneDrive</button>
+                        <button id="cct-onedrive-backup" type="button">Back up now</button>
+                        <button id="cct-onedrive-restore" type="button">Restore latest</button>
+                        <button id="cct-onedrive-export" type="button">Export JSON</button>
+                        <button id="cct-onedrive-import" type="button">Import JSON</button>
+                        <input id="cct-onedrive-file" type="file" accept="application/json,.json" style="display:none">
+                    </div>
+                    <div id="cct-onedrive-status" style="font-size:10px;opacity:.75;line-height:1.4;">${odRefresh ? (odLastBackup ? 'Last backup: ' + escapeHTML(odLastBackup) + ' (TCT/UTC)' : 'Connected · backup pending') : 'Not connected. Daily backup at midnight TCT; missed midnight is caught up on next Torn session.'}</div>
+                    <span style="display:block;margin-top:5px;font-size:10px;opacity:.55;line-height:1.4;">Backs up complete profit records and item-price cache to “Crime Profit Monitor” in your OneDrive. Keeps latest.json and one dated snapshot per day. Cloudflare sync remains separate.</span>
+                </details>
+                <details id="cct-sync-section">
+                    <summary>🔗 Cross-device sync${syncEnabled ? ' <span class="cct-sync-on-dot" title="Sync is on"></span>' : ''} <span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Optional. Syncs only your Crime Profit history between your own devices via a token only you have. Off by default.</span></span></summary>
+                    <div id="cct-sync-toggle-row">
+                        <label class="cct-sync-toggle-label">
+                            <input id="cct-sync-toggle" type="checkbox" ${syncEnabled ? 'checked' : ''}>
+                            <span>Enable sync (beta)</span>
+                        </label>
+                    </div>
+                    <div id="cct-sync-token-row">
+                        <input id="cct-sync-token-input" type="password" placeholder="sync token" value="${escapeHTML(syncToken)}" spellcheck="false" autocomplete="off">
+                        <button id="cct-sync-token-generate" type="button" title="Generate a new random token">Generate</button>
+                        <button id="cct-sync-token-save" type="button">Save</button>
+                    </div>
+                    <div id="cct-sync-action-row">
+                        <button id="cct-sync-now" type="button">Sync now</button>
+                        <span id="cct-sync-status">${escapeHTML(crossSyncLastStatus)}</span>
+                    </div>
+                    <span id="cct-sync-hint">Same token on both devices links them. Keep it private — it works like a password. Only Crime Profit history syncs; your chain and settings stay local.</span>
+                </details>
+                <div class="cct-version-footer">Version ${VERSION}</div>
+            </div>
+        `;
+
+        anchor.appendChild(el);
+        widgetRecoveryLogged = false;
+        logDiagnostic('widget-inserted', {
+            anchor: anchor.id || (typeof anchor.className === 'string' ? anchor.className : anchor.tagName),
+            route: location.pathname + location.search,
+        });
+        console.log(`[CCT v${VERSION}] Widget inserted into Crimes interface.`);
+
+        el.querySelector('#cct-theme-toggle').addEventListener('click', (e) => {
+            e.stopPropagation();
+            isDark = !isDark;
+            saveTheme();
+            applyTheme();
+        });
+
+        wireSettings(el);
+        wireProfitPopover(el);
+        applyTheme();
+        renderCorrectionLog();
+        renderProfitPopover();
+    }
+
+    let infoIconWired = false;
+
+    function wireInfoIconOnce() {
+        if (infoIconWired) return;
+        infoIconWired = true;
+
+        document.addEventListener('click', (e) => {
+            const icon = e.target.closest('.cct-info-icon');
+            if (icon && icon.closest('#cct-root')) {
+                e.preventDefault();
+                e.stopPropagation();
+                const wasOpen = icon.classList.contains('cct-info-open');
+                document.querySelectorAll('.cct-info-icon.cct-info-open').forEach((el) => el.classList.remove('cct-info-open'));
+                if (!wasOpen) icon.classList.add('cct-info-open');
+                return;
+            }
+            document.querySelectorAll('.cct-info-icon.cct-info-open').forEach((el) => el.classList.remove('cct-info-open'));
+        });
+    }
+
+    let outsideClickWired = false;
+
+    function clampPopoverToViewport(popover, rootEl) {
+        const margin = 8;
+        const viewportWidth = window.innerWidth;
+        const rootRect = rootEl.getBoundingClientRect();
+        const rect = popover.getBoundingClientRect();
+
+        let desiredLeft = rect.left;
+        if (rect.right > viewportWidth - margin) desiredLeft = viewportWidth - margin - rect.width;
+        if (desiredLeft < margin) desiredLeft = margin;
+
+        popover.style.left = `${desiredLeft - rootRect.left}px`;
+        popover.style.right = 'auto';
+    }
+
+    let viewportClampWired = false;
+
+    function wireViewportClampOnce() {
+        if (viewportClampWired) return;
+        viewportClampWired = true;
+
+        const reclamp = () => {
+            const root = document.querySelector('#cct-root');
+            if (!root) return;
+            const settingsPopover = document.querySelector('#cct-settings-popover');
+            const profitPopover = document.querySelector('#cct-profit-popover');
+            if (settingsPopover && settingsPopover.classList.contains('cct-open')) {
+                clampPopoverToViewport(settingsPopover, root);
+            }
+            if (profitPopover && profitPopover.classList.contains('cct-open')) {
+                clampPopoverToViewport(profitPopover, root);
+            }
+        };
+        window.addEventListener('resize', reclamp);
+        window.addEventListener('orientationchange', reclamp);
+    }
+
+    function wireOutsideClickOnce() {
+        if (outsideClickWired) return;
+        outsideClickWired = true;
+
+        document.addEventListener('click', (e) => {
+            const root = document.querySelector('#cct-root');
+            const popover = document.querySelector('#cct-settings-popover');
+            const profitPopover = document.querySelector('#cct-profit-popover');
+            if (!root) return;
+            if (!root.contains(e.target)) {
+                if (popover) popover.classList.remove('cct-open');
+                if (profitPopover) profitPopover.classList.remove('cct-open');
+            }
+        });
+    }
+
+    function wireProfitPopover(el) {
+        const toggle = el.querySelector('#cct-profit-toggle');
+        const popover = el.querySelector('#cct-profit-popover');
+        toggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            el.querySelector('#cct-settings-popover').classList.remove('cct-open');
+            popover.classList.toggle('cct-open');
+            if (popover.classList.contains('cct-open')) {
+                renderProfitPopover();
+                clampPopoverToViewport(popover, el);
+            }
+        });
+
+        popover.querySelector('#cct-profit-view-toggle').addEventListener('click', (e) => {
+            e.stopPropagation();
+            popover.dataset.view = popover.dataset.view === 'graph' ? 'table' : 'graph';
+            renderProfitPopover();
+        });
+
+        popover.querySelectorAll('[data-profit-period]').forEach((button) => {
+            button.addEventListener('click', () => {
+                popover.dataset.period = button.dataset.profitPeriod;
+                renderProfitPopover();
+            });
+        });
+        popover.querySelector('#cct-profit-reset').addEventListener('click', (e) => {
+            e.stopPropagation();
+            resetProfitData();
+        });
+
+        wireViewportClampOnce();
+        wireInfoIconOnce();
+        wireSyncUI(popover);
+        wireOneDriveUI(popover);
+        wireDebugUI(popover);
+    }
+
+    function wireOneDriveUI(popover) {
+        const q = id => popover.querySelector(id);
+        q('#cct-onedrive-connect').addEventListener('click', async () => { try { if (odPoll) clearTimeout(odPoll); await odAuthorize(); } catch (e) { odStatus('Connect failed: ' + e.message); } });
+        q('#cct-onedrive-backup').addEventListener('click', () => odBackup());
+        q('#cct-onedrive-restore').addEventListener('click', () => odRestore());
+        q('#cct-onedrive-export').addEventListener('click', odExport);
+        q('#cct-onedrive-import').addEventListener('click', () => q('#cct-onedrive-file').click());
+        q('#cct-onedrive-file').addEventListener('change', e => { odImport(e.target.files && e.target.files[0]); e.target.value = ''; });
+    }
+    function wireSyncUI(popover) {
+        const toggleInput = popover.querySelector('#cct-sync-toggle');
+        const tokenInput = popover.querySelector('#cct-sync-token-input');
+        const generateBtn = popover.querySelector('#cct-sync-token-generate');
+        const saveBtn = popover.querySelector('#cct-sync-token-save');
+        const syncNowBtn = popover.querySelector('#cct-sync-now');
+
+        toggleInput.addEventListener('change', () => {
+            saveSyncEnabled(toggleInput.checked);
+            if (syncEnabled && !syncToken) {
+                setSyncStatus('Add or generate a token to start syncing');
+                startCrossDeviceSync(); // no-op until a token exists, but arms the timers
+            } else if (syncEnabled) {
+                setSyncStatus('Enabling…');
+                startCrossDeviceSync();
+            } else {
+                stopCrossDeviceSync();
+                setSyncStatus('Sync disabled');
+            }
+        });
+
+        generateBtn.addEventListener('click', () => {
+            const token = generateSyncToken();
+            tokenInput.type = 'text'; // briefly reveal so it's easy to copy to the other device
+            tokenInput.value = token;
+            saveSyncToken(token);
+            setSyncStatus('New token generated — copy it to your other device, then paste + Save there');
+            if (syncEnabled) startCrossDeviceSync();
+        });
+
+        saveBtn.addEventListener('click', () => {
+            const trimmed = String(tokenInput.value || '').trim();
+            if (trimmed && !SYNC_TOKEN_RE.test(trimmed)) {
+                setSyncStatus('Token must be 16\u201364 letters/numbers/-/_ \u2014 try Generate instead');
+                return;
+            }
+            saveSyncToken(trimmed);
+            tokenInput.type = 'password';
+            if (!syncToken) {
+                setSyncStatus('Token cleared — sync paused');
+                stopCrossDeviceSync();
+                return;
+            }
+            setSyncStatus(syncEnabled ? 'Token saved — syncing…' : 'Token saved — enable sync to start');
+            if (syncEnabled) startCrossDeviceSync();
+        });
+
+        syncNowBtn.addEventListener('click', () => {
+            if (!syncEnabled) {
+                setSyncStatus('Enable sync first');
+                return;
+            }
+            if (!syncToken) {
+                setSyncStatus('Add a token first');
+                return;
+            }
+            runCrossDeviceSync();
+        });
+    }
+
+    function wireSettings(el) {
+        const gear = el.querySelector('#cct-gear');
+        const popover = el.querySelector('#cct-settings-popover');
+
+        gear.addEventListener('click', (e) => {
+            e.stopPropagation();
+            el.querySelector('#cct-profit-popover').classList.remove('cct-open');
+            popover.classList.toggle('cct-open');
+            if (popover.classList.contains('cct-open')) {
+                renderCorrectionLog();
+                clampPopoverToViewport(popover, el);
+            }
+        });
+
+        wireOutsideClickOnce();
+        wireViewportClampOnce();
+        wireInfoIconOnce();
+
+        el.querySelector('#cct-chain-save').addEventListener('click', () => {
+            const input = el.querySelector('#cct-chain-input');
+            const oldChain = chain;
+            chain = clampChain(input.value);
+            input.value = chain;
+            commitChainAlways('manual', oldChain, null, 'Set manually in Settings');
+        });
+
+        el.querySelector('#cct-log-clear').addEventListener('click', () => {
+            saveCorrectionLog([]);
+            renderCorrectionLog();
+        });
+
+        el.querySelector('#cct-log-key-save').addEventListener('click', () => {
+            const input = el.querySelector('#cct-log-key-input');
+            const hint = el.querySelector('#cct-log-sync-hint');
+            const cleanKey = saveLogApiKey(input.value);
+            logSyncPageBefore = null; // fresh key, don't carry over old pagination state
+            hint.textContent = cleanKey ? 'Log key saved — verification available' : 'Save a log key first';
+        });
+
+        el.querySelector('#cct-log-sync-now').addEventListener('click', async () => {
+            const hint = el.querySelector('#cct-log-sync-hint');
+            const key = getLogApiKey();
+            if (!key) {
+                hint.textContent = 'Save a log key first';
+                return;
+            }
+            hint.textContent = 'Verifying from logs...';
+            const result = await syncFromLogs('manual');
+            if (result.ok) {
+                hint.textContent = `Verified from logs — chain is ${result.chain}`;
+            } else if (result.reason === 'no-reset-found') {
+                hint.textContent = 'Need older logs — click again to search further back';
+            } else if (result.error && result.error.code === 16) {
+                hint.textContent = `Key needs the 'log' selection — use the button above to create one`;
+            } else if (result.reason === 'empty') {
+                hint.textContent = 'No crime log entries found for this key';
+            } else {
+                hint.textContent = `Sync failed: ${result.error ? result.error.message : 'unknown error'}`;
+            }
+        });
+    }
+
+    function render(animate) {
+        const arc = document.querySelector('#cct-ring-arc');
+        const label = document.querySelector('#cct-ring-label');
+        const status = document.querySelector('#cct-status');
+        const manual = document.querySelector('#cct-chain-input');
+        if (!arc || !label || !status) return;
+
+        const pct = Math.min(chain / CHAIN_CAP_DISPLAY, 1);
+        const offset = CIRC * (1 - pct);
+        const color = chainColor(chain);
+
+        arc.style.strokeDashoffset = offset;
+        arc.style.stroke = color;
+        label.textContent = String(chain);
+        status.textContent = statusText(chain);
+        if (manual && document.activeElement !== manual) manual.value = chain;
+
+        if (animate) {
+            status.classList.remove('cct-flash');
+            void status.offsetWidth;
+            status.classList.add('cct-flash');
+        }
+    }
+
+    function isVisibleElement(el) {
+        if (!el || el.closest('#cct-root')) return false;
+        if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+        return Boolean(el.offsetParent || el.getClientRects().length);
+    }
+
+    function inspectPossibleOutcomeNode(node) {
+        const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
+
+        const candidates = [];
+        if (element.matches && element.matches(OUTCOME_CONTAINER_SELECTOR)) candidates.push(element);
+        if (element.closest) {
+            const closest = element.closest(OUTCOME_CONTAINER_SELECTOR);
+            if (closest) candidates.push(closest);
+        }
+        if (element.querySelectorAll) candidates.push(...element.querySelectorAll(OUTCOME_CONTAINER_SELECTOR));
+
+        for (const candidate of new Set(candidates)) {
+            if (!isVisibleElement(candidate)) continue;
+            if (candidate.dataset && candidate.dataset.cctSeen === '1') continue;
+
+            const text = normalizeText(candidate.textContent);
+            const outcome = classifyOutcome(text);
+            if (!outcome) continue;
+
+            if (candidate.dataset) candidate.dataset.cctSeen = '1';
+            applyOutcomeFromText(text);
+            break;
+        }
+    }
+
+    function startDOMObserver() {
+        if (observer) observer.disconnect();
+
+        const root = findCrimesApp();
+        if (!root) return;
+
+        observer = new MutationObserver((mutations) => {
+            if (!document.querySelector('#cct-root')) renderWidget();
+
+            pollNerve('mutation');
+
+            const synced = syncFromNativeBadge();
+
+            if (!synced && !applyResultCountDeltaFallback({ source: 'mutation-observer', mutations })) {
+                for (const mutation of mutations) {
+                    for (const node of mutation.addedNodes) inspectPossibleOutcomeNode(node);
+                }
+            }
+        });
+
+        observer.observe(root, { childList: true, subtree: true });
+    }
+
+    async function fetchCrimeLogPage(key, to) {
+        const idsParam = LOG_IDS_ALL.join(',');
+        let url = `https://api.torn.com/user/?selections=log&log=${idsParam}&key=${encodeURIComponent(key)}`;
+        if (to) url += `&to=${to}`;
+        const res = await fetchWithTimeout(url);
+        const data = await res.json();
+        if (data.error) {
+            const err = new Error(data.error.error || 'Torn API error');
+            err.code = data.error.code;
+            throw err;
+        }
+        const raw = data.log || {};
+        return Object.values(raw).map((e) => ({ log: e.log, timestamp: e.timestamp }));
+    }
+
+    function replayChainFromEntries(entries) {
+        const sorted = entries.slice().sort((a, b) => a.timestamp - b.timestamp);
+        let lastCritIndex = -1;
+        sorted.forEach((e, i) => { if (LOG_IDS_CRITICAL.includes(e.log)) lastCritIndex = i; });
+        if (lastCritIndex === -1) return null;
+
+        let result = 0;
+        let successCount = 0;
+        let failCount = 0;
+        for (let i = lastCritIndex + 1; i < sorted.length; i++) {
+            const e = sorted[i];
+            if (e.log === LOG_ID_SUCCESS) { result += 1; successCount++; }
+            else if (e.log === LOG_ID_FAIL) { result = Math.floor(result / 2); failCount++; }
+        }
+        return { chain: result, successCount, failCount, resetTimestamp: sorted[lastCritIndex].timestamp, oldestTimestamp: sorted[0].timestamp };
+    }
+
+    let logSyncPageBefore = null;
+
+    async function syncFromLogs(trigger) {
+        const key = getLogApiKey();
+        if (!key) return { ok: false, reason: 'no-key' };
+
+        try {
+            const entries = await fetchCrimeLogPage(key, logSyncPageBefore);
+            if (!entries.length) return { ok: false, reason: 'empty' };
+
+            const result = replayChainFromEntries(entries);
+            if (!result) {
+                const oldest = entries.slice().sort((a, b) => a.timestamp - b.timestamp)[0].timestamp;
+                logSyncPageBefore = oldest - 1;
+                return { ok: false, reason: 'no-reset-found' };
+            }
+
+            logSyncPageBefore = null;
+            const oldChain = chain;
+            chain = clampChain(result.chain);
+
+            pendingCriticalConfirm = null;
+            resetResultCounterTracking();
+
+            const reason = `${result.successCount} success${result.successCount === 1 ? '' : 'es'}, ${result.failCount} fail${result.failCount === 1 ? '' : 's'} since last reset${trigger ? ` (${trigger})` : ''}`;
+            commitChainIfChanged('log', oldChain, result, reason);
+            return { ok: true, chain };
+        } catch (e) {
+            console.log(`[CCT v${VERSION}] log sync failed:`, e.message, e.code || '');
+            return { ok: false, reason: 'error', error: e };
+        }
+    }
+
+    function runSyncLoop() {
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(() => {
+            const route = currentCrimesRoute();
+            if (route !== lastCrimesRoute) {
+                lastCrimesRoute = route;
+                cachedNativeChainValueEl = null;
+                resetResultCounterTracking();
+            }
+            renderWidget();
+            startDOMObserver();
+            pollNerve('sync-loop');
+            if (!syncFromNativeBadge()) applyResultCountDeltaFallback({ source: 'sync-loop' });
+            render(false);
+        }, 100);
+    }
+
+    function startAppRuntime(source) {
+        if (appRuntimeStarted) return;
+        appRuntimeStarted = true;
+        appWaitLogged = false;
+
+        const detectedApp = findCrimesApp();
+        logDiagnostic('crimes-interface-detected', {
+            source,
+            app: describeElement(detectedApp),
+            route: location.pathname + location.search,
+        });
+        console.log(`[CCT v${VERSION}] Crimes interface detected (${source}); initializing tracker.`);
+        runSyncLoop();
+        pollNerve('init');
+        setInterval(() => pollNerve('interval'), 1500);
+        resolveUnknownItemPrices();
+        startCrossDeviceSync();
+        logDiagnostic('tracker-initialized', {
+            source,
+            widgetPresent: !!document.querySelector('#cct-root'),
+            fetchAvailable: typeof window.fetch === 'function',
+        });
+        console.log(`[CCT v${VERSION}] Tracker initialized successfully.`);
+    }
+
+    function checkForCrimesApp(source) {
+        const app = findCrimesApp();
+        if (!app) return false;
+
+        if (!appRuntimeStarted) {
+            startAppRuntime(source || 'watcher');
+            return true;
+        }
+
+        // Torn PDA can replace the Crimes subtree after initial startup.
+        // If that happens, let the normal sync loop reattach the widget/observer.
+        if (!document.querySelector('#cct-root')) {
+            if (!widgetRecoveryLogged) {
+                widgetRecoveryLogged = true;
+                logDiagnostic('widget-missing-recovery-started', {
+                    source,
+                    app: describeElement(app),
+                    route: location.pathname + location.search,
+                });
+            }
+            runSyncLoop();
+        }
+        return true;
+    }
+
+    function startAppWatcher() {
+        if (appWatcherStarted) return;
+        appWatcherStarted = true;
+
+        // Observe the whole document because Torn PDA may mount the Crimes app
+        // after document-idle or replace it during an internal navigation.
+        const watchTarget = document.documentElement || document;
+        if (watchTarget && typeof MutationObserver !== 'undefined') {
+            appWatchObserver = new MutationObserver(() => checkForCrimesApp('DOM observer'));
+            appWatchObserver.observe(watchTarget, { childList: true, subtree: true });
+        }
+
+        // Mutation observers are the primary trigger; this low-frequency check
+        // is a fallback for PDA builds that update the view without useful DOM
+        // mutations reaching the observer.
+        appWatchInterval = setInterval(() => {
+            const wasStarted = appRuntimeStarted;
+            const found = checkForCrimesApp('retry');
+            if (found && !wasStarted) {
+                logDiagnostic('crimes-interface-found-on-retry', {
+                    route: location.pathname + location.search,
+                });
+            }
+        }, 1500);
+
+        const foundInitially = checkForCrimesApp('initial check');
+        if (!foundInitially && !appWaitLogged) {
+            appWaitLogged = true;
+            logDiagnostic('waiting-for-crimes-interface', {
+                message: 'Crimes interface was not present at initial check; watcher remains active.',
+                route: location.pathname + location.search,
+            });
+        }
+    }
+
+    function watchSpaNavigation() {
+        const originalPushState = history.pushState;
+        const originalReplaceState = history.replaceState;
+
+        history.pushState = function (...args) {
+            const result = originalPushState.apply(this, args);
+            runSyncLoop();
+            return result;
+        };
+
+        history.replaceState = function (...args) {
+            const result = originalReplaceState.apply(this, args);
+            runSyncLoop();
+            return result;
+        };
+
+        window.addEventListener('popstate', runSyncLoop);
+        window.addEventListener('hashchange', runSyncLoop);
+    }
+
+    // =========================================================================
+    // HUB INTEGRATION
+    // =========================================================================
+    function openCCT() {
+        const root = document.getElementById('cct-root');
+        if (root) {
+            root.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const widget = root.querySelector('#cct-widget');
+            if (widget) {
+                widget.style.transition = 'box-shadow 0.3s';
+                widget.style.boxShadow = '0 0 0 3px rgba(78,138,199,0.5)';
+                setTimeout(() => { widget.style.boxShadow = ''; }, 1000);
+            }
+        } else {
+            renderWidget();
+            const newRoot = document.getElementById('cct-root');
+            if (newRoot) {
+                newRoot.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const widget = newRoot.querySelector('#cct-widget');
+                if (widget) {
+                    widget.style.transition = 'box-shadow 0.3s';
+                    widget.style.boxShadow = '0 0 0 3px rgba(78,138,199,0.5)';
+                    setTimeout(() => { widget.style.boxShadow = ''; }, 1000);
+                }
+            }
+        }
+    }
+
+    function registerWithHub() {
+        document.dispatchEvent(new CustomEvent('torn-script-hub:register', {
+            detail: {
+                id: 'crime-chain-tracker',
+                name: 'Crime Chain Tracker',
+                version: VERSION,
+                order: 100,
+                open: openCCT,
+                status: () => `Chain ${chain}` + (statusText(chain) ? ` · ${statusText(chain)}` : ''),
+                prefs: {
+                    fields: [
+                        { key: 'apiKey', type: 'password', label: 'API Key', hint: 'Torn API key with log and items selections' },
+                        { key: 'theme', type: 'select', label: 'Theme', options: [
+                            { value: 'dark', label: 'Dark' },
+                            { value: 'light', label: 'Light' }
+                        ], default: 'dark' },
+                        { key: 'syncEnabled', type: 'toggle', label: 'Cross-device sync', default: false }
+                    ],
+                    values: {
+                        apiKey: getLogApiKey(),
+                        theme: isDark ? 'dark' : 'light',
+                        syncEnabled: syncEnabled
+                    },
+                    onSave: (values) => {
+                        if (values.apiKey !== undefined) {
+                            saveLogApiKey(values.apiKey);
+                        }
+                        if (values.theme !== undefined) {
+                            isDark = values.theme === 'dark';
+                            saveTheme();
+                            applyTheme();
+                        }
+                        if (values.syncEnabled !== undefined) {
+                            saveSyncEnabled(values.syncEnabled);
+                            if (syncEnabled) startCrossDeviceSync();
+                            else stopCrossDeviceSync();
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', registerWithHub);
+    } else {
+        registerWithHub();
+    }
+    document.addEventListener('torn-script-hub:ready', registerWithHub);
+
+    function init() {
+        injectCSS();
+        watchSpaNavigation();
+        logDiagnostic('script-started', {
+            readyState: document.readyState,
+            visibilityState: document.visibilityState,
+            route: location.pathname + location.search,
+            userAgent: navigator.userAgent.slice(0, 160),
+        });
+        const interceptorWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        logDiagnostic('fetch-interceptor-status', {
+            installed: !!interceptorWindow.__cctFetchWrapped,
+            fetchAvailable: typeof interceptorWindow.fetch === 'function',
+            realm: typeof unsafeWindow !== 'undefined' ? 'unsafeWindow' : 'window',
+        });
+        startAppWatcher();
+        odSchedule();
+        console.log(`[CCT v${VERSION}] Script started; waiting for Crimes interface if it is not mounted yet.`);
+    }
+
+    init();
+})();
