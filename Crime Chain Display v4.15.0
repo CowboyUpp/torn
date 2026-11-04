@@ -2218,9 +2218,10 @@
             #cct-onedrive-section summary:hover { opacity: 1; }
             #cct-onedrive-section[open] summary { margin-bottom: 8px; }
             #cct-onedrive-actions {
-                display: flex;
-                flex-wrap: wrap;
+                display: grid;
+                grid-template-columns: repeat(3, max-content);
                 align-items: center;
+                justify-content: start;
                 column-gap: 16px;
                 row-gap: 10px;
                 margin: 10px 0 12px;
