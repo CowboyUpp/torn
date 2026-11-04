@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn: Racing Speed & Lap Logger (PDA Friendly)
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      2.7.29-pda
+// @version      2.7.30
 // @description  Touch-friendly PDA edition: responsive race controls, speed records, and lap records.
 // @author       cowboyup [1496324]
 // @match        https://www.torn.com/*
@@ -15,10 +15,13 @@
 // @connect      api.torn.com
 // @license      MIT
 // ==/UserScript==
+//
+// v2.7.30 - Stabilize Current speed width across 2- and 3-digit readings;
+//           highlight your own car in the race leaderboard.
 
 'use strict';
 
-const SCRIPT_VERSION = '2.7.29-pda';
+const SCRIPT_VERSION = '2.7.30';
 const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 const $ = (...args) => pageWindow.$(...args);
 
@@ -539,7 +542,21 @@ GM_addStyle(`
     #rslogLiveModeBtn:hover { color: #fff200; border-color: #777; }
     #rslogRaceToolbar { display: flex; align-items: center; gap: 5px; min-height: 25px; margin-bottom: 6px; padding: 3px 7px; box-sizing: border-box; border: 1px solid #333; border-radius: 5px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); color: #ccc; font-family: "Courier New", Courier, monospace; font-size: 10px; }
     #rslogToolbarLiveWrap, #rslogToolbarTopWrap, #rslogToolbarSkillWrap { white-space: nowrap; }
-    #rslogToolbarSpeed { color: #fff200; font-weight: bold; }
+    #rslogToolbarSpeed {
+        display: inline-block;
+        width: 10ch;
+        text-align: right;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+        color: #fff200;
+        font-weight: bold;
+    }
+    /* Highlight the logged-in racer without changing leaderboard layout. */
+    #leaderBoard > .rslogOwnCarRow {
+        background: rgba(0, 255, 136, .12) !important;
+        box-shadow: inset 4px 0 0 #00ff88, inset 0 0 0 1px rgba(0, 255, 136, .38) !important;
+        border-radius: 3px;
+    }
     #rslogToolbarTop { color: #ff9900; font-weight: bold; }
     #rslogToolbarSkill { color: #00ff88; font-weight: bold; }
     #rslogParticipantRsBtn { padding: 2px 6px; border: 1px solid #555; border-radius: 9px; background: #171717; color: #888; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
@@ -975,6 +992,7 @@ function ensureParticipantRsObserver() {
     if (!board || typeof MutationObserver !== 'function') return;
     participantRsObservedBoard = board;
     participantRsObserver = new MutationObserver(mutations => {
+        paintOwnCarHighlight();
         if (participantRsIsEnabled() && mutations.some(participantRsMutationTouchesNames)) {
             paintParticipantRsBadges();
         }
@@ -990,6 +1008,23 @@ function raceDriverRows() {
 function driverIdFromRaceRow(row) {
     const match = String(row?.id || '').match(/(\d+)/);
     return match ? Number(match[1]) : 0;
+}
+
+function paintOwnCarHighlight() {
+    const board = document.getElementById('leaderBoard');
+    if (!board) return;
+    for (const row of raceDriverRows()) {
+        const isOwnCar = currentUserId > 0 && driverIdFromRaceRow(row) === currentUserId;
+        row.classList.toggle('rslogOwnCarRow', isOwnCar);
+    }
+}
+
+function updateOwnCarFromResponse(data) {
+    const playerName = data?.user?.playername;
+    const driverId = Number(data?.raceData?.carInfo?.[playerName]?.userID);
+    if (!Number.isInteger(driverId) || driverId <= 0) return;
+    currentUserId = driverId;
+    paintOwnCarHighlight();
 }
 
 function queueParticipantRsDriver(driverId) {
@@ -1984,6 +2019,7 @@ function cacheRaceResultsFromResponse(data) {
         updateRaceLinkButton();
     }
     updateRacingSkillFromResponse(data);
+    updateOwnCarFromResponse(data);
     seedOwnParticipantRacingSkill(data);
     if (!data?.timeData || data.timeData.status < 3 || !currentRaceId) return;
     const resultKey = `${currentRaceId}:${Number(data.laps) || 0}:${Object.keys(data.raceData?.cars || {}).length}`;
@@ -2355,6 +2391,9 @@ function cleanupRaceState(preserveRaceData = false) {
     currentCar      = '';
     currentRaceLaps = 0;
     if (!preserveRaceData) {
+        currentUserId = 0;
+        document.querySelectorAll('#leaderBoard > .rslogOwnCarRow')
+            .forEach(row => row.classList.remove('rslogOwnCarRow'));
         clearParticipantRsQueue();
         closeParticipantRsModal();
         removeRaceResultLabels();
@@ -2406,7 +2445,10 @@ function checkRaceDom() {
 
 function watchForRaceStart() {
     if (_raceHealthInterval) return;
-    _raceHealthInterval = setInterval(checkRaceDom, HEALTH_CHECK_MS);
+    _raceHealthInterval = setInterval(() => {
+        checkRaceDom();
+        paintOwnCarHighlight();
+    }, HEALTH_CHECK_MS);
 }
 
 let _initialized = false;
