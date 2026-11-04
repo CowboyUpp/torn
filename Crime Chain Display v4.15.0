@@ -36,6 +36,7 @@
     const STORAGE_KEY_SYNC_PUSH_CURSOR = 'cct_sync_push_cursor_v1';
     const OD_REFRESH_KEY = 'cct_onedrive_refresh_v1';
     const OD_LAST_KEY = 'cct_onedrive_last_backup_v1';
+    const OD_LAST_SUCCESS_AT_KEY = 'cct_onedrive_last_success_at_v1';
     const OD_CLIENT = 'dfcdc5e1-3623-4721-a08e-b740c075c4d2';
     const OD_FOLDER = 'Crime Profit Monitor';
     const STORAGE_KEY_NERVE_USED = 'cct_nerve_used_by_type_v1';
@@ -84,6 +85,7 @@
     let crossSyncLastStatus = '';
     let odRefresh = safeGet(OD_REFRESH_KEY, '');
     let odLastBackup = safeGet(OD_LAST_KEY, '');
+    let odLastSuccessAt = Number(safeGet(OD_LAST_SUCCESS_AT_KEY, '0')) || 0;
     let odAccess = '';
     let odFolderId = '';
     let odBusy = false;
@@ -403,6 +405,8 @@
     }
 
     function odStatus(t) { const e = document.querySelector('#cct-onedrive-status'); if (e) e.textContent = t; }
+    function odRecentSuccess() { return odLastSuccessAt > 0 && (Date.now() - odLastSuccessAt) <= 24 * 60 * 60 * 1000; }
+    function odUpdateDot() { const e = document.querySelector('#cct-onedrive-success-dot'); if (e) { e.style.display = odRecentSuccess() ? 'inline-block' : 'none'; e.title = odRecentSuccess() ? 'OneDrive upload succeeded within the last 24 hours' : 'No successful OneDrive upload within the last 24 hours'; } }
     function odRequest(method, url, token, data, headers = {}) { return gmRequest({ method, url, data, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...headers } }); }
     async function odForm(url, params) { return odRequest('POST', url, '', new URLSearchParams(params).toString(), { 'Content-Type': 'application/x-www-form-urlencoded' }); }
     async function odAuthorize() {
@@ -441,7 +445,7 @@
     async function odBackup(opts = {}) {
         if (odBusy) return; odBusy = true;
         try { const token = await odToken(); const folder = await odFolder(token); const day = new Date().toISOString().slice(0,10); const body = odPayload(); odStatus('Uploading backup…');
-            await odUpload(token, folder, 'Crime-Profit-' + day + '.json', body); await odUpload(token, folder, 'latest.json', body); odLastBackup = day; safeSet(OD_LAST_KEY, day); odStatus('Last backup: ' + day + ' (TCT/UTC) · ' + profitRecords.length.toLocaleString('en-US') + ' records');
+            await odUpload(token, folder, 'Crime-Profit-' + day + '.json', body); await odUpload(token, folder, 'latest.json', body); odLastBackup = day; safeSet(OD_LAST_KEY, day); odLastSuccessAt = Date.now(); safeSet(OD_LAST_SUCCESS_AT_KEY, String(odLastSuccessAt)); odUpdateDot(); odStatus('Last backup: ' + day + ' (TCT/UTC) · ' + profitRecords.length.toLocaleString('en-US') + ' records');
         } catch (e) { odStatus('Backup failed: ' + e.message); if (opts.automatic) logDiagnostic('onedrive-backup-failed', { message: String(e.message || e).slice(0,250) }); } finally { odBusy = false; }
     }
     function odSchedule() {
@@ -2197,6 +2201,44 @@
             }
             #cct-profit-reset:hover { opacity: 1; background: rgba(255,60,60,0.12); }
             #cct-profit-reset:disabled { opacity: 0.25; cursor: default; background: transparent; }
+            #cct-onedrive-section {
+                margin-top: 10px;
+                padding-top: 8px;
+                border-top: 1px solid rgba(128,128,128,0.18);
+            }
+            #cct-onedrive-section summary {
+                cursor: pointer;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                opacity: 0.75;
+                outline: none;
+                user-select: none;
+            }
+            #cct-onedrive-section summary:hover { opacity: 1; }
+            #cct-onedrive-section[open] summary { margin-bottom: 8px; }
+            #cct-onedrive-actions {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 6px;
+                margin: 7px 0;
+            }
+            #cct-onedrive-actions button {
+                display: inline-flex !important;
+                align-items: center;
+                justify-content: center;
+                font-family: inherit !important;
+                font-size: 11px !important;
+                font-weight: 400;
+                line-height: 1.4;
+                padding: 4px 9px !important;
+                border-radius: 5px;
+                cursor: pointer;
+                white-space: nowrap;
+                visibility: visible !important;
+                opacity: 1 !important;
+            }
             #cct-sync-section {
                 margin-top: 10px;
                 padding-top: 8px;
@@ -2559,8 +2601,8 @@
                     <button id="cct-profit-reset" type="button">Reset profit history</button>
                 </div>
                 <details id="cct-onedrive-section">
-                    <summary>☁ OneDrive backup</summary>
-                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin:7px 0;">
+                    <summary>☁ OneDrive backup <span id="cct-onedrive-success-dot" class="cct-sync-on-dot" title="OneDrive upload succeeded within the last 24 hours" style="display:${odRecentSuccess() ? 'inline-block' : 'none'};"></span> <span class="cct-info-icon" tabindex="0"><span class="cct-info-glyph">ⓘ</span><span class="cct-tooltip">Optional. OneDrive backup stores your Crime Profit history in your own Microsoft OneDrive account. Connect only if you want cloud backups.</span></span></summary>
+                    <div id="cct-onedrive-actions">
                         <button id="cct-onedrive-connect" type="button">Connect OneDrive</button>
                         <button id="cct-onedrive-backup" type="button">Back up now</button>
                         <button id="cct-onedrive-restore" type="button">Restore latest</button>
@@ -2724,6 +2766,7 @@
         wireInfoIconOnce();
         wireSyncUI(popover);
         wireOneDriveUI(popover);
+        odUpdateDot();
         wireDebugUI(popover);
     }
 
