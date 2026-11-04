@@ -1,0 +1,2437 @@
+// ==UserScript==
+// @name         Torn: Racing Speed & Lap Logger (PDA Friendly)
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      2.7.29-pda
+// @description  Touch-friendly PDA edition: responsive race controls, speed records, and lap records.
+// @author       cowboyup [1496324]
+// @match        https://www.torn.com/*
+// @run-at       document-start
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addStyle
+// @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      api.torn.com
+// @license      MIT
+// ==/UserScript==
+
+'use strict';
+
+const SCRIPT_VERSION = '2.7.29-pda';
+const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+const $ = (...args) => pageWindow.$(...args);
+
+// Detect Torn PDA / in-app WebViews where Blob-download anchors and
+// GM_setClipboard are unreliable or unavailable. Same heuristic used by
+// other Torn racing userscripts targeting PDA compatibility.
+function isPdaWebView() {
+    return /TornPDA|wv;|; wv|FBAN|FBAV|Line\/|Instagram/i.test(navigator.userAgent);
+}
+
+// Use the compact interface in Torn PDA, other touch WebViews, and narrow
+// browser windows. Keeping this as a class also lets the layout react when a
+// phone rotates without rebuilding the logger.
+function applyPdaModeClass() {
+    if (!document.documentElement) return;
+    const compactScreen = typeof window.matchMedia === 'function'
+        && window.matchMedia('(max-width: 700px), (pointer: coarse)').matches;
+    document.documentElement.classList.toggle('rslogPdaMode', isPdaWebView() || compactScreen);
+}
+
+applyPdaModeClass();
+window.addEventListener('resize', applyPdaModeClass, { passive: true });
+
+// ─── Torn AJAX hook ────────────────────────────────────────────────────────────
+function isRacingResponse(data) {
+    return !!(data && typeof data === 'object'
+        && data.raceData && typeof data.raceData === 'object'
+        && data.timeData && typeof data.timeData === 'object'
+        && data.user && typeof data.user === 'object'
+        && data.raceID !== null && data.raceID !== undefined && data.raceID !== '');
+}
+
+function responseMatchesDisplayedRace(data) {
+    if (!document.getElementById('racingdetails')) return true;
+
+    const titleEl = document.querySelector('div.title-black.t-overflow');
+    const visibleTitle = titleEl?.textContent?.trim() || '';
+    const visibleTrack = normalizeTrackName(visibleTitle);
+    const responseTrack = normalizeTrackName(data?.raceData?.title || '');
+    if (visibleTrack && responseTrack && visibleTrack.toLowerCase() !== responseTrack.toLowerCase()) return false;
+
+    const visibleLaps = parseLapCount(visibleTitle);
+    const responseLaps = Number(data?.laps) || 0;
+    if (visibleLaps > 0 && responseLaps > 0 && visibleLaps !== responseLaps) return false;
+
+    const responseNames = Object.keys(data?.raceData?.cars || {});
+    const visibleNames = Array.from(document.querySelectorAll('#leaderBoard li.name'))
+        .map(cell => cell.querySelector?.('a')?.textContent?.trim() || cell.firstChild?.textContent?.trim() || '')
+        .filter(Boolean);
+    if (visibleNames.length > 0 && visibleNames.length === responseNames.length) {
+        const visibleSet = new Set(visibleNames);
+        if (!responseNames.every(name => visibleSet.has(name))) return false;
+    }
+    return true;
+}
+
+function isDisplayedRaceResponse(data) {
+    const nextRaceId = String(data?.raceID ?? '');
+    if (!nextRaceId) return false;
+    // A different ID is valid when its track/laps/field match the panel Torn
+    // currently displays. This permits a new race without accepting background data.
+    return responseMatchesDisplayedRace(data);
+}
+
+let racingResponseHandler = null;
+let pendingRacingResponses = [];
+
+function captureNativeRacingText(responseText) {
+    if (typeof responseText !== 'string'
+        || !responseText.includes('"raceData"')
+        || !responseText.includes('"raceID"')) return;
+    try {
+        const data = JSON.parse(responseText);
+        if (!isRacingResponse(data)) return;
+        if (racingResponseHandler) racingResponseHandler(data);
+        else {
+            pendingRacingResponses.push(data);
+            if (pendingRacingResponses.length > 5) pendingRacingResponses.shift();
+        }
+    } catch (error) {
+        console.debug('[Racing Logger] Early racing response was not usable.', error);
+    }
+}
+
+function installNativeRaceCapture() {
+    try {
+        const XHR = pageWindow.XMLHttpRequest;
+        if (!XHR?.prototype?.send || XHR.prototype.__rslogCaptureInstalled) return;
+        const nativeSend = XHR.prototype.send;
+        Object.defineProperty(XHR.prototype, '__rslogCaptureInstalled', { value: true });
+        XHR.prototype.send = function (...args) {
+            this.addEventListener('load', () => {
+                if (this.status === 200) {
+                    try { captureNativeRacingText(this.responseText); } catch (_) { /* non-text response */ }
+                }
+            }, { once: true });
+            return nativeSend.apply(this, args);
+        };
+    } catch (error) {
+        console.debug('[Racing Logger] Could not install early race capture.', error);
+    }
+}
+
+function tornAjax(callback) {
+    racingResponseHandler = data => {
+        if (!isDisplayedRaceResponse(data)) return;
+        parseBestLapFromResponse(data);
+        callback();
+    };
+    const queued = pendingRacingResponses.splice(0);
+    queued.forEach(data => racingResponseHandler(data));
+}
+
+installNativeRaceCapture();
+
+// ─── Config ────────────────────────────────────────────────────────────────────
+const POLL_MS = 1000;
+const MIN_SAMPLE_MS = 250;
+const MAX_SAMPLE_MS = 12000;
+const HEALTH_CHECK_MS = 2000;
+const RESULTS_RENDER_THROTTLE_MS = 1000;
+const SETTING_SPEED_OPEN = 'rslog_speed_panel_open';
+const SETTING_LAP_OPEN = 'rslog_lap_panel_open';
+const SETTING_LOBBY_OPEN = 'rslog_lobby_panel_open';
+const SETTING_LIVE_MODE = 'rslog_live_speed_mode';
+const RACING_SKILL_LEVEL_KEY = 'rslog_racing_skill_level';
+const RACING_SKILL_GAIN_KEY = 'rslog_last_racing_skill_gain';
+const RACING_SKILL_RACE_KEY = 'rslog_last_racing_skill_race';
+const PARTICIPANT_RS_ENABLED_KEY = 'rslog_participant_rs_enabled';
+const PARTICIPANT_RS_API_KEY = 'rslog_participant_rs_api_key';
+const PARTICIPANT_RS_CACHE_KEY = 'rslog_participant_rs_cache';
+const PARTICIPANT_RS_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const PARTICIPANT_RS_FETCH_INTERVAL_MS = 1500;
+
+// ─── State ─────────────────────────────────────────────────────────────────────
+let last_compl      = -1.0;
+let speedInterval   = 0;
+let sessionTopSpeed = 0;
+let currentTrack    = '';
+let currentCar      = '';
+let currentRaceLaps = 0;
+let currentRaceId   = '';
+let cachedRaceResults = null;
+let lastRaceResultKey = '';
+let lastResultsRenderAt = 0;
+let raceResultsVisible = false;
+let warpMessageQueue = [];
+let lastWarpMessage = '';
+let racingSkillStateLoaded = false;
+let lastRacingSkillGain = null;
+let lastRacingSkillRaceId = '';
+let participantRsCacheLoaded = false;
+const participantRsCache = new Map();
+const participantRsQueue = [];
+const participantRsQueuedIds = new Set();
+const participantRsFailedUntil = new Map();
+let participantRsFetchInFlight = false;
+let participantRsNextTimer = 0;
+let participantRsLastError = '';
+let participantRsGeneration = 0;
+let participantRsObserver = null;
+let participantRsObservedBoard = null;
+
+const WARP_MESSAGES = [
+    'Installation failed: 1.21 gigawatts required. Your mechanic says you watch too much sci-fi.',
+    'Warp drive unavailable. Ched has disabled faster-than-light travel within city limits.',
+    'Flux capacitor not included. Please exceed 88 mph responsibly.',
+    'Installation complete! Estimated speed improvement: absolutely none.',
+    'Your car rejected the upgrade and suggested you watch less television.',
+    'The pit crew installed a cup holder instead. Honestly, this may be more useful.',
+    'Warp core backordered until the next Christmas Town event.',
+    'Insufficient racing points. Have you tried turning the car off and on again?',
+    'Temporal anomaly detected: according to the logs, you already lost this race tomorrow.',
+    'Warranty void if travelling faster than the Torn servers can update.',
+    'Quantum tyres installed. Their grip is both excellent and terrible until observed.',
+    'Navigation computer refuses route: “Second star to the right” is not a valid Torn address.',
+    'Warp factor nine approved. Fuel cost: all of your points and one suspiciously glowing hamster.',
+    'The mechanic found the problem: the warp drive was set to “dramatic television noises”.'
+    ,'Warp permit denied. City Hall says the speed limit still applies in hyperspace.'
+    ,'The drive was installed backwards. Your estimated arrival time has increased by three weeks.'
+    ,'Autopilot plotted the fastest route directly through the hospital. Route rejected.'
+    ,'The mechanic painted flames on the doors and billed you for advanced propulsion.'
+    ,'Tachyon sensor calibrated. It now detects speeding tickets five minutes before they are issued.'
+    ,'Quantum mechanic unavailable. He is simultaneously at lunch and charging by the hour.'
+    ,'Warp core test successful. The garage is now six inches to the left.'
+    ,'Hyperspace lane closed for pothole repairs. Please use the scenic route through Uptown.'
+    ,'Your warp signature attracted Duke. Installation quietly cancelled.'
+    ,'Racing officials rejected the upgrade because arriving before the race starts is considered suspicious.'
+    ,'Fusion reactor needs premium fuel, two energy drinks, and a mechanic with fewer questions.'
+    ,'Time machine activated. You returned to the moment before buying this upgrade.'
+    ,'Space-time warranty expired yesterday, which is impressive because you purchased it tomorrow.'
+    ,'Horsepower conversion complete: your car now contains 412 theoretical space ponies.'
+    ,'Warp request denied by the server tick. The laws of physics have been queued for processing.'
+    ,'The drive engaged successfully. Torn responded with Connection Lost.'
+    ,'Diagnostics found a loose nut behind the steering wheel. The mechanic refuses to elaborate.'
+    ,'Destination entered: finish line. Navigation suggests walking may be faster.'
+    ,'Faster-than-light mode locked until you prove you are not a robot.'
+    ,'The pit crew crossed two wires. Your headlights can now achieve warp factor seven.'
+    ,'Warp core temperature nominal. Driver confidence critically unstable.'
+    ,'Anti-gravity installed. Traction has submitted a formal complaint.'
+    ,'The upgrade passed every simulation except the one involving your driving.'
+    ,'Emergency shutdown: the onboard computer discovered your repair bill.'
+];
+let lastSampleAt    = 0;
+let lastSampleTrack = '';
+let lastSampleCar   = '';
+let lastSampleLaps  = 0;
+let lastSampleRaceId = '';
+let consecutiveInvalidSamples = 0;
+
+// ─── Interval helpers ──────────────────────────────────────────────────────────
+function maybeClear() {
+    if (speedInterval !== 0) {
+        clearInterval(speedInterval);
+        speedInterval   = 0;
+    }
+    last_compl      = -1.0;
+    sessionTopSpeed = 0;
+    lastSampleAt    = 0;
+    lastSampleTrack = '';
+    lastSampleCar   = '';
+    lastSampleLaps  = 0;
+    lastSampleRaceId = '';
+    consecutiveInvalidSamples = 0;
+}
+
+// ─── Storage ───────────────────────────────────────────────────────────────────
+function getSpeedLog() {
+    const raw = GM_getValue('torn_top_speeds', '{}');
+    try {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new TypeError('Stored log is not an object');
+        }
+        return parsed;
+    } catch (error) {
+        console.error('[Racing Logger] Invalid saved log; starting with an empty log.', error);
+        try { GM_setValue('torn_top_speeds_invalid_backup', String(raw)); } catch (backupError) {
+            console.warn('[Racing Logger] Could not back up the invalid log.', backupError);
+        }
+        return {};
+    }
+}
+
+function saveSpeedLog(log) {
+    GM_setValue('torn_top_speeds', JSON.stringify(log));
+}
+
+function carKey(carImg) {
+    const m = (carImg || '').match(/items\/([0-9]+)\//);
+    return m ? m[1] : 'unknown';
+}
+
+// Torn car names
+const CAR_NAMES = {
+    '77': 'Tabata RM2', '78': 'Edomondo NSX', '79': 'Echo Quadrato', '80': 'Bavaria M5', '81': 'Bavaria Z8',
+    '82': 'Chevalier CZ06', '83': 'Dart Rampager', '84': 'Knight Firebrand', '85': 'Volt GT', '86': 'Invader H3',
+    '87': 'Echo S4', '88': 'Edomondo IR', '89': 'Edomondo ACD', '90': 'Edomondo Localé', '91': 'Verpestung Insecta',
+    '92': 'Chevalier CVR', '93': 'Volt MNG', '94': 'Trident', '95': 'Oceania SS', '494': 'Limoen Saxon',
+    '495': 'Nano Pioneer', '496': 'Vita Bravo', '497': 'Zaibatsu Macro', '498': 'Çagoutte 10-6', '499': 'Papani Colé',
+    '500': 'Bedford Racer', '501': 'Stålhög 860', '502': 'Alpha Milano 156', '503': 'Bavaria X5', '504': 'Coche Basurero',
+    '505': 'Bedford Nova', '506': 'Verpestung Sport', '507': 'Echo S3', '508': 'Volt RS', '509': 'Edomondo S2',
+    '510': 'Nano Cavalier', '511': 'Colina Tanprice', '512': 'Cosmos EX', '513': 'Yotsuhada EVX', '514': 'Sturmfahrt 111',
+    '515': 'Tsubasa Impressor', '516': 'Wington GGU', '517': 'Weston Marlin 177', '518': 'Echo R8', '519': 'Stormatti Casteon',
+    '520': 'Lolo 458', '521': 'Lambrini Torobravo', '522': 'Veloria LFA', '523': 'Mercia SLR', '524': 'Zaibatsu GT-R',
+};
+
+function carName(carImg) {
+    return CAR_NAMES[carKey(carImg)] || null;
+}
+
+// Car classes — sourced from https://wiki.torn.com/wiki/Cars
+const CAR_CLASSES = {
+    '77': 'D',  '78': 'A',  '79': 'C',  '80': 'B',  '81': 'C',
+    '82': 'C',  '83': 'B',  '84': 'C',  '85': 'A',  '86': 'D',
+    '87': 'B',  '88': 'C',  '89': 'D',  '90': 'E',  '91': 'D',
+    '92': 'D',  '93': 'B',  '94': 'E',  '95': 'C',  '494': 'E',
+    '495': 'E', '496': 'E', '497': 'E', '498': 'E', '499': 'E',
+    '500': 'E', '501': 'E', '502': 'D', '503': 'D', '504': 'D',
+    '505': 'D', '506': 'D', '507': 'C', '508': 'C', '509': 'C',
+    '510': 'C', '511': 'B', '512': 'B', '513': 'B', '514': 'B',
+    '515': 'B', '516': 'B', '517': 'A', '518': 'A', '519': 'A',
+    '520': 'A', '521': 'A', '522': 'A', '523': 'A', '524': 'A',
+};
+
+function carClass(carImg) {
+    return CAR_CLASSES[carKey(carImg)] || null;
+}
+
+const CLASS_BADGE_STYLE = {
+    'A': 'background:#7a5c00;color:#ffd700;border:1px solid #ffd700;',
+    'B': 'background:#2a2a2a;color:#c0c0c0;border:1px solid #c0c0c0;',
+    'C': 'background:#002244;color:#4ca8ff;border:1px solid #4ca8ff;',
+    'D': 'background:#002200;color:#44cc44;border:1px solid #44cc44;',
+    'E': 'background:#1a1a1a;color:#888;border:1px solid #555;',
+};
+
+function classBadgeHtml(carImg) {
+    const cls = carClass(carImg);
+    if (!cls) return '';
+    const style = CLASS_BADGE_STYLE[cls] || '';
+    return `<span style="${style}font-size:9px;font-weight:bold;padding:1px 4px;border-radius:3px;margin-left:3px;vertical-align:middle;">${cls}</span>`;
+}
+
+// ─── Improved Track Name Normalizer ───────────────────────────────────────────
+function normalizeTrackName(titleText) {
+    if (!titleText) return '';
+    let cleaned = titleText
+        .split(/\s*-\s*(Race (started|finished|will Start|in progress)|Waiting|Cancelled|Starts:|lap|Lap|\d+\s+seconds?)/i)[0]
+        .replace(/\s*-\s*\d+\s*laps?.*$/i, '')
+        .replace(/\s*-\s*Starts:.*$/i, '')
+        .replace(/\s*-\s*Race.*$/i, '')
+        .replace(/\s*-\s*Waiting.*$/i, '')
+        .trim();
+    return cleaned || titleText.trim();
+}
+
+function parseLapCount(titleText) {
+    const match = String(titleText || '').match(/\b(\d+)\s+laps?\b/i);
+    if (!match) return 0;
+    const laps = Number(match[1]);
+    return Number.isInteger(laps) && laps > 0 ? laps : 0;
+}
+
+function isRaceCountdown(titleText) {
+    const title = String(titleText || '');
+    return !/race\s+started/i.test(title)
+        && /(?:\bwaiting\b|\b\d+\s+(?:minutes?|seconds?)\b)/i.test(title);
+}
+
+// ─── Date helpers ──────────────────────────────────────────────────────────────
+// Returns a full ISO timestamp string (used for storage).
+function nowIso() {
+    return new Date().toISOString();
+}
+
+// Returns YYYY-MM-DD portion of an ISO string.
+function isoToDate(iso) {
+    if (!iso) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? '' : localDateString(date);
+}
+
+// Returns today's YYYY-MM-DD string.
+function todayDate() {
+    return localDateString(new Date());
+}
+
+function localDateString(date) {
+    return [
+        date.getFullYear(),
+        String(date.getMonth() + 1).padStart(2, '0'),
+        String(date.getDate()).padStart(2, '0')
+    ].join('-');
+}
+
+// How many whole days ago was a given ISO timestamp?
+function daysAgo(iso) {
+    if (!iso) return Infinity;
+    const datePart = isoToDate(iso);
+    if (!datePart) return Infinity;
+    const [year, month, day] = datePart.split('-').map(Number);
+    const recDate = new Date(year, month - 1, day);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((today - recDate) / 86400000);
+}
+
+// Returns an age CSS class for the date cell dot:
+//   rslogDotToday (green)  — set today
+//   rslogDotWeek  (yellow) — set within 7 days
+//   rslogDotOld   (grey)   — older
+function ageDotClass(iso) {
+    const d = daysAgo(iso);
+    if (d === 0) return 'rslogDotToday';
+    if (d <= 7)  return 'rslogDotWeek';
+    return 'rslogDotOld';
+}
+
+// Build a date <td> with:
+//   • CSS ::before dot (no emoji, no extra text, no layout impact)
+//   • full ISO timestamp as tooltip
+//   • today-highlight class on the text when record is from today
+function dateCellHtml(iso, todayCssClass) {
+    const displayDate = isoToDate(iso) || '–';
+    const tooltip     = iso ? iso.replace('T', ' ').replace(/\.\d+Z$/, ' UTC') : '';
+    const isToday     = isoToDate(iso) === todayDate();
+    const textClass   = isToday ? ` ${todayCssClass}` : '';
+    const dotClass    = ageDotClass(iso);
+    return `<td class="rslogDateCell ${dotClass}${textClass}" title="${escapeHtml(tooltip)}">${escapeHtml(displayDate)}</td>`;
+}
+
+// ─── Update functions ──────────────────────────────────────────────────────────
+function updateTopSpeed(trackName, speed, carImg) {
+    if (!trackName || carKey(carImg) === 'unknown' || !Number.isFinite(speed) || speed <= 10) return false;
+    const log = getSpeedLog();
+    const key = trackName + '|' + carKey(carImg);
+    if (!log[key] || speed > (log[key].topSpeed || 0)) {
+        if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, bestLapMs: 0 };
+        log[key].topSpeed  = speed;
+        // [SUGGESTION 1] Separate timestamp for speed record
+        log[key].speedDate = nowIso();
+        // Keep legacy `date` in sync for CSV/older consumers
+        log[key].date      = isoToDate(log[key].speedDate);
+        saveSpeedLog(log);
+        return true;
+    }
+    return false;
+}
+
+function updateBestLap(trackName, carImg, bestLapMs) {
+    if (!trackName || carKey(carImg) === 'unknown' || !Number.isFinite(bestLapMs) || bestLapMs <= 0) return false;
+    const log = getSpeedLog();
+    const key = trackName + '|' + carKey(carImg);
+    if (!log[key]) log[key] = { track: trackName, car: carImg || '', topSpeed: 0, bestLapMs: 0 };
+    if (!log[key].bestLapMs || bestLapMs < log[key].bestLapMs) {
+        log[key].bestLapMs = bestLapMs;
+        // [SUGGESTION 1] Separate timestamp for lap record
+        log[key].lapDate   = nowIso();
+        // Keep legacy `date` pointing to the most-recently-updated record
+        log[key].date      = isoToDate(log[key].lapDate);
+        saveSpeedLog(log);
+        return true;
+    }
+    return false;
+}
+
+function formatLapTime(ms) {
+    if (!ms || ms <= 0) return '–';
+    const m  = Math.floor(ms / 60000);
+    const s  = Math.floor((ms % 60000) / 1000);
+    const cs = Math.floor((ms % 1000) / 10);
+    return m + 'm ' + String(s).padStart(2, '0') + '.' + String(cs).padStart(2, '0') + 's';
+}
+
+// ─── Migration ────────────────────────────────────────────────────────────────
+function migrateSpeedLog() {
+    let log = getSpeedLog();
+    const migrated = {};
+    let changed = false;
+
+    for (const [key, data] of Object.entries(log)) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            changed = true;
+            continue;
+        }
+        let track = data.track || key.split('|')[0];
+        const cleanTrack = normalizeTrackName(track);
+
+        if (cleanTrack !== track) changed = true;
+
+        if (data.car && (data.car.includes('<svg') || data.car.includes('<!DOCTYPE svg'))) {
+            data.car = '';
+            changed = true;
+        }
+
+        if ((data.topSpeed || 0) > 0 && data.topSpeed < 10) {
+            data.topSpeed = 0;
+            changed = true;
+        }
+
+        // [SUGGESTION 1] Back-fill split date fields from legacy `date` if missing
+        if (data.date && !data.speedDate && data.topSpeed > 0) {
+            data.speedDate = data.date + 'T00:00:00.000Z';
+            changed = true;
+        }
+        if (data.date && !data.lapDate && data.bestLapMs > 0) {
+            data.lapDate = data.date + 'T00:00:00.000Z';
+            changed = true;
+        }
+
+        const newKey = cleanTrack + '|' + carKey(data.car);
+        if (newKey !== key) changed = true;
+
+        if (!migrated[newKey]) {
+            migrated[newKey] = { ...data, track: cleanTrack };
+        } else {
+            changed = true;
+            if ((data.topSpeed || 0) > (migrated[newKey].topSpeed || 0)) {
+                migrated[newKey].topSpeed  = data.topSpeed;
+                migrated[newKey].speedDate = data.speedDate;
+            }
+            if (data.bestLapMs && (!migrated[newKey].bestLapMs || data.bestLapMs < migrated[newKey].bestLapMs)) {
+                migrated[newKey].bestLapMs = data.bestLapMs;
+                migrated[newKey].lapDate   = data.lapDate;
+            }
+            if (data.date) migrated[newKey].date = data.date;
+        }
+    }
+
+    if (changed) {
+        saveSpeedLog(migrated);
+        console.log('[Racing Logger] Migration complete');
+    }
+    return migrated;
+}
+
+// ─── Styles ────────────────────────────────────────────────────────────────────
+GM_addStyle(`
+    #rslogWrapper { font-family: "Courier New", Courier, monospace; font-size: 11px; padding: 6px 10px; margin: 4px 0; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; display: flex; gap: 12px; flex-wrap: wrap; }
+    #rslogSpeedPanel, #rslogLapPanel { flex: 1; min-width: 280px; }
+    #rslogSpeedRow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    #rslogSpeed { font-size: 22px; font-weight: bold; color: #fff200; letter-spacing: 1px; min-width: 100px; }
+    #rslogSessionTop { color: #aaa; font-size: 10px; }
+    #rslogSessionTopVal { color: #ff9900; font-weight: bold; }
+    #rslogPbCompare { color: #888; font-size: 10px; white-space: nowrap; }
+    #rslogPbCompare.rslogPbAhead { color: #00ff88; font-weight: bold; }
+    #rslogStatus, #rslogToolbarStatus { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid #555; border-radius: 10px; color: #aaa; font-size: 9px; font-weight: bold; white-space: nowrap; }
+    #rslogStatus::before, #rslogToolbarStatus::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #777; }
+    #rslogStatus.rslogStatusLogging, #rslogToolbarStatus.rslogStatusLogging { color: #00ff88; border-color: #17633f; }
+    #rslogStatus.rslogStatusLogging::before, #rslogToolbarStatus.rslogStatusLogging::before { background: #00ff88; box-shadow: 0 0 4px #00ff88; }
+    #rslogStatus.rslogStatusWaiting, #rslogToolbarStatus.rslogStatusWaiting { color: #ffd700; border-color: #685b19; }
+    #rslogStatus.rslogStatusWaiting::before, #rslogToolbarStatus.rslogStatusWaiting::before { background: #ffd700; }
+    #rslogStatus.rslogStatusPaused, #rslogToolbarStatus.rslogStatusPaused { color: #ff9900; border-color: #714a15; }
+    #rslogStatus.rslogStatusPaused::before, #rslogToolbarStatus.rslogStatusPaused::before { background: #ff9900; }
+    #rslogLiveModeBtn { padding: 2px 6px; border: 1px solid #444; border-radius: 3px; background: #181818; color: #888; font: inherit; font-size: 9px; cursor: pointer; }
+    #rslogLiveModeBtn:hover { color: #fff200; border-color: #777; }
+    #rslogRaceToolbar { display: flex; align-items: center; gap: 5px; min-height: 25px; margin-bottom: 6px; padding: 3px 7px; box-sizing: border-box; border: 1px solid #333; border-radius: 5px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); color: #ccc; font-family: "Courier New", Courier, monospace; font-size: 10px; }
+    #rslogToolbarLiveWrap, #rslogToolbarTopWrap, #rslogToolbarSkillWrap { white-space: nowrap; }
+    #rslogToolbarSpeed { color: #fff200; font-weight: bold; }
+    #rslogToolbarTop { color: #ff9900; font-weight: bold; }
+    #rslogToolbarSkill { color: #00ff88; font-weight: bold; }
+    #rslogParticipantRsBtn { padding: 2px 6px; border: 1px solid #555; border-radius: 9px; background: #171717; color: #888; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
+    #rslogParticipantRsBtn:hover { color: #fff; border-color: #ba78ef; }
+    #rslogParticipantRsBtn.rslogRsEnabled { color: #c6ffdf; border-color: #2d9d68; box-shadow: 0 0 6px rgba(0,255,136,.22); }
+    #rslogParticipantRsBtn.rslogRsEnabled::before { content: '● '; color: #00ff88; }
+    #rslogParticipantRsBtn.rslogRsError { color: #ff8c8c; border-color: #8f3939; }
+    #rslogRaceToolbar .rslogToolbarActions { display: flex; align-items: center; gap: 3px; }
+    #rslogRaceLinkBtn { padding: 2px 6px; border: 1px solid #3e6b83; border-radius: 9px; background: #171717; color: #58c8ff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
+    #rslogRaceLinkBtn:hover { color: #fff; border-color: #58c8ff; }
+    #rslogRaceLinkBtn:disabled { color: #666; border-color: #444; cursor: default; }
+    #rslogResultsToggleBtn { padding: 2px 6px; border: 1px solid #70558c; border-radius: 9px; background: #171717; color: #c89cff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; }
+    #rslogResultsToggleBtn:hover { color: #fff; border-color: #c89cff; }
+    #rslogResultsToggleBtn.rslogResultsActive { color: #fff200; border-color: #8c7c20; }
+    #rslogResultsToggleBtn:disabled { color: #666; border-color: #444; cursor: default; }
+    #rslogWarpBtn { padding: 2px 6px; border: 1px solid #8d4ec2; border-radius: 9px; background: linear-gradient(90deg,#21122e,#15152a); color: #e6b6ff; font-family: inherit; font-size: 9px; line-height: 14px; white-space: nowrap; cursor: pointer; box-shadow: inset 0 0 6px rgba(180,80,255,.12); }
+    #rslogWarpBtn:hover { color: #fff; border-color: #dd8cff; box-shadow: 0 0 7px rgba(205,105,255,.45); }
+    #rslogWarpModal { position: fixed; inset: 0; z-index: 1000000; display: none; align-items: center; justify-content: center; font-family: "Courier New", Courier, monospace; }
+    #rslogWarpModal.rslogWarpOpen { display: flex; }
+    #rslogWarpModal .rslogWarpBackdrop { position: absolute; inset: 0; background: rgba(0,0,0,.72); }
+    #rslogWarpModal .rslogWarpPanel { position: relative; width: min(430px, calc(100vw - 32px)); padding: 18px; box-sizing: border-box; border: 1px solid #b868ef; border-radius: 8px; background: radial-gradient(circle at top,#2b1640 0,#17131e 55%,#101010 100%); color: #ddd; box-shadow: 0 0 28px rgba(181,75,255,.42); text-align: center; }
+    #rslogWarpModal .rslogWarpTitle { margin-bottom: 12px; color: #f0c2ff; font-size: 17px; font-weight: bold; letter-spacing: 1px; text-shadow: 0 0 8px #9f45dd; }
+    #rslogWarpModal .rslogWarpMessage { min-height: 48px; margin: 0 4px 16px; color: #eee; font-size: 12px; line-height: 1.55; }
+    #rslogWarpModal .rslogWarpClose { padding: 5px 13px; border: 1px solid #8d4ec2; border-radius: 10px; background: #17131e; color: #e6b6ff; font-family: inherit; font-size: 10px; cursor: pointer; }
+    #rslogWarpModal .rslogWarpClose:hover { color: #fff; border-color: #dd8cff; }
+    #rslogRsModal { position: fixed; inset: 0; z-index: 1000001; display: none; align-items: center; justify-content: center; font-family: "Courier New", Courier, monospace; }
+    #rslogRsModal.rslogRsOpen { display: flex; }
+    #rslogRsModal .rslogRsBackdrop { position: absolute; inset: 0; background: rgba(0,0,0,.72); }
+    #rslogRsModal .rslogRsPanel { position: relative; width: min(460px, calc(100vw - 32px)); padding: 18px; box-sizing: border-box; border: 1px solid #76548f; border-radius: 9px; background: radial-gradient(circle at top,#21172b 0,#151419 58%,#101010 100%); color: #ddd; box-shadow: 0 0 24px rgba(161,86,212,.3); }
+    #rslogRsModal .rslogRsTitle { color: #e6b6ff; font-size: 16px; font-weight: bold; letter-spacing: .5px; }
+    #rslogRsModal .rslogRsIntro { margin: 6px 0 14px; color: #999; font-size: 10px; line-height: 1.45; }
+    #rslogRsModal .rslogRsToggleRow { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; padding: 9px 10px; border: 1px solid #333; border-radius: 6px; background: #151515; font-size: 11px; }
+    #rslogRsModal .rslogRsSwitch { position: relative; width: 34px; height: 18px; }
+    #rslogRsModal .rslogRsSwitch input { position: absolute; opacity: 0; pointer-events: none; }
+    #rslogRsModal .rslogRsSlider { position: absolute; inset: 0; border-radius: 10px; background: #444; cursor: pointer; transition: .18s ease; }
+    #rslogRsModal .rslogRsSlider::before { content: ''; position: absolute; width: 14px; height: 14px; top: 2px; left: 2px; border-radius: 50%; background: #aaa; transition: .18s ease; }
+    #rslogRsModal .rslogRsSwitch input:checked + .rslogRsSlider { background: #17633f; box-shadow: 0 0 7px rgba(0,255,136,.25); }
+    #rslogRsModal .rslogRsSwitch input:checked + .rslogRsSlider::before { transform: translateX(16px); background: #00ff88; }
+    #rslogRsModal .rslogRsLabel { display: block; margin-bottom: 5px; color: #bbb; font-size: 10px; }
+    #rslogRsModal .rslogRsKeyRow { display: flex; gap: 5px; }
+    #rslogRsApiKeyInput { flex: 1; min-width: 0; padding: 7px 9px; box-sizing: border-box; border: 1px solid #444; border-radius: 5px; background: #0e0e0e; color: #eee; font-family: inherit; font-size: 11px; outline: none; }
+    #rslogRsApiKeyInput:focus { border-color: #b868ef; box-shadow: 0 0 5px rgba(184,104,239,.25); }
+    #rslogRsKeyReveal { width: 46px; border: 1px solid #444; border-radius: 5px; background: #191919; color: #aaa; font-family: inherit; font-size: 9px; cursor: pointer; }
+    #rslogRsKeyReveal:hover { color: #fff; border-color: #777; }
+    #rslogRsModal .rslogRsKeyHelp { margin-top: 6px; color: #777; font-size: 9px; }
+    #rslogRsModal .rslogRsKeyHelp a { color: #58c8ff; }
+    #rslogRsStatus { min-height: 16px; margin: 10px 0 4px; color: #888; font-size: 10px; }
+    #rslogRsStatus.rslogRsSuccess { color: #00ff88; }
+    #rslogRsStatus.rslogRsFailure { color: #ff7777; }
+    #rslogRsModal .rslogRsActions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    #rslogRsModal .rslogRsActions button { padding: 5px 9px; border: 1px solid #555; border-radius: 8px; background: #181818; color: #bbb; font-family: inherit; font-size: 9px; cursor: pointer; }
+    #rslogRsModal .rslogRsActions button:hover { color: #fff; border-color: #999; }
+    #rslogRsSaveBtn { color: #e6b6ff !important; border-color: #76548f !important; }
+    #rslogRsCloseBtn { margin-left: auto; }
+    .rslogParticipantRs { display: inline-flex; align-items: center; justify-content: center; min-width: 43px; margin-left: 7px; padding: 1px 5px; box-sizing: border-box; border: 1px solid #70478b; border-radius: 8px; background: linear-gradient(90deg,#21152a,#11161b); font: bold 9px/13px "Courier New", Courier, monospace; vertical-align: middle; white-space: nowrap; box-shadow: inset 0 0 5px rgba(184,104,239,.13),0 0 4px rgba(184,104,239,.15); }
+    .rslogParticipantRs .rslogRsBadgeLabel { color: #d9a6ff; }
+    .rslogParticipantRs .rslogRsBadgeValue { margin-left: 4px; color: #fff200; font-size: 10px; }
+    .rslogParticipantRs.rslogRsLoading { border-color: #444; box-shadow: none; opacity: .62; }
+    .rslogParticipantRs.rslogRsLoading .rslogRsBadgeValue { color: #888; }
+    .rslogFinalResult { margin-left: 5px; color: #ccc; font-size: 11px; white-space: nowrap; }
+    .rslogFinalResult.rslogPlace1 { color: #ffd700; font-weight: bold; }
+    .rslogFinalResult.rslogPlace2 { color: #d5d5d5; font-weight: bold; }
+    .rslogFinalResult.rslogPlace3 { color: #cd7f32; font-weight: bold; }
+    .rslogFinalResult.rslogCrashed { color: #cc6666; }
+    #rslogNewRecord { display: none; color: #00ff88; font-weight: bold; font-size: 36px; text-shadow: 0 0 12px #00ff88; animation: rslogPulse 0.6s ease-in-out 3; }
+    @keyframes rslogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+    .rslogToggle { cursor: pointer; color: #888; font-size: 10px; text-decoration: underline; margin-left: auto; user-select: none; }
+    .rslogToggle:hover { color: #fff200; }
+    .rslogVersion { color: #666; font-size: 9px; font-weight: normal; white-space: nowrap; }
+    .rslogPanel { display: none; margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; overflow-x: auto; }
+    .rslogPanel table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 320px; }
+    .rslogPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
+    .rslogPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; }
+    .rslogPanel tr.rslogCurrentTrack td { color: #fff200; }
+    .rslogPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; }
+    .rslogPanel td.rslogBestLap { color: #00cfff; font-weight: bold; }
+    .rslogPanel td.rslogCar { width: 42px; padding: 2px 4px; }
+    .rslogPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; }
+    .rslogCsvBtn { display: inline-block; margin-top: 8px; padding: 5px 12px; background: #2a2a00; border: 1px solid #fff200; border-radius: 4px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; text-decoration: none; transition: background 0.15s; }
+    .rslogCsvBtn:hover { background: #3a3a00; }
+    .rslogClearBtn { display: inline-block; margin-top: 8px; margin-left: 6px; padding: 5px 12px; background: #1a0000; border: 1px solid #882222; border-radius: 4px; color: #cc4444; font-family: "Courier New", Courier, monospace; font-size: 10px; font-weight: bold; cursor: pointer; transition: background 0.15s; }
+    .rslogClearBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }
+    .rslogRowDelete { width: 22px; height: 22px; padding: 0; border: 1px solid transparent; border-radius: 3px; background: transparent; color: #7d4444; cursor: pointer; font-size: 12px; line-height: 20px; }
+    .rslogRowDelete:hover { color: #ff5555; border-color: #772222; background: #210b0b; }
+    .rslogActionCell { width: 26px; padding: 1px 2px !important; text-align: center; }
+    #rslogLobbyBtn { display: inline-block; margin: 6px 10px 0; padding: 3px 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff200; font-family: "Courier New", Courier, monospace; font-size: 10px; cursor: pointer; user-select: none; }
+    #rslogLobbyBtn:hover { border-color: #fff200; }
+    #rslogLobbyPanel { display: none; font-family: "Courier New", Courier, monospace; font-size: 11px; margin: 2px 4px 6px; padding: 4px 6px; background: linear-gradient(135deg, #111 0%, #1a1a1a 100%); border: 1px solid #333; border-radius: 4px; color: #ccc; overflow-x: auto; }
+    #rslogLobbyPanel table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+    #rslogLobbyPanel th { color: #999; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
+    #rslogLobbyPanel td { padding: 4px 8px; color: #ddd; border-bottom: 1px solid #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #rslogLobbyPanel td.rslogTopSpeed { color: #ff9900; font-weight: bold; }
+    #rslogLobbyPanel td.rslogBestLap { color: #00cfff; font-weight: bold; }
+    #rslogLobbyPanel td.rslogCar { width: 42px; padding: 2px 4px; }
+    #rslogLobbyPanel td.rslogCar img { height: 19px; width: 38px; object-fit: contain; vertical-align: middle; }
+    #rslogLobbyFooter { margin-top: 7px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+    /* ── Date cell: CSS dot via ::before, no emoji, no layout impact ── */
+    .rslogDateCell { position: relative; padding-left: 18px !important; cursor: default; white-space: nowrap; }
+    .rslogDateCell::before { content: ''; position: absolute; left: 5px; top: 50%; transform: translateY(-50%); width: 7px; height: 7px; border-radius: 50%; }
+    /* Dot colours by age */
+    .rslogDotToday::before { background: #00ff88; box-shadow: 0 0 4px #00ff88; }
+    .rslogDotWeek::before  { background: #ffd700; }
+    .rslogDotOld::before   { background: #444; }
+    /* Text colour when record is from today */
+    .rslogDateToday    { color: #00ff88 !important; font-weight: bold; }
+    .rslogDateTodayLap { color: #00ff88 !important; font-weight: bold; }
+
+    /* ── CSV modal (used on PDA / in-app WebViews where downloads can't trigger) ── */
+    #rslogCsvModal { position: fixed; inset: 0; z-index: 99999; display: none; font-family: "Courier New", Courier, monospace; }
+    #rslogCsvModal .rslogCsvBackdrop { position: absolute; inset: 0; background: rgba(0,0,0,.6); }
+    #rslogCsvModal .rslogCsvPanel {
+        position: absolute; left: 6%; right: 6%; top: 10%; bottom: 10%;
+        background: #161616; color: #eaeaea; border-radius: 6px; display: flex; flex-direction: column;
+        box-shadow: 0 10px 30px rgba(0,0,0,.6); border: 1px solid #333;
+    }
+    #rslogCsvModal .rslogCsvHeader {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 12px; border-bottom: 1px solid #333; font-weight: bold; color: #fff200; font-size: 12px;
+    }
+    #rslogCsvModal .rslogCsvActions button {
+        margin-left: 6px; padding: 5px 10px; background: #2a2a00; color: #fff200; border: 1px solid #fff200;
+        border-radius: 4px; font-family: inherit; font-size: 10px; font-weight: bold; cursor: pointer;
+    }
+    #rslogCsvModal .rslogCsvActions button:hover { background: #3a3a00; }
+    #rslogCsvModal .rslogCsvActions #rslogCsvCloseBtn { background: #1a0000; color: #cc4444; border-color: #882222; }
+    #rslogCsvModal .rslogCsvActions #rslogCsvCloseBtn:hover { background: #2a0000; border-color: #ff4444; color: #ff4444; }
+    #rslogCsvModal .rslogCsvBody {
+        flex: 1; margin: 10px 12px; padding: 10px 12px; overflow: auto; white-space: pre; font-size: 11px; line-height: 1.4;
+        color: #ccc; -webkit-overflow-scrolling: touch; background: #0d0d0d; border: 1px solid #333; border-radius: 4px;
+        font-family: "Courier New", Courier, monospace; resize: none; -webkit-user-select: text; user-select: text;
+    }
+    #rslogCsvModal .rslogCsvBody:focus { outline: 1px solid #fff200; background: #111; }
+
+    /* ── Info icon + tap popover (title tooltip alone doesn't show on touch/PDA) ── */
+    .rslogInfoIcon { display: inline-block; color: #888; font-size: 11px; cursor: help; margin-left: 2px; vertical-align: middle; }
+    .rslogInfoIcon:hover { color: #fff200; }
+    .rslogInfoPopover {
+        display: none; position: absolute; z-index: 100000; max-width: 260px; padding: 8px 10px;
+        background: #1a1a1a; border: 1px solid #fff200; border-radius: 4px; color: #ccc; font-size: 10px;
+        line-height: 1.4; box-shadow: 0 4px 12px rgba(0,0,0,.5); font-family: "Courier New", Courier, monospace;
+    }
+
+    /* ── PDA / narrow touch layout ─────────────────────────────────────────── */
+    .rslogPdaMode #rslogWrapper {
+        display: block; width: 100%; margin: 6px 0; padding: 8px;
+        box-sizing: border-box; font-size: 12px; overflow: hidden;
+    }
+    .rslogPdaMode #rslogSpeedPanel,
+    .rslogPdaMode #rslogLapPanel { width: 100%; min-width: 0; }
+    .rslogPdaMode #rslogLapPanel { margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; }
+    .rslogPdaMode #rslogSpeedRow {
+        display: grid; grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center; gap: 7px 10px;
+    }
+    .rslogPdaMode #rslogSpeed { min-width: 0; font-size: 25px; line-height: 1.15; }
+    .rslogPdaMode #rslogSessionTop,
+    .rslogPdaMode #rslogPbCompare { font-size: 11px; }
+    .rslogPdaMode #rslogNewRecord { grid-column: 1 / -1; font-size: 24px; text-align: center; }
+    .rslogPdaMode #rslogSpeedToggle { margin-left: 0; }
+    .rslogPdaMode .rslogToggle,
+    .rslogPdaMode #rslogLiveModeBtn,
+    .rslogPdaMode #rslogLobbyBtn,
+    .rslogPdaMode .rslogCsvBtn,
+    .rslogPdaMode .rslogClearBtn,
+    .rslogPdaMode #rslogRaceToolbar button,
+    .rslogPdaMode #rslogCsvModal button,
+    .rslogPdaMode #rslogRsModal button,
+    .rslogPdaMode #rslogWarpModal button {
+        min-height: 38px; box-sizing: border-box; padding: 8px 10px;
+        font-size: 11px; line-height: 18px; touch-action: manipulation;
+    }
+    .rslogPdaMode .rslogToggle {
+        display: inline-flex; align-items: center; justify-content: center;
+        border: 1px solid #555; border-radius: 5px; background: #191919;
+        color: #ddd; text-decoration: none;
+    }
+    .rslogPdaMode .rslogInfoIcon {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 38px; height: 38px; margin: 0; font-size: 16px; touch-action: manipulation;
+    }
+    .rslogPdaMode .rslogPanel { margin-top: 8px; padding-top: 8px; -webkit-overflow-scrolling: touch; }
+    .rslogPdaMode .rslogPanel table { min-width: 430px; font-size: 11px; }
+    .rslogPdaMode .rslogPanel th,
+    .rslogPdaMode .rslogPanel td { padding: 7px 6px; }
+    .rslogPdaMode .rslogRowDelete { width: 38px; height: 38px; font-size: 20px; line-height: 36px; }
+    .rslogPdaMode .rslogActionCell { width: 42px; }
+    .rslogPdaMode .rslogCsvBtn,
+    .rslogPdaMode .rslogClearBtn { margin: 8px 4px 0 0; }
+
+    .rslogPdaMode #rslogRaceToolbar {
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px; padding: 7px; font-size: 11px;
+    }
+    .rslogPdaMode #rslogToolbarStatus { justify-self: start; min-height: 28px; }
+    .rslogPdaMode #rslogToolbarLiveWrap,
+    .rslogPdaMode #rslogToolbarTopWrap,
+    .rslogPdaMode #rslogToolbarSkillWrap { white-space: normal; line-height: 1.35; }
+    .rslogPdaMode #rslogParticipantRsBtn { width: 100%; }
+    .rslogPdaMode #rslogRaceToolbar .rslogToolbarActions {
+        grid-column: 1 / -1; display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
+    }
+    .rslogPdaMode #rslogRaceToolbar .rslogToolbarActions button { width: 100%; white-space: normal; }
+    .rslogPdaMode #rslogWarpBtn { display: none; }
+
+    .rslogPdaMode #rslogLobbyBtn { width: calc(100% - 16px); margin: 7px 8px 3px; }
+    .rslogPdaMode #rslogLobbyVersion { display: block; margin: 0 10px 5px; text-align: right; }
+    .rslogPdaMode #rslogLobbyPanel { margin: 3px 0 7px; padding: 8px; overflow: hidden; font-size: 12px; }
+    .rslogPdaMode #rslogLobbyPanel > div:first-child { display: block !important; }
+    .rslogPdaMode #rslogLobbyPanel > div:first-child > div {
+        min-width: 0 !important; padding: 0 0 10px !important;
+        border-right: 0 !important; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    }
+    .rslogPdaMode #rslogLobbyPanel > div:first-child > div + div {
+        margin-top: 8px; padding-top: 8px !important; border-top: 1px solid #333;
+    }
+    .rslogPdaMode #rslogLobbyPanel table { min-width: 430px; font-size: 11px; }
+    .rslogPdaMode #rslogLobbyPanel th,
+    .rslogPdaMode #rslogLobbyPanel td { padding: 7px 6px; }
+    .rslogPdaMode #rslogLobbyFooter { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .rslogPdaMode #rslogLobbyFooter > * { width: 100%; margin: 0; text-align: center; }
+    .rslogPdaMode #rslogLobbyClearBtn { grid-column: 1 / -1; }
+
+    .rslogPdaMode #rslogCsvModal .rslogCsvPanel,
+    .rslogPdaMode #rslogRsModal .rslogRsPanel,
+    .rslogPdaMode #rslogWarpModal .rslogWarpPanel {
+        width: auto; max-width: none; left: max(6px, env(safe-area-inset-left));
+        right: max(6px, env(safe-area-inset-right)); box-sizing: border-box;
+    }
+    .rslogPdaMode #rslogCsvModal .rslogCsvPanel {
+        top: max(6px, env(safe-area-inset-top)); bottom: max(6px, env(safe-area-inset-bottom));
+    }
+    .rslogPdaMode #rslogCsvModal .rslogCsvHeader { display: block; padding: 10px; }
+    .rslogPdaMode #rslogCsvModal .rslogCsvActions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 8px; }
+    .rslogPdaMode #rslogCsvModal .rslogCsvActions button { margin: 0; padding: 7px 4px; }
+    .rslogPdaMode #rslogCsvModal .rslogCsvBody { margin: 8px; padding: 8px; font-size: 12px; }
+    .rslogPdaMode #rslogRsModal .rslogRsPanel,
+    .rslogPdaMode #rslogWarpModal .rslogWarpPanel { max-height: calc(100vh - 12px); overflow-y: auto; }
+    .rslogPdaMode #rslogRsModal .rslogRsKeyRow { align-items: stretch; }
+    .rslogPdaMode #rslogRsApiKeyInput { min-height: 42px; font-size: 16px; }
+    .rslogPdaMode #rslogRsKeyReveal { width: 60px; }
+    .rslogPdaMode .rslogInfoPopover {
+        max-width: calc(100vw - 32px); box-sizing: border-box;
+        padding: 12px; font-size: 12px; line-height: 1.5;
+    }
+    .rslogPdaMode .rslogFinalResult { display: block; margin: 2px 0 0; white-space: normal; font-size: 10px; }
+`);
+
+// ─── UI Helpers ────────────────────────────────────────────────────────────────
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getBooleanSetting(key, fallback = false) {
+    const value = GM_getValue(key, fallback);
+    return value === true || value === 1 || value === 'true' || value === '1';
+}
+
+function setLoggerStatus(status) {
+    const labels = { logging: 'LOGGING', waiting: 'WAITING', paused: 'SAMPLE RESET' };
+    const classes = 'rslogStatusLogging rslogStatusWaiting rslogStatusPaused';
+    const el = $('#rslogStatus');
+    if (el.length) {
+        el.removeClass(classes)
+            .addClass(status === 'logging' ? 'rslogStatusLogging' : status === 'paused' ? 'rslogStatusPaused' : 'rslogStatusWaiting')
+            .text(labels[status] || labels.waiting);
+    }
+    const toolbar = $('#rslogToolbarStatus');
+    toolbar.removeClass(classes)
+        .addClass(status === 'logging' ? 'rslogStatusLogging' : status === 'paused' ? 'rslogStatusPaused' : 'rslogStatusWaiting')
+        .text(labels[status] || labels.waiting);
+}
+
+function getLiveSpeedMode() {
+    const mode = GM_getValue(SETTING_LIVE_MODE, 'auto');
+    return ['auto', 'show', 'hide'].includes(mode) ? mode : 'auto';
+}
+
+function readStoredNumber(key) {
+    const raw = GM_getValue(key, null);
+    if (raw === null || raw === undefined || raw === '') return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+}
+
+function loadRacingSkillState() {
+    if (racingSkillStateLoaded) return;
+    lastRacingSkillGain = readStoredNumber(RACING_SKILL_GAIN_KEY);
+    lastRacingSkillRaceId = String(GM_getValue(RACING_SKILL_RACE_KEY, '') || '');
+    racingSkillStateLoaded = true;
+}
+
+function renderRacingSkillGain() {
+    loadRacingSkillState();
+    const value = document.getElementById('rslogToolbarSkill');
+    const wrap = document.getElementById('rslogToolbarSkillWrap');
+    if (!value || !wrap) return;
+    value.textContent = lastRacingSkillGain === null ? '\u2014' : `+${lastRacingSkillGain.toFixed(5)}`;
+    wrap.title = lastRacingSkillGain === null
+        ? 'A baseline is saved automatically; the next racing-skill gain will appear here.'
+        : `Racing skill gained${lastRacingSkillRaceId ? ` in race ${lastRacingSkillRaceId}` : ' in the last finished race'}`;
+}
+
+function updateRacingSkillFromResponse(data) {
+    const level = Number(data?.user?.racinglevel);
+    if (!Number.isFinite(level) || level < 0) return;
+    loadRacingSkillState();
+    const previous = readStoredNumber(RACING_SKILL_LEVEL_KEY);
+    GM_setValue(RACING_SKILL_LEVEL_KEY, level);
+    if (previous === null || level <= previous) {
+        renderRacingSkillGain();
+        return;
+    }
+
+    lastRacingSkillGain = level - previous;
+    lastRacingSkillRaceId = String(data?.raceID ?? currentRaceId ?? '');
+    GM_setValue(RACING_SKILL_GAIN_KEY, lastRacingSkillGain);
+    GM_setValue(RACING_SKILL_RACE_KEY, lastRacingSkillRaceId);
+    renderRacingSkillGain();
+}
+
+function getParticipantRsApiKey() {
+    return String(GM_getValue(PARTICIPANT_RS_API_KEY, '') || '').trim();
+}
+
+function participantRsIsEnabled() {
+    return getBooleanSetting(PARTICIPANT_RS_ENABLED_KEY, false) && getParticipantRsApiKey().length > 0;
+}
+
+function loadParticipantRsCache() {
+    if (participantRsCacheLoaded) return;
+    participantRsCacheLoaded = true;
+    let saved = GM_getValue(PARTICIPANT_RS_CACHE_KEY, {});
+    if (typeof saved === 'string') {
+        try { saved = JSON.parse(saved); } catch (_) { saved = {}; }
+    }
+    const now = Date.now();
+    for (const [driverId, entry] of Object.entries(saved || {})) {
+        const skill = Number(entry?.skill);
+        const timestamp = Number(entry?.timestamp ?? entry?.ts);
+        if (!Number.isFinite(skill) || !Number.isFinite(timestamp)
+            || now - timestamp > PARTICIPANT_RS_CACHE_MAX_AGE_MS) continue;
+        participantRsCache.set(Number(driverId), { skill, timestamp });
+    }
+}
+
+function persistParticipantRsCache() {
+    loadParticipantRsCache();
+    const now = Date.now();
+    const saved = {};
+    for (const [driverId, entry] of participantRsCache) {
+        if (now - entry.timestamp <= PARTICIPANT_RS_CACHE_MAX_AGE_MS) {
+            saved[String(driverId)] = entry;
+        }
+    }
+    GM_setValue(PARTICIPANT_RS_CACHE_KEY, saved);
+}
+
+function cacheParticipantRacingSkill(driverId, skill, timestamp = Date.now()) {
+    const id = Number(driverId);
+    const value = Number(skill);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(value) || value < 0) return false;
+    loadParticipantRsCache();
+    participantRsCache.set(id, { skill: value, timestamp });
+    participantRsFailedUntil.delete(id);
+    persistParticipantRsCache();
+    return true;
+}
+
+function getCachedParticipantRacingSkill(driverId) {
+    loadParticipantRsCache();
+    const id = Number(driverId);
+    const entry = participantRsCache.get(id) || null;
+    if (entry && Date.now() - entry.timestamp > PARTICIPANT_RS_CACHE_MAX_AGE_MS) {
+        participantRsCache.delete(id);
+        return null;
+    }
+    return entry;
+}
+
+function formatParticipantRs(skill) {
+    const value = Number(skill);
+    return Number.isFinite(value) && value >= 0 ? String(Math.trunc(value)) : '\u2026';
+}
+
+function participantRsCacheAge(timestamp) {
+    const ageMs = Math.max(0, Date.now() - Number(timestamp || 0));
+    if (ageMs < 60000) return 'just now';
+    if (ageMs < 3600000) return `${Math.floor(ageMs / 60000)}m ago`;
+    return `${Math.floor(ageMs / 3600000)}h ago`;
+}
+
+function updateParticipantRsButton() {
+    const button = document.getElementById('rslogParticipantRsBtn');
+    if (!button) return;
+    const enabled = participantRsIsEnabled();
+    button.textContent = enabled ? 'RS ON' : 'RS OFF';
+    button.classList.toggle('rslogRsEnabled', enabled && !participantRsLastError);
+    button.classList.toggle('rslogRsError', enabled && !!participantRsLastError);
+    button.title = participantRsLastError || (enabled
+        ? 'Participant racing skill is enabled. Click for settings.'
+        : 'Participant racing skill is disabled. Click for settings.');
+}
+
+function removeParticipantRsBadges() {
+    document.querySelectorAll('.rslogParticipantRs').forEach(badge => badge.remove());
+}
+
+function stopParticipantRsObserver() {
+    participantRsObserver?.disconnect();
+    participantRsObserver = null;
+    participantRsObservedBoard = null;
+}
+
+function participantRsMutationTouchesNames(mutation) {
+    if (mutation.target?.matches?.('li.name') || mutation.target?.closest?.('li.name')) return true;
+    return [...mutation.addedNodes, ...mutation.removedNodes].some(node => node.nodeType === 1
+        && (node.matches?.('li.name, .rslogParticipantRs')
+            || node.querySelector?.('li.name, .rslogParticipantRs')));
+}
+
+function ensureParticipantRsObserver() {
+    const board = document.getElementById('leaderBoard');
+    if (board === participantRsObservedBoard) return;
+    stopParticipantRsObserver();
+    if (!board || typeof MutationObserver !== 'function') return;
+    participantRsObservedBoard = board;
+    participantRsObserver = new MutationObserver(mutations => {
+        if (participantRsIsEnabled() && mutations.some(participantRsMutationTouchesNames)) {
+            paintParticipantRsBadges();
+        }
+    });
+    participantRsObserver.observe(board, { childList: true, subtree: true });
+}
+
+function raceDriverRows() {
+    const board = document.getElementById('leaderBoard');
+    return board ? Array.from(board.children) : [];
+}
+
+function driverIdFromRaceRow(row) {
+    const match = String(row?.id || '').match(/(\d+)/);
+    return match ? Number(match[1]) : 0;
+}
+
+function queueParticipantRsDriver(driverId) {
+    const id = Number(driverId);
+    if (!participantRsIsEnabled() || !Number.isInteger(id) || id <= 0) return;
+    loadParticipantRsCache();
+    if (getCachedParticipantRacingSkill(id) || participantRsQueuedIds.has(id)
+        || (participantRsFailedUntil.get(id) || 0) > Date.now()) return;
+    participantRsQueuedIds.add(id);
+    participantRsQueue.push(id);
+}
+
+function makeParticipantRsBadge(entry) {
+    const badge = document.createElement('span');
+    badge.className = `rslogParticipantRs${entry ? '' : ' rslogRsLoading'}`;
+    const label = document.createElement('span');
+    label.className = 'rslogRsBadgeLabel';
+    label.textContent = 'RS';
+    const value = document.createElement('span');
+    value.className = 'rslogRsBadgeValue';
+    value.textContent = formatParticipantRs(entry?.skill);
+    badge.append(label, value);
+    badge.title = entry
+        ? `Racing skill ${entry.skill.toFixed(5)} · cached ${participantRsCacheAge(entry.timestamp)}`
+        : 'Racing skill is queued for retrieval.';
+    return badge;
+}
+
+function paintParticipantRsBadges() {
+    ensureParticipantRsObserver();
+    if (!participantRsIsEnabled()) {
+        removeParticipantRsBadges();
+        return;
+    }
+    loadParticipantRsCache();
+    for (const row of raceDriverRows()) {
+        const driverId = driverIdFromRaceRow(row);
+        const nameCell = row.querySelector?.('li.name');
+        if (!driverId || !nameCell) continue;
+        const entry = getCachedParticipantRacingSkill(driverId);
+        let badge = nameCell.querySelector('.rslogParticipantRs');
+        const expected = formatParticipantRs(entry?.skill);
+        if (!badge || badge.querySelector('.rslogRsBadgeValue')?.textContent !== expected
+            || badge.classList.contains('rslogRsLoading') === !!entry) {
+            badge?.remove();
+            badge = makeParticipantRsBadge(entry);
+            nameCell.insertBefore(badge, nameCell.querySelector('.rslogFinalResult'));
+        }
+        if (!entry) queueParticipantRsDriver(driverId);
+    }
+    processParticipantRsQueue();
+}
+
+function participantRsRequestUrl(driverId, apiKey) {
+    const userPart = driverId ? String(Number(driverId)) : '';
+    return `https://api.torn.com/user/${userPart}?selections=personalstats&stat=racingskill&comment=RacingSpeedLapLogger&key=${encodeURIComponent(apiKey)}`;
+}
+
+function requestParticipantRacingSkill(driverId, apiKey) {
+    return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            reject(new Error('This userscript manager does not provide cross-domain API requests.'));
+            return;
+        }
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: participantRsRequestUrl(driverId, apiKey),
+            timeout: 15000,
+            onload: response => {
+                try {
+                    const json = JSON.parse(response.responseText);
+                    if (json?.error) {
+                        const error = new Error(json.error.error || 'Torn API error');
+                        error.code = Number(json.error.code) || 0;
+                        reject(error);
+                        return;
+                    }
+                    const skill = Number(json?.personalstats?.racingskill);
+                    if (!Number.isFinite(skill)) throw new Error('The API response did not contain racing skill.');
+                    resolve(skill);
+                } catch (error) {
+                    reject(error);
+                }
+            },
+            onerror: () => reject(new Error('The Torn API request failed.')),
+            ontimeout: () => reject(new Error('The Torn API request timed out.'))
+        });
+    });
+}
+
+function clearParticipantRsQueue() {
+    participantRsQueue.length = 0;
+    participantRsQueuedIds.clear();
+    if (participantRsNextTimer) clearTimeout(participantRsNextTimer);
+    participantRsNextTimer = 0;
+}
+
+function scheduleParticipantRsQueue(delay = PARTICIPANT_RS_FETCH_INTERVAL_MS) {
+    if (participantRsNextTimer || !participantRsIsEnabled() || participantRsQueue.length === 0) return;
+    participantRsNextTimer = setTimeout(() => {
+        participantRsNextTimer = 0;
+        processParticipantRsQueue();
+    }, delay);
+}
+
+async function processParticipantRsQueue() {
+    if (participantRsFetchInFlight || !participantRsIsEnabled()) return;
+    loadParticipantRsCache();
+    let driverId = 0;
+    while (participantRsQueue.length > 0 && !driverId) {
+        const candidate = participantRsQueue.shift();
+        if (!getCachedParticipantRacingSkill(candidate)
+            && (participantRsFailedUntil.get(candidate) || 0) <= Date.now()) driverId = candidate;
+        else participantRsQueuedIds.delete(candidate);
+    }
+    if (!driverId) return;
+
+    participantRsFetchInFlight = true;
+    const generation = participantRsGeneration;
+    try {
+        const skill = await requestParticipantRacingSkill(driverId, getParticipantRsApiKey());
+        if (generation !== participantRsGeneration) return;
+        cacheParticipantRacingSkill(driverId, skill);
+        participantRsLastError = '';
+        paintParticipantRsBadges();
+    } catch (error) {
+        if (generation !== participantRsGeneration) return;
+        participantRsLastError = error.message || 'Could not retrieve racing skill.';
+        const retryMs = error.code === 5 ? 60000 : 5 * 60000;
+        participantRsFailedUntil.set(driverId, Date.now() + retryMs);
+        if ([1, 2, 16].includes(error.code)) clearParticipantRsQueue();
+        updateParticipantRsButton();
+    } finally {
+        participantRsQueuedIds.delete(driverId);
+        participantRsFetchInFlight = false;
+        scheduleParticipantRsQueue();
+    }
+}
+
+function seedOwnParticipantRacingSkill(data) {
+    if (!participantRsIsEnabled()) return;
+    const playerName = data?.user?.playername;
+    const driverId = Number(data?.raceData?.carInfo?.[playerName]?.userID);
+    const skill = Number(data?.user?.racinglevel);
+    const existing = getCachedParticipantRacingSkill(driverId);
+    if (Number.isInteger(driverId) && driverId > 0 && Number.isFinite(skill)
+        && (!existing || existing.skill !== skill)) cacheParticipantRacingSkill(driverId, skill);
+}
+
+function setParticipantRsModalStatus(message, type = '') {
+    const status = document.getElementById('rslogRsStatus');
+    if (!status) return;
+    status.textContent = message;
+    status.className = type === 'success' ? 'rslogRsSuccess' : type === 'failure' ? 'rslogRsFailure' : '';
+}
+
+function closeParticipantRsModal() {
+    const modal = document.getElementById('rslogRsModal');
+    if (!modal) return;
+    modal.classList.remove('rslogRsOpen');
+    const input = document.getElementById('rslogRsApiKeyInput');
+    if (input) {
+        input.type = 'password';
+        input.value = '';
+    }
+}
+
+function ensureParticipantRsModal() {
+    if (document.getElementById('rslogRsModal')) return;
+    document.body.insertAdjacentHTML('beforeend', `
+        <div id="rslogRsModal" role="dialog" aria-modal="true" aria-labelledby="rslogRsModalTitle">
+            <div class="rslogRsBackdrop"></div>
+            <div class="rslogRsPanel">
+                <div id="rslogRsModalTitle" class="rslogRsTitle">Participant Racing Skill</div>
+                <div class="rslogRsIntro">Show a cached whole-number RS badge beside every racer. A dedicated Public Torn API key is sufficient.</div>
+                <div class="rslogRsToggleRow">
+                    <span>Show participant RS</span>
+                    <label class="rslogRsSwitch">
+                        <input id="rslogRsEnabledInput" type="checkbox">
+                        <span class="rslogRsSlider"></span>
+                    </label>
+                </div>
+                <label class="rslogRsLabel" for="rslogRsApiKeyInput">Public API key</label>
+                <div class="rslogRsKeyRow">
+                    <input id="rslogRsApiKeyInput" type="password" maxlength="64" autocomplete="off" spellcheck="false" placeholder="Enter a dedicated Public key">
+                    <button id="rslogRsKeyReveal" type="button">Show</button>
+                </div>
+                <div class="rslogRsKeyHelp">Stored locally by your userscript manager. <a href="https://www.torn.com/preferences.php#tab=api" target="_blank" rel="noopener">Create or manage API keys</a></div>
+                <div id="rslogRsStatus"></div>
+                <div class="rslogRsActions">
+                    <button id="rslogRsSaveBtn" type="button">Validate &amp; Save</button>
+                    <button id="rslogRsClearKeyBtn" type="button">Clear key</button>
+                    <button id="rslogRsClearCacheBtn" type="button">Clear RS cache</button>
+                    <button id="rslogRsCloseBtn" type="button">Close</button>
+                </div>
+            </div>
+        </div>
+    `);
+
+    const modal = document.getElementById('rslogRsModal');
+    const input = document.getElementById('rslogRsApiKeyInput');
+    document.getElementById('rslogRsKeyReveal').addEventListener('click', event => {
+        input.type = input.type === 'password' ? 'text' : 'password';
+        event.currentTarget.textContent = input.type === 'password' ? 'Show' : 'Hide';
+    });
+    document.getElementById('rslogRsSaveBtn').addEventListener('click', async event => {
+        const button = event.currentTarget;
+        const apiKey = input.value.trim();
+        if (apiKey.length < 8) {
+            setParticipantRsModalStatus('Enter a valid Public Torn API key.', 'failure');
+            input.focus();
+            return;
+        }
+        button.disabled = true;
+        setParticipantRsModalStatus('Validating key with Torn…');
+        try {
+            await requestParticipantRacingSkill(null, apiKey);
+            GM_setValue(PARTICIPANT_RS_API_KEY, apiKey);
+            GM_setValue(PARTICIPANT_RS_ENABLED_KEY, document.getElementById('rslogRsEnabledInput').checked);
+            participantRsGeneration += 1;
+            participantRsLastError = '';
+            clearParticipantRsQueue();
+            setParticipantRsModalStatus('Public key verified. Cache lifetime: 24 hours.', 'success');
+            updateParticipantRsButton();
+            paintParticipantRsBadges();
+        } catch (error) {
+            setParticipantRsModalStatus(error.message || 'The key could not be validated.', 'failure');
+        } finally {
+            button.disabled = false;
+        }
+    });
+    document.getElementById('rslogRsClearKeyBtn').addEventListener('click', () => {
+        GM_setValue(PARTICIPANT_RS_API_KEY, '');
+        GM_setValue(PARTICIPANT_RS_ENABLED_KEY, false);
+        participantRsGeneration += 1;
+        input.value = '';
+        document.getElementById('rslogRsEnabledInput').checked = false;
+        participantRsLastError = '';
+        clearParticipantRsQueue();
+        removeParticipantRsBadges();
+        updateParticipantRsButton();
+        setParticipantRsModalStatus('API key removed. Cached RS values were preserved.', 'success');
+    });
+    document.getElementById('rslogRsClearCacheBtn').addEventListener('click', () => {
+        participantRsCache.clear();
+        participantRsGeneration += 1;
+        GM_setValue(PARTICIPANT_RS_CACHE_KEY, {});
+        participantRsFailedUntil.clear();
+        removeParticipantRsBadges();
+        setParticipantRsModalStatus('The participant RS cache was cleared.', 'success');
+        paintParticipantRsBadges();
+    });
+    document.getElementById('rslogRsCloseBtn').addEventListener('click', closeParticipantRsModal);
+    modal.querySelector('.rslogRsBackdrop').addEventListener('click', closeParticipantRsModal);
+    modal.addEventListener('keydown', event => {
+        if (event.key === 'Escape') closeParticipantRsModal();
+    });
+}
+
+function showParticipantRsModal() {
+    ensureParticipantRsModal();
+    const modal = document.getElementById('rslogRsModal');
+    const input = document.getElementById('rslogRsApiKeyInput');
+    input.type = 'password';
+    input.value = getParticipantRsApiKey();
+    document.getElementById('rslogRsKeyReveal').textContent = 'Show';
+    document.getElementById('rslogRsEnabledInput').checked = getBooleanSetting(PARTICIPANT_RS_ENABLED_KEY, false);
+    loadParticipantRsCache();
+    setParticipantRsModalStatus(participantRsLastError
+        || `${participantRsCache.size} cached racer${participantRsCache.size === 1 ? '' : 's'} · expires after 24 hours`, participantRsLastError ? 'failure' : '');
+    modal.classList.add('rslogRsOpen');
+    input.focus();
+}
+
+function injectRaceToolbar() {
+    const host = document.getElementById('racingupdatesnew');
+    if (!host) return;
+    if (!document.getElementById('rslogRaceToolbar')) {
+        host.insertAdjacentHTML('afterbegin', `
+            <div id="rslogRaceToolbar">
+                <span id="rslogToolbarStatus" class="rslogStatusWaiting">WAITING</span>
+                <span id="rslogToolbarLiveWrap">Current <span id="rslogToolbarSpeed">–.— mph</span></span>
+                <span id="rslogToolbarTopWrap">Session top <span id="rslogToolbarTop">${sessionTopSpeed.toFixed(2)} mph</span></span>
+                <span id="rslogToolbarSkillWrap">Last RS <span id="rslogToolbarSkill">\u2014</span></span>
+                <button id="rslogParticipantRsBtn" type="button">RS OFF</button>
+                <span class="rslogToolbarActions">
+                    <button id="rslogResultsToggleBtn" type="button" disabled>Show results</button>
+                    <button id="rslogWarpBtn" type="button">Install warp drive</button>
+                    <button id="rslogRaceLinkBtn" type="button" disabled>Copy race link</button>
+                </span>
+            </div>
+        `);
+        document.getElementById('rslogResultsToggleBtn').addEventListener('click', toggleRaceResults);
+        document.getElementById('rslogParticipantRsBtn').addEventListener('click', showParticipantRsModal);
+        document.getElementById('rslogWarpBtn').addEventListener('click', showWarpModal);
+        document.getElementById('rslogRaceLinkBtn').addEventListener('click', copyCurrentRaceLink);
+    }
+    renderRacingSkillGain();
+    updateParticipantRsButton();
+    updateResultsToggleButton();
+    updateRaceLinkButton();
+}
+
+function currentRaceUrl() {
+    return currentRaceId
+        ? `https://www.torn.com/page.php?sid=racing&tab=log&raceID=${encodeURIComponent(currentRaceId)}`
+        : '';
+}
+
+function updateRaceLinkButton() {
+    const button = document.getElementById('rslogRaceLinkBtn');
+    if (!button) return;
+    button.disabled = !currentRaceId;
+    if (button.dataset.feedback !== 'true') button.textContent = 'Copy race link';
+}
+
+function nextWarpMessage() {
+    if (warpMessageQueue.length === 0) {
+        warpMessageQueue = [...WARP_MESSAGES];
+        for (let i = warpMessageQueue.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [warpMessageQueue[i], warpMessageQueue[j]] = [warpMessageQueue[j], warpMessageQueue[i]];
+        }
+        if (warpMessageQueue.length > 1 && warpMessageQueue[warpMessageQueue.length - 1] === lastWarpMessage) {
+            [warpMessageQueue[0], warpMessageQueue[warpMessageQueue.length - 1]] = [warpMessageQueue[warpMessageQueue.length - 1], warpMessageQueue[0]];
+        }
+    }
+    lastWarpMessage = warpMessageQueue.pop();
+    return lastWarpMessage;
+}
+
+function ensureWarpModal() {
+    if (document.getElementById('rslogWarpModal')) return;
+    document.body.insertAdjacentHTML('beforeend', `
+        <div id="rslogWarpModal" role="dialog" aria-modal="true" aria-labelledby="rslogWarpTitle">
+            <div class="rslogWarpBackdrop"></div>
+            <div class="rslogWarpPanel">
+                <div id="rslogWarpTitle" class="rslogWarpTitle">WARP DRIVE INSTALLER</div>
+                <div id="rslogWarpMessage" class="rslogWarpMessage"></div>
+                <button class="rslogWarpClose" type="button">Return to reality</button>
+            </div>
+        </div>
+    `);
+    const modal = document.getElementById('rslogWarpModal');
+    modal.querySelector('.rslogWarpBackdrop').addEventListener('click', hideWarpModal);
+    modal.querySelector('.rslogWarpClose').addEventListener('click', hideWarpModal);
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && modal.classList.contains('rslogWarpOpen')) hideWarpModal();
+    });
+}
+
+function showWarpModal() {
+    ensureWarpModal();
+    const modal = document.getElementById('rslogWarpModal');
+    modal.querySelector('#rslogWarpMessage').textContent = nextWarpMessage();
+    modal.classList.add('rslogWarpOpen');
+    modal.querySelector('.rslogWarpClose').focus();
+}
+
+function hideWarpModal() {
+    const modal = document.getElementById('rslogWarpModal');
+    if (!modal) return;
+    modal.classList.remove('rslogWarpOpen');
+    document.getElementById('rslogWarpBtn')?.focus();
+}
+
+function updateResultsToggleButton() {
+    const button = document.getElementById('rslogResultsToggleBtn');
+    if (!button) return;
+    button.disabled = !cachedRaceResults;
+    button.textContent = raceResultsVisible ? 'Hide results' : 'Show results';
+    button.classList.toggle('rslogResultsActive', raceResultsVisible);
+}
+
+function removeRaceResultLabels() {
+    document.querySelectorAll('.rslogFinalResult').forEach(element => element.remove());
+}
+
+function toggleRaceResults() {
+    if (!cachedRaceResults) return;
+    raceResultsVisible = !raceResultsVisible;
+    if (raceResultsVisible) {
+        lastResultsRenderAt = 0;
+        renderRaceResultsToLeaderboard();
+    } else {
+        removeRaceResultLabels();
+    }
+    updateResultsToggleButton();
+}
+
+async function copyCurrentRaceLink() {
+    const url = currentRaceUrl();
+    if (!url) return;
+    const button = document.getElementById('rslogRaceLinkBtn');
+    const ok = await copyToClipboard(url);
+    if (!ok) {
+        prompt('Copy this race link:', url);
+        return;
+    }
+    if (button) {
+        button.dataset.feedback = 'true';
+        button.textContent = 'Copied!';
+        setTimeout(() => {
+            delete button.dataset.feedback;
+            updateRaceLinkButton();
+        }, 1800);
+    }
+}
+
+function applyLiveSpeedVisibility() {
+    const mode = getLiveSpeedMode();
+    const lugburzDetected = !!document.getElementById('speed_mph');
+    const showLive = mode === 'show' || (mode === 'auto' && !lugburzDetected);
+    $('#rslogSpeed').toggle(showLive);
+    $('#rslogToolbarLiveWrap').toggle(showLive);
+    $('#rslogLiveModeBtn')
+        .text(`LIVE: ${mode.toUpperCase()}`)
+        .attr('title', mode === 'auto'
+            ? (lugburzDetected ? 'Lugburz detected: duplicate live speed hidden' : 'Live speed shown when Lugburz is not detected')
+            : `Live speed is forced ${mode}`);
+}
+
+function cycleLiveSpeedMode() {
+    const modes = ['auto', 'show', 'hide'];
+    const current = getLiveSpeedMode();
+    GM_setValue(SETTING_LIVE_MODE, modes[(modes.indexOf(current) + 1) % modes.length]);
+    applyLiveSpeedVisibility();
+}
+
+function setPanelOpen(panelSelector, toggleSelector, open, closedLabel, openLabel) {
+    $(panelSelector).toggle(open);
+    $(toggleSelector).text(open ? `▲ ${openLabel}` : `▼ ${closedLabel}`);
+}
+
+function currentSpeedRecord(trackName, carImg) {
+    if (!trackName || carKey(carImg) === 'unknown') return 0;
+    const entry = getSpeedLog()[trackName + '|' + carKey(carImg)];
+    return entry && Number.isFinite(entry.topSpeed) ? entry.topSpeed : 0;
+}
+
+function updatePbComparison(speed, previousRecord, isNewRecord) {
+    const el = $('#rslogPbCompare');
+    if (!el.length) return;
+    el.removeClass('rslogPbAhead');
+    if (isNewRecord) {
+        const gain = previousRecord > 0 ? speed - previousRecord : 0;
+        el.addClass('rslogPbAhead').text(previousRecord > 0
+            ? `NEW PB +${gain.toFixed(2)} mph`
+            : `PB SET ${speed.toFixed(2)} mph`);
+        return;
+    }
+    if (previousRecord > 0) {
+        const delta = speed - previousRecord;
+        el.text(`PB ${previousRecord.toFixed(2)} · ${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)} mph`);
+    } else {
+        el.text('PB —');
+    }
+}
+
+function deleteSingleRecord(key, kind) {
+    const log = getSpeedLog();
+    const entry = log[key];
+    if (!entry) return;
+    const label = kind === 'speed' ? 'top-speed' : 'best-lap';
+    if (!confirm(`Delete this ${label} record for ${entry.track || 'this track'}?`)) return;
+    if (kind === 'speed') {
+        delete entry.topSpeed;
+        delete entry.speedDate;
+        if (!entry.bestLapMs) delete log[key];
+    } else {
+        delete entry.bestLapMs;
+        delete entry.lapDate;
+        if (!entry.topSpeed) delete log[key];
+    }
+    saveSpeedLog(log);
+    renderSpeedTable();
+    renderLapTable();
+    renderLobbySpeedTable();
+    renderLobbyLapTable();
+}
+
+function wireRecordDelete(containerSelector) {
+    $(containerSelector).on('click', '.rslogRowDelete', function () {
+        deleteSingleRecord($(this).attr('data-key'), $(this).attr('data-kind'));
+    });
+}
+
+// Tap-to-show popover for info icons (native `title` tooltips don't
+// reliably appear on touch devices / PDA's WebView).
+function wireInfoIcon(iconSelector) {
+    const icon = $(iconSelector);
+    if (icon.length < 1 || icon.data('rslogWired')) return;
+    icon.data('rslogWired', true);
+
+    const popover = $('<div class="rslogInfoPopover rslogOwnedPopover"></div>').text(icon.attr('title') || '');
+    icon.removeAttr('title'); // avoid native tooltip stacking with our popover
+    $('body').append(popover);
+
+    icon.on('click', function (e) {
+        e.stopPropagation();
+        const isOpen = popover.is(':visible');
+        $('.rslogInfoPopover').hide();
+        if (isOpen) return;
+        const rect = this.getBoundingClientRect();
+        popover.css({
+            top:  (window.scrollY + rect.bottom + 4) + 'px',
+            left: Math.max(8, window.scrollX + rect.left - 10) + 'px'
+        }).show();
+    });
+
+    $(document).on('click.rslogInfo', () => popover.hide());
+}
+
+// ─── Main Race Widget ──────────────────────────────────────────────────────────
+function injectWidget() {
+    if ($('#rslogWrapper').length > 0) return;
+
+    const html = `
+        <div id="rslogWrapper">
+            <!-- Top Speed Panel -->
+            <div id="rslogSpeedPanel">
+                <div id="rslogSpeedRow">
+                    <span id="rslogSpeed">–.— mph</span>
+                    <span id="rslogSessionTop">Session top: <span id="rslogSessionTopVal">0.00</span> mph</span>
+                    <span id="rslogPbCompare">PB —</span>
+                    <span id="rslogStatus" class="rslogStatusWaiting">WAITING</span>
+                    <button id="rslogLiveModeBtn" type="button">LIVE: AUTO</button>
+                    <span class="rslogVersion">v${SCRIPT_VERSION}</span>
+                    <span id="rslogNewRecord">★ NEW RECORD</span>
+                    <span class="rslogToggle" id="rslogSpeedToggle">▼ Top Speeds</span>
+                    <span class="rslogInfoIcon" id="rslogWidgetSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded. It can't catch max speeds while the racing tab is closed.">ⓘ</span>
+                </div>
+                <div id="rslogSpeedPanelContent" class="rslogPanel">
+                    <table id="rslogSpeedTable">
+                        <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th><th aria-label="Actions"></th></tr></thead>
+                        <tbody id="rslogSpeedTableBody"></tbody>
+                    </table>
+                    <a id="rslogSpeedCsvBtn" class="rslogCsvBtn" href="#">⬇ Download Speed CSV</a>
+                    <span id="rslogSpeedClearBtn" class="rslogClearBtn">✕ Clear Speeds</span>
+                </div>
+            </div>
+
+            <!-- Top Lap Panel -->
+            <div id="rslogLapPanel">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 18px; color: #00cfff;">Best Laps</span>
+                    <span class="rslogToggle" id="rslogLapToggle">▼ Top Laps</span>
+                </div>
+                <div id="rslogLapPanelContent" class="rslogPanel">
+                    <table id="rslogLapTable">
+                        <thead><tr><th>Track</th><th>Car</th><th>Best Lap</th><th>Date</th><th aria-label="Actions"></th></tr></thead>
+                        <tbody id="rslogLapTableBody"></tbody>
+                    </table>
+                    <a id="rslogLapCsvBtn" class="rslogCsvBtn" href="#">⬇ Download Lap CSV</a>
+                    <span id="rslogLapClearBtn" class="rslogClearBtn">✕ Clear Laps</span>
+                </div>
+            </div>
+        </div>
+    `;
+
+    $('#racingdetails').after(html);
+
+    injectRaceToolbar();
+    wireInfoIcon('#rslogWidgetSpeedInfoIcon');
+
+    $('#rslogSpeedToggle').on('click', function () {
+        const panel = $('#rslogSpeedPanelContent');
+        const open = !panel.is(':visible');
+        GM_setValue(SETTING_SPEED_OPEN, open);
+        setPanelOpen('#rslogSpeedPanelContent', '#rslogSpeedToggle', open, 'Top Speeds', 'Top Speeds');
+        if (open) renderSpeedTable();
+    });
+
+    $('#rslogLapToggle').on('click', function () {
+        const panel = $('#rslogLapPanelContent');
+        const open = !panel.is(':visible');
+        GM_setValue(SETTING_LAP_OPEN, open);
+        setPanelOpen('#rslogLapPanelContent', '#rslogLapToggle', open, 'Top Laps', 'Top Laps');
+        if (open) renderLapTable();
+    });
+
+    $('#rslogLiveModeBtn').on('click', cycleLiveSpeedMode);
+    wireRecordDelete('#rslogWrapper');
+
+    $('#rslogSpeedCsvBtn').on('click', e => { e.preventDefault(); downloadSpeedCsv(); });
+    $('#rslogLapCsvBtn').on('click', e => { e.preventDefault(); downloadLapCsv(); });
+
+    $('#rslogSpeedClearBtn').on('click', () => {
+        if (confirm('Clear ALL top speed records?')) {
+            const log = getSpeedLog();
+            Object.keys(log).forEach(k => { delete log[k].topSpeed; delete log[k].speedDate; if (!log[k].bestLapMs) delete log[k]; });
+            saveSpeedLog(log);
+            renderSpeedTable();
+        }
+    });
+
+    $('#rslogLapClearBtn').on('click', () => {
+        if (confirm('Clear ALL best lap records?')) {
+            const log = getSpeedLog();
+            Object.keys(log).forEach(k => { delete log[k].bestLapMs; delete log[k].lapDate; if (!log[k].topSpeed) delete log[k]; });
+            saveSpeedLog(log);
+            renderLapTable();
+        }
+    });
+
+    const speedOpen = getBooleanSetting(SETTING_SPEED_OPEN, false);
+    const lapOpen = getBooleanSetting(SETTING_LAP_OPEN, false);
+    setPanelOpen('#rslogSpeedPanelContent', '#rslogSpeedToggle', speedOpen, 'Top Speeds', 'Top Speeds');
+    setPanelOpen('#rslogLapPanelContent', '#rslogLapToggle', lapOpen, 'Top Laps', 'Top Laps');
+    if (speedOpen) renderSpeedTable();
+    if (lapOpen) renderLapTable();
+    applyLiveSpeedVisibility();
+    setLoggerStatus('waiting');
+}
+
+function renderSpeedTable() {
+    const log = getSpeedLog();
+    const tbody = $('#rslogSpeedTableBody');
+    tbody.empty();
+    const entries = Object.entries(log).filter(([,d]) => d.topSpeed > 0).sort((a,b) => b[1].topSpeed - a[1].topSpeed);
+    if (entries.length === 0) {
+        tbody.append('<tr><td colspan="5" style="color:#555;padding:6px;">No speed records yet.</td></tr>');
+        return;
+    }
+    for (const [key, data] of entries) {
+        const trackName = data.track || key.split('|')[0];
+        const isCurrent = (trackName === currentTrack);
+        const carHtml   = data.car
+            ? `<img src="${escapeHtml(data.car)}" title="${escapeHtml(carName(data.car) || 'Unknown')}">${classBadgeHtml(data.car)}`
+            : '–';
+        // [SUGGESTION 1+2+3+4] Use speedDate for accurate date; tooltip + age icon + today colour
+        const speedIso  = data.speedDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
+        tbody.append(`
+            <tr class="${isCurrent ? 'rslogCurrentTrack' : ''}">
+                <td>${escapeHtml(trackName)}</td>
+                <td class="rslogCar" style="width:58px;">${carHtml}</td>
+                <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
+                ${dateCellHtml(speedIso, 'rslogDateToday')}
+                <td class="rslogActionCell"><button class="rslogRowDelete" type="button" data-kind="speed" data-key="${escapeHtml(key)}" title="Delete this speed record">×</button></td>
+            </tr>
+        `);
+    }
+}
+
+function renderLapTable() {
+    const log = getSpeedLog();
+    const tbody = $('#rslogLapTableBody');
+    tbody.empty();
+    const entries = Object.entries(log).filter(([,d]) => d.bestLapMs > 0).sort((a,b) => (a[1].bestLapMs || Infinity) - (b[1].bestLapMs || Infinity));
+    if (entries.length === 0) {
+        tbody.append('<tr><td colspan="5" style="color:#555;padding:6px;">No lap records yet.</td></tr>');
+        return;
+    }
+    for (const [key, data] of entries) {
+        const trackName = data.track || key.split('|')[0];
+        const carHtml   = data.car
+            ? `<img src="${escapeHtml(data.car)}" title="${escapeHtml(carName(data.car) || 'Unknown')}">${classBadgeHtml(data.car)}`
+            : '–';
+        // [SUGGESTION 1+2+3+4] Use lapDate for accurate date; tooltip + age icon + today colour
+        const lapIso    = data.lapDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
+        tbody.append(`
+            <tr>
+                <td>${escapeHtml(trackName)}</td>
+                <td class="rslogCar" style="width:58px;">${carHtml}</td>
+                <td class="rslogBestLap">${formatLapTime(data.bestLapMs)}</td>
+                ${dateCellHtml(lapIso, 'rslogDateTodayLap')}
+                <td class="rslogActionCell"><button class="rslogRowDelete" type="button" data-kind="lap" data-key="${escapeHtml(key)}" title="Delete this lap record">×</button></td>
+            </tr>
+        `);
+    }
+}
+
+// ─── CSV Modal (PDA / WebView fallback) ────────────────────────────────────────
+// On real browsers, Blob + <a download> works fine. On Torn PDA's embedded
+// WebView (and other in-app browsers), synthetic download clicks are
+// frequently silently ignored. In that case we show the CSV in a modal so
+// the person can copy or share it manually instead.
+function showCsvModal(csvText, fileName) {
+    let modal = document.getElementById('rslogCsvModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'rslogCsvModal';
+        modal.innerHTML = `
+            <div class="rslogCsvBackdrop"></div>
+            <div class="rslogCsvPanel">
+                <div class="rslogCsvHeader">
+                    <span id="rslogCsvTitle"></span>
+                    <div class="rslogCsvActions">
+                        <button id="rslogCsvCopyBtn" type="button">📋 Copy</button>
+                        <button id="rslogCsvShareBtn" type="button" style="display:none;">📤 Share</button>
+                        <button id="rslogCsvCloseBtn" type="button">✕ Close</button>
+                    </div>
+                </div>
+                <div style="padding:4px 12px 0; color:#888; font-size:10px;">If Copy doesn't work, tap the text below and select all manually.</div>
+                <textarea class="rslogCsvBody" id="rslogCsvBody" readonly></textarea>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        modal.querySelector('#rslogCsvCloseBtn').addEventListener('click', () => { modal.style.display = 'none'; });
+        modal.querySelector('.rslogCsvBackdrop').addEventListener('click', () => { modal.style.display = 'none'; });
+
+        modal.querySelector('#rslogCsvCopyBtn').addEventListener('click', async () => {
+            const textarea = modal.querySelector('#rslogCsvBody');
+            const btn = modal.querySelector('#rslogCsvCopyBtn');
+            const ok = await copyToClipboard(textarea.value, textarea);
+            btn.textContent = ok ? '✓ Copied!' : '✗ Tap text below';
+            setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+        });
+
+        // Tapping the textarea selects everything, so a manual long-press
+        // copy always works even if every programmatic method is blocked.
+        modal.querySelector('#rslogCsvBody').addEventListener('focus', function () { this.select(); });
+        modal.querySelector('#rslogCsvBody').addEventListener('click', function () { this.select(); });
+
+        if (navigator.share) {
+            const shareBtn = modal.querySelector('#rslogCsvShareBtn');
+            shareBtn.style.display = '';
+            shareBtn.addEventListener('click', async () => {
+                const text = modal.querySelector('#rslogCsvBody').value;
+                const name = modal.querySelector('#rslogCsvTitle').textContent;
+                try { await navigator.share({ title: name, text }); } catch (e) {}
+            });
+        }
+    }
+
+    modal.querySelector('#rslogCsvTitle').textContent = fileName;
+    modal.querySelector('#rslogCsvBody').value = csvText;
+    modal.style.display = 'block';
+}
+
+// ─── Clipboard helper ──────────────────────────────────────────────────────────
+// Tries every available method in order of reliability. WebViews (Torn PDA,
+// in-app browsers) frequently block navigator.clipboard, GM_setClipboard,
+// AND window.prompt silently with no error — so execCommand('copy') against
+// a real, focused, selected textarea is included as it works in more
+// embedded WebViews than the Clipboard API does.
+async function copyToClipboard(text, sourceTextarea) {
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch (e) { /* fall through */ }
+
+    if (sourceTextarea) {
+        try {
+            sourceTextarea.focus();
+            sourceTextarea.select();
+            sourceTextarea.setSelectionRange(0, sourceTextarea.value.length);
+            const ok = document.execCommand('copy');
+            if (ok) return true;
+        } catch (e) { /* fall through */ }
+    }
+
+    if (typeof GM_setClipboard !== 'undefined') {
+        try { GM_setClipboard(text); return true; } catch (e) { /* fall through */ }
+    }
+
+    return false;
+}
+
+// ─── CSV Exports ───────────────────────────────────────────────────────────────
+// On real browsers: trigger a normal file download.
+// On PDA / in-app WebViews: open the CSV modal instead, since Blob downloads
+// are unreliable there.
+function deliverCsv(csv, fileName) {
+    if (isPdaWebView()) {
+        showCsvModal(csv, fileName);
+        return;
+    }
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+    }, 1000);
+}
+
+// Quote CSV text and neutralize values that spreadsheet programs could
+// otherwise interpret as formulas. Newlines are retained safely inside quotes.
+function csvCell(value) {
+    let text = value === null || value === undefined ? '' : String(value);
+    if (/^[\s]*[=+\-@]/.test(text)) text = "'" + text;
+    return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildSpeedCsv(includeTimestamp = true) {
+    const columns = ['Track', 'Car', 'Class', 'Top Speed (mph)', 'Date'];
+    if (includeTimestamp) columns.push('Speed Timestamp');
+    const rows = [columns.map(csvCell).join(',')];
+    Object.values(getSpeedLog()).forEach(data => {
+        if (!Number.isFinite(data.topSpeed) || data.topSpeed <= 0) return;
+        const row = [
+            data.track || '', carName(data.car) || data.car || '', carClass(data.car) || '',
+            data.topSpeed.toFixed(2), isoToDate(data.speedDate || data.date || '')
+        ];
+        if (includeTimestamp) row.push(data.speedDate || '');
+        rows.push(row.map(csvCell).join(','));
+    });
+    return rows.join('\r\n') + '\r\n';
+}
+
+function buildLapCsv(includeTimestamp = true) {
+    const columns = ['Track', 'Car', 'Class', 'Best Lap', 'Best Lap (ms)', 'Date'];
+    if (includeTimestamp) columns.push('Lap Timestamp');
+    const rows = [columns.map(csvCell).join(',')];
+    Object.values(getSpeedLog()).forEach(data => {
+        if (!Number.isFinite(data.bestLapMs) || data.bestLapMs <= 0) return;
+        const row = [
+            data.track || '', carName(data.car) || data.car || '', carClass(data.car) || '',
+            formatLapTime(data.bestLapMs), data.bestLapMs, isoToDate(data.lapDate || data.date || '')
+        ];
+        if (includeTimestamp) row.push(data.lapDate || '');
+        rows.push(row.map(csvCell).join(','));
+    });
+    return rows.join('\r\n') + '\r\n';
+}
+
+function downloadSpeedCsv() {
+    deliverCsv(buildSpeedCsv(true), 'torn_top_speeds.csv');
+}
+
+function downloadLapCsv() {
+    deliverCsv(buildLapCsv(true), 'torn_best_laps.csv');
+}
+
+// ─── Firework ──────────────────────────────────────────────────────────────────
+function launchFirework() {
+    // Canvas fireworks are expensive in mobile WebViews and can cover Torn's
+    // race controls, so the PDA edition keeps the record banner only.
+    if (document.documentElement.classList.contains('rslogPdaMode')) return;
+    const el = document.getElementById('rslogNewRecord');
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top  + rect.height / 2;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+    Object.assign(canvas.style, { position: 'fixed', top: '0', left: '0', pointerEvents: 'none', zIndex: '999999' });
+    document.body.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    const colors = ['#00ff88', '#fff200', '#ff9900', '#ffffff', '#00cfff'];
+    const particles = [];
+    const COUNT = 60;
+
+    for (let i = 0; i < COUNT; i++) {
+        const angle = (Math.PI * 2 / COUNT) * i + Math.random() * 0.3;
+        const speed = 3 + Math.random() * 6;
+        particles.push({ x: cx, y: cy, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, alpha: 1, size: 2 + Math.random() * 3, color: colors[Math.floor(Math.random() * colors.length)] });
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let alive = false;
+        for (const p of particles) {
+            if (p.alpha <= 0) continue;
+            alive = true;
+            p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.alpha -= 0.018;
+            ctx.globalAlpha = Math.max(0, p.alpha);
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        if (alive) requestAnimationFrame(draw);
+        else canvas.remove();
+    }
+    requestAnimationFrame(draw);
+}
+
+// Robust base64 decode — falls back to manual implementation if atob() fails
+// (Torn PDA's webview can occasionally mangle/restrict the native atob).
+function safeAtob(input) {
+    if (typeof input !== 'string') return null;
+    const clean = input.replace(/\s/g, '');
+    if (!clean || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean)
+        || clean.length % 4 === 1
+        || (clean.includes('=') && clean.length % 4 !== 0)) {
+        return null;
+    }
+    const padded = clean.padEnd(Math.ceil(clean.length / 4) * 4, '=');
+
+    try {
+        return atob(padded);
+    } catch (e) {
+        // Manual base64 decode fallback
+        const keyStr = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+        let output = '';
+        let i = 0;
+        while (i < padded.length) {
+            const enc1 = keyStr.indexOf(padded.charAt(i++));
+            const enc2 = keyStr.indexOf(padded.charAt(i++));
+            const enc3 = keyStr.indexOf(padded.charAt(i++));
+            const enc4 = keyStr.indexOf(padded.charAt(i++));
+            if (enc1 < 0 || enc2 < 0 || enc3 < 0 || enc4 < 0 || enc1 === 64 || enc2 === 64) return null;
+            const chr1 = (enc1 << 2) | (enc2 >> 4);
+            const chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+            const chr3 = ((enc3 & 3) << 6) | enc4;
+            output += String.fromCharCode(chr1);
+            if (enc3 !== 64) output += String.fromCharCode(chr2);
+            if (enc4 !== 64) output += String.fromCharCode(chr3);
+        }
+        return output;
+    }
+}
+
+// ─── Best Lap Parser ───────────────────────────────────────────────────────────
+function decodeRaceIntervals(encoded) {
+    const decoded = safeAtob(encoded);
+    if (decoded === null) return null;
+    const intervals = decoded.split(',').map(value => value.trim()).filter(value => value !== '').map(Number);
+    return intervals.some(value => !Number.isFinite(value) || value < 0) ? null : intervals;
+}
+
+function formatRaceDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '—';
+    const totalMs = Math.round(seconds * 1000);
+    const hours = Math.floor(totalMs / 3600000);
+    const minutes = Math.floor((totalMs % 3600000) / 60000);
+    const secs = Math.floor((totalMs % 60000) / 1000);
+    const millis = totalMs % 1000;
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
+        : `${minutes}:${String(secs).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+}
+
+function ordinal(position) {
+    const mod100 = position % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${position}th`;
+    return `${position}${position % 10 === 1 ? 'st' : position % 10 === 2 ? 'nd' : position % 10 === 3 ? 'rd' : 'th'}`;
+}
+
+function buildRaceResults(data) {
+    const cars = data?.raceData?.cars;
+    const carInfo = data?.raceData?.carInfo || {};
+    const trackParts = data?.raceData?.trackData?.intervals;
+    const laps = Number(data?.laps);
+    if (!cars || !Array.isArray(trackParts) || trackParts.length === 0
+        || !Number.isInteger(laps) || laps <= 0) return null;
+
+    const expectedIntervals = trackParts.length * laps;
+    const finishers = [];
+    const crashes = [];
+
+    for (const [name, encoded] of Object.entries(cars)) {
+        const userId = Number(carInfo[name]?.userID) || 0;
+        const intervals = decodeRaceIntervals(encoded);
+        if (!intervals || intervals.length !== expectedIntervals) {
+            crashes.push({ name, userId });
+            continue;
+        }
+        let totalTime = 0;
+        let bestLap = Infinity;
+        for (let lap = 0; lap < laps; lap++) {
+            let lapTime = 0;
+            for (let part = 0; part < trackParts.length; part++) {
+                lapTime += intervals[lap * trackParts.length + part];
+            }
+            totalTime += lapTime;
+            if (lapTime > 0) bestLap = Math.min(bestLap, lapTime);
+        }
+        if (!Number.isFinite(totalTime) || bestLap === Infinity) crashes.push({ name, userId });
+        else finishers.push({ name, userId, totalTime, bestLap });
+    }
+    finishers.sort((a, b) => a.totalTime - b.totalTime);
+    return { finishers, crashes };
+}
+
+function clearRaceResultDisplay() {
+    removeRaceResultLabels();
+    cachedRaceResults = null;
+    lastRaceResultKey = '';
+    lastResultsRenderAt = 0;
+    raceResultsVisible = false;
+    updateResultsToggleButton();
+}
+
+function cacheRaceResultsFromResponse(data) {
+    const raceId = data?.raceID;
+    if (raceId !== null && raceId !== undefined && raceId !== '') {
+        const nextRaceId = String(raceId);
+        if (nextRaceId !== currentRaceId) clearRaceResultDisplay();
+        currentRaceId = nextRaceId;
+        updateRaceLinkButton();
+    }
+    updateRacingSkillFromResponse(data);
+    seedOwnParticipantRacingSkill(data);
+    if (!data?.timeData || data.timeData.status < 3 || !currentRaceId) return;
+    const resultKey = `${currentRaceId}:${Number(data.laps) || 0}:${Object.keys(data.raceData?.cars || {}).length}`;
+    if (lastRaceResultKey !== resultKey) {
+        const results = buildRaceResults(data);
+        if (results) {
+            cachedRaceResults = results;
+            lastRaceResultKey = resultKey;
+            lastResultsRenderAt = 0;
+            updateResultsToggleButton();
+        }
+    }
+    renderRaceResultsToLeaderboard();
+}
+
+function renderRaceResultsToLeaderboard() {
+    if (!raceResultsVisible) return;
+    const board = document.getElementById('leaderBoard');
+    if (!board || !cachedRaceResults) return;
+    const expected = cachedRaceResults.finishers.length + cachedRaceResults.crashes.length;
+    if (expected > 0 && board.querySelectorAll('.rslogFinalResult').length >= expected) return;
+    const now = Date.now();
+    if (now - lastResultsRenderAt < RESULTS_RENDER_THROTTLE_MS) return;
+    lastResultsRenderAt = now;
+
+    const byId = new Map();
+    const byName = new Map();
+    Array.from(board.children).forEach(row => {
+        const nameCell = row.querySelector?.('li.name');
+        if (!nameCell) return;
+        const idMatch = String(row.id || '').match(/(\d+)/);
+        if (idMatch) byId.set(Number(idMatch[1]), nameCell);
+        const linkText = nameCell.querySelector('a')?.textContent?.trim();
+        if (linkText) byName.set(linkText, nameCell);
+    });
+
+    const applyResult = (result, position, crashed = false) => {
+        const nameCell = byId.get(result.userId) || byName.get(result.name);
+        if (!nameCell) return;
+        let detail = nameCell.querySelector('.rslogFinalResult');
+        if (!detail) {
+            detail = document.createElement('span');
+            detail.className = 'rslogFinalResult';
+            nameCell.appendChild(detail);
+        }
+        detail.className = `rslogFinalResult${position <= 3 ? ` rslogPlace${position}` : ''}${crashed ? ' rslogCrashed' : ''}`;
+        detail.textContent = crashed
+            ? `${ordinal(position)} · crashed`
+            : `${ordinal(position)} · ${formatRaceDuration(result.totalTime)} · best ${formatRaceDuration(result.bestLap)}`;
+    };
+
+    cachedRaceResults.finishers.forEach((result, index) => applyResult(result, index + 1));
+    cachedRaceResults.crashes.forEach((result, index) => applyResult(result, cachedRaceResults.finishers.length + index + 1, true));
+    paintParticipantRsBadges();
+}
+
+function parseBestLapFromResponse(data) {
+    try {
+        if (!data) return;
+        cacheRaceResultsFromResponse(data);
+        if (!data.timeData || data.timeData.status < 3) return;
+        const cars       = data.raceData?.cars;
+        const trackData  = data.raceData?.trackData;
+        const playerName = data.user?.playername;
+        const totalLaps  = Number(data.laps);
+        if (!cars || !trackData || !playerName || !totalLaps) return;
+        if (!Number.isInteger(totalLaps) || totalLaps <= 0) return;
+        currentRaceLaps = totalLaps;
+
+        const trackNameRaw = data.raceData?.title
+            || (() => {
+                const el = document.querySelector('div.title-black.t-overflow');
+                return el ? el.textContent.trim() : '';
+            })();
+        const trackName = normalizeTrackName(trackNameRaw) || currentTrack;
+        const carImg    = parseCarImg() || currentCar;
+        if (!trackName || !carImg) return;
+
+        const encoded = cars[playerName];
+        if (!encoded) return;
+
+        if (!Array.isArray(trackData.intervals) || trackData.intervals.length === 0) return;
+        const trackIntervals = trackData.intervals.length;
+        const intervals = decodeRaceIntervals(encoded);
+        if (intervals === null) {
+            console.debug('[Racing Logger] Ignoring malformed encoded race data.');
+            return;
+        }
+        if (intervals.length < trackIntervals) return;
+
+        const completedLaps = Math.min(totalLaps, Math.floor(intervals.length / trackIntervals));
+        let bestLapSec = Infinity;
+        for (let i = 0; i < completedLaps; i++) {
+            let lapTime = 0;
+            for (let j = 0; j < trackIntervals; j++) {
+                lapTime += intervals[i * trackIntervals + j];
+            }
+            if (lapTime > 0) bestLapSec = Math.min(bestLapSec, lapTime);
+        }
+        if (bestLapSec === Infinity) return;
+
+        const bestLapMs    = Math.round(bestLapSec * 1000);
+        const isNewRecord  = updateBestLap(trackName, carImg, bestLapMs);
+        if (isNewRecord) launchFirework();
+        if ($('#rslogLapPanelContent').is(':visible')) renderLapTable();
+    } catch (error) {
+        console.warn('[Racing Logger] Could not parse best-lap data.', error);
+    }
+}
+
+function parseCarImg() {
+    const img = document.querySelector('.car-selected .torn-item');
+    if (img && img.src) return img.src.replace('/large.png', '/small.png');
+    return '';
+}
+
+// ─── Speed Polling ─────────────────────────────────────────────────────────────
+function getCompletion() {
+    const el = document.querySelector('li.pd-completion');
+    if (!el) return NaN;
+    return parseFloat(el.textContent.replace('%', '').trim());
+}
+
+function calculateSpeed(completionDelta, trackLength, totalLaps, elapsedMs) {
+    if (!Number.isFinite(completionDelta) || completionDelta <= 0
+        || !Number.isFinite(trackLength) || trackLength <= 0
+        || !Number.isInteger(totalLaps) || totalLaps <= 0
+        || !Number.isFinite(elapsedMs) || elapsedMs < MIN_SAMPLE_MS || elapsedMs > MAX_SAMPLE_MS) {
+        return NaN;
+    }
+    return completionDelta / 100 * totalLaps * trackLength * 3600000 / elapsedMs;
+}
+
+function startSpeedLoop() {
+    maybeClear();
+    setLoggerStatus('waiting');
+    speedInterval = setInterval(() => {
+        injectRaceToolbar();
+        applyLiveSpeedVisibility();
+        const trackInfo = $('#racingupdatesnew').find('div.track-info');
+        if (trackInfo.length < 1) {
+            setLoggerStatus('waiting');
+            last_compl = -1.0;
+            lastSampleAt = 0;
+            lastSampleTrack = '';
+            lastSampleCar = '';
+            lastSampleLaps = 0;
+            lastSampleRaceId = '';
+            consecutiveInvalidSamples = 0;
+            return;
+        }
+
+        const titleEl  = document.querySelector('div.title-black.t-overflow');
+        const titleText = titleEl ? titleEl.textContent.trim() : '';
+        const parsedTrack = normalizeTrackName(titleText);
+        if (parsedTrack) currentTrack = parsedTrack;
+        const titleLaps = parseLapCount(titleText);
+        if (titleLaps > 0) currentRaceLaps = titleLaps;
+
+        const len    = parseFloat(trackInfo.attr('data-length'));
+        const compl  = getCompletion();
+        const foundCar = parseCarImg();
+        if (foundCar) currentCar = foundCar;
+
+        if (!Number.isFinite(compl) || !Number.isFinite(len)) {
+            setLoggerStatus('waiting');
+            return;
+        }
+
+        if (isRaceCountdown(titleText)) {
+            setLoggerStatus('waiting');
+            last_compl = compl;
+            lastSampleAt = performance.now();
+            lastSampleTrack = currentTrack;
+            lastSampleCar = carKey(currentCar);
+            lastSampleLaps = currentRaceLaps;
+            lastSampleRaceId = currentRaceId;
+            consecutiveInvalidSamples = 0;
+            return;
+        }
+
+        const now = performance.now();
+        const sampleCar = carKey(currentCar);
+        const identityChanged = currentTrack !== lastSampleTrack
+            || sampleCar !== lastSampleCar
+            || currentRaceLaps !== lastSampleLaps
+            || (!!lastSampleRaceId && !!currentRaceId && currentRaceId !== lastSampleRaceId);
+        if (!currentTrack || sampleCar === 'unknown' || currentRaceLaps <= 0
+            || identityChanged || last_compl < 0 || compl < last_compl) {
+            setLoggerStatus(identityChanged && last_compl >= 0 ? 'paused' : 'waiting');
+            last_compl = compl;
+            lastSampleAt = now;
+            lastSampleTrack = currentTrack;
+            lastSampleCar = sampleCar;
+            lastSampleLaps = currentRaceLaps;
+            lastSampleRaceId = currentRaceId;
+            consecutiveInvalidSamples = 0;
+            return;
+        }
+
+        // Keep the previous timestamp while completion is unchanged. This makes
+        // the next measurement cover Torn's real DOM-update interval rather than
+        // assuming that the progress text changes exactly once per poll.
+        if (compl === last_compl) return;
+
+        const elapsedMs = now - lastSampleAt;
+        const completionDelta = compl - last_compl;
+        last_compl = compl;
+        lastSampleAt = now;
+
+        // Discard wake-up/throttling gaps and implausibly short DOM updates. The
+        // new value becomes the next baseline, so no delayed progress is reused.
+        const speed = calculateSpeed(completionDelta, len, currentRaceLaps, elapsedMs);
+        if (!Number.isFinite(speed) || speed <= 10 || speed >= 400) {
+            consecutiveInvalidSamples += 1;
+            if (consecutiveInvalidSamples >= 2) setLoggerStatus('paused');
+            return;
+        }
+        if (Number.isFinite(speed) && speed > 10 && speed < 400) {
+            consecutiveInvalidSamples = 0;
+            lastSampleRaceId = currentRaceId;
+            setLoggerStatus('logging');
+            $('#rslogSpeed, #rslogToolbarSpeed').text(speed.toFixed(2) + ' mph');
+            if (speed > sessionTopSpeed) {
+                sessionTopSpeed = speed;
+                $('#rslogSessionTopVal').text(speed.toFixed(2));
+                $('#rslogToolbarTop').text(speed.toFixed(2) + ' mph');
+            }
+            const previousRecord = currentSpeedRecord(currentTrack, currentCar);
+            const isNewRecord = updateTopSpeed(currentTrack, speed, currentCar);
+            updatePbComparison(speed, previousRecord, isNewRecord);
+            if (isNewRecord) {
+                $('#rslogNewRecord').stop(true, true).show().delay(2000).fadeOut(500);
+                launchFirework();
+                if ($('#rslogSpeedPanelContent').is(':visible')) renderSpeedTable();
+            }
+        }
+    }, POLL_MS);
+}
+
+// ─── Lobby Panel ───────────────────────────────────────────────────────────────
+function injectLobbyPanel() {
+    if ($('#rslogLobbyBtn').length > 0) return;
+
+    const html = `
+        <button id="rslogLobbyBtn">▼ Speed & Lap Log</button>
+        <span id="rslogLobbyVersion" class="rslogVersion">v${SCRIPT_VERSION}</span>
+        <div id="rslogLobbyPanel">
+            <div style="display:flex; gap:0; flex-wrap:wrap;">
+                <div style="flex:1; min-width:220px; padding-right:10px; border-right:1px solid #333;">
+                    <h4 style="margin:4px 0; color:#ff9900;">Top Speeds <span class="rslogInfoIcon" id="rslogSpeedInfoIcon" title="Top speed is a pet peeve of mine to challenge Ched's top speed theory. It only works while this tab is open and not sleeping/backgrounded. It can't catch max speeds while the racing tab is closed.">ⓘ</span></h4>
+                    <table><colgroup><col style="width:25%"><col style="width:18%"><col style="width:26%"><col style="width:25%"><col style="width:6%"></colgroup>
+                    <thead><tr><th>Track</th><th>Car</th><th>Top Speed</th><th>Date</th><th aria-label="Actions"></th></tr></thead><tbody id="rslogLobbySpeedBody"></tbody></table>
+                </div>
+                <div style="flex:1; min-width:220px; padding-left:10px;">
+                    <h4 style="margin:4px 0; color:#00cfff;">Best Laps</h4>
+                    <table><colgroup><col style="width:25%"><col style="width:18%"><col style="width:26%"><col style="width:25%"><col style="width:6%"></colgroup>
+                    <thead><tr><th>Track</th><th>Car</th><th>Best Lap</th><th>Date</th><th aria-label="Actions"></th></tr></thead><tbody id="rslogLobbyLapBody"></tbody></table>
+                </div>
+            </div>
+            <div id="rslogLobbyFooter">
+                <a id="rslogLobbySpeedCsv" class="rslogCsvBtn" href="#">⬇ Speeds CSV</a>
+                <span id="rslogLobbySpeedCopy" class="rslogCsvBtn" style="cursor:pointer;">📋 Copy Speeds</span>
+                <a id="rslogLobbyLapCsv" class="rslogCsvBtn" href="#">⬇ Laps CSV</a>
+                <span id="rslogLobbyLapCopy" class="rslogCsvBtn" style="cursor:pointer;">📋 Copy Laps</span>
+                <span id="rslogLobbyClearBtn" class="rslogClearBtn">✕ Clear All</span>
+            </div>
+        </div>
+    `;
+
+    $('#racingAdditionalContainer').prepend(html);
+
+    wireInfoIcon('#rslogSpeedInfoIcon');
+
+    $('#rslogLobbyBtn').on('click', function () {
+        const panel  = $('#rslogLobbyPanel');
+        const open = !panel.is(':visible');
+        GM_setValue(SETTING_LOBBY_OPEN, open);
+        setPanelOpen('#rslogLobbyPanel', '#rslogLobbyBtn', open, 'Speed & Lap Log', 'Speed & Lap Log');
+        if (open) { renderLobbySpeedTable(); renderLobbyLapTable(); }
+    });
+
+    wireRecordDelete('#rslogLobbyPanel');
+
+    $('#rslogLobbySpeedCsv').on('click', e => { e.preventDefault(); downloadSpeedCsv(); });
+    $('#rslogLobbyLapCsv').on('click', e => { e.preventDefault(); downloadLapCsv(); });
+
+    $('#rslogLobbySpeedCopy').on('click', () => {
+        showCsvModal(buildSpeedCsv(false), 'torn_top_speeds.csv');
+    });
+
+    $('#rslogLobbyLapCopy').on('click', () => {
+        showCsvModal(buildLapCsv(false), 'torn_best_laps.csv');
+    });
+
+    $('#rslogLobbyClearBtn').on('click', () => {
+        if (confirm('Clear ALL records?')) {
+            saveSpeedLog({});
+            renderLobbySpeedTable();
+            renderLobbyLapTable();
+        }
+    });
+
+    const lobbyOpen = getBooleanSetting(SETTING_LOBBY_OPEN, false);
+    setPanelOpen('#rslogLobbyPanel', '#rslogLobbyBtn', lobbyOpen, 'Speed & Lap Log', 'Speed & Lap Log');
+    if (lobbyOpen) { renderLobbySpeedTable(); renderLobbyLapTable(); }
+}
+
+function renderLobbySpeedTable() {
+    const log = getSpeedLog();
+    const tbody = $('#rslogLobbySpeedBody');
+    tbody.empty();
+    const entries = Object.entries(log).filter(([,d]) => d.topSpeed > 0).sort((a,b) => b[1].topSpeed - a[1].topSpeed);
+    if (entries.length === 0) {
+        tbody.append('<tr><td colspan="5" style="color:#555;">No records</td></tr>');
+        return;
+    }
+    for (const [key, data] of entries) {
+        const trackName = data.track || key.split('|')[0];
+        const carHtml   = data.car
+            ? `<img src="${escapeHtml(data.car)}" title="${escapeHtml(carName(data.car) || 'Unknown')}">${classBadgeHtml(data.car)}`
+            : '–';
+        const speedIso  = data.speedDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
+        tbody.append(`
+            <tr><td>${escapeHtml(trackName)}</td>
+            <td class="rslogCar" style="width:58px;">${carHtml}</td>
+            <td class="rslogTopSpeed">${data.topSpeed.toFixed(2)} mph</td>
+            ${dateCellHtml(speedIso, 'rslogDateToday')}
+            <td class="rslogActionCell"><button class="rslogRowDelete" type="button" data-kind="speed" data-key="${escapeHtml(key)}" title="Delete this speed record">×</button></td></tr>
+        `);
+    }
+}
+
+function renderLobbyLapTable() {
+    const log = getSpeedLog();
+    const tbody = $('#rslogLobbyLapBody');
+    tbody.empty();
+    const entries = Object.entries(log).filter(([,d]) => d.bestLapMs > 0).sort((a,b) => (a[1].bestLapMs || Infinity) - (b[1].bestLapMs || Infinity));
+    if (entries.length === 0) {
+        tbody.append('<tr><td colspan="5" style="color:#555;">No records</td></tr>');
+        return;
+    }
+    for (const [key, data] of entries) {
+        const trackName = data.track || key.split('|')[0];
+        const carHtml   = data.car
+            ? `<img src="${escapeHtml(data.car)}" title="${escapeHtml(carName(data.car) || 'Unknown')}">${classBadgeHtml(data.car)}`
+            : '–';
+        const lapIso    = data.lapDate || (data.date ? data.date + 'T00:00:00.000Z' : '');
+        tbody.append(`
+            <tr><td>${escapeHtml(trackName)}</td>
+            <td class="rslogCar" style="width:58px;">${carHtml}</td>
+            <td class="rslogBestLap">${formatLapTime(data.bestLapMs)}</td>
+            ${dateCellHtml(lapIso, 'rslogDateTodayLap')}
+            <td class="rslogActionCell"><button class="rslogRowDelete" type="button" data-kind="lap" data-key="${escapeHtml(key)}" title="Delete this lap record">×</button></td></tr>
+        `);
+    }
+}
+
+// ─── Cleanup ───────────────────────────────────────────────────────────────────
+function cleanupRaceState(preserveRaceData = false) {
+    maybeClear();
+    stopParticipantRsObserver();
+    ['rslogWrapper', 'rslogRaceToolbar', 'rslogLobbyBtn', 'rslogLobbyVersion', 'rslogLobbyPanel'].forEach(id => {
+        document.getElementById(id)?.remove();
+    });
+    $('.rslogOwnedPopover').remove();
+    $(document).off('.rslogInfo');
+    currentTrack    = '';
+    currentCar      = '';
+    currentRaceLaps = 0;
+    if (!preserveRaceData) {
+        clearParticipantRsQueue();
+        closeParticipantRsModal();
+        removeRaceResultLabels();
+        currentRaceId = '';
+        cachedRaceResults = null;
+        lastRaceResultKey = '';
+        lastResultsRenderAt = 0;
+        raceResultsVisible = false;
+    }
+    last_compl      = -1.0;
+    sessionTopSpeed = 0;
+    _initialized    = false;
+}
+
+// ─── Init ──────────────────────────────────────────────────────────────────────
+let _raceHealthInterval = 0;
+let _currentHref = location.href;
+
+function checkRaceDom() {
+    if (location.href !== _currentHref) {
+        _currentHref = location.href;
+        if (!location.href.includes('sid=racing')) cleanupRaceState();
+    }
+
+    const hasDetails = !!document.getElementById('racingdetails');
+    const hasLobby = !!document.getElementById('racingAdditionalContainer');
+
+    if (hasDetails && !document.getElementById('rslogWrapper')) {
+        cleanupRaceState(true);
+        injectWidget();
+        startSpeedLoop();
+    }
+    if (hasDetails) {
+        injectRaceToolbar();
+        applyLiveSpeedVisibility();
+        renderRaceResultsToLeaderboard();
+        paintParticipantRsBadges();
+    }
+    if (!hasDetails && (document.getElementById('rslogWrapper') || document.getElementById('rslogRaceToolbar'))) {
+        cleanupRaceState();
+    }
+    if (hasLobby && !hasDetails) {
+        injectLobbyPanel();
+    }
+    if (!hasLobby && !hasDetails) {
+        maybeClear();
+    }
+}
+
+function watchForRaceStart() {
+    if (_raceHealthInterval) return;
+    _raceHealthInterval = setInterval(checkRaceDom, HEALTH_CHECK_MS);
+}
+
+let _initialized = false;
+
+function init() {
+    if (_initialized) return;
+    _initialized = true;
+    migrateSpeedLog();
+    if (document.getElementById('racingdetails') && !document.getElementById('rslogWrapper')) {
+        injectWidget();
+        startSpeedLoop();
+    } else if (document.getElementById('racingAdditionalContainer') && !document.getElementById('racingdetails')) {
+        injectLobbyPanel();
+    }
+    watchForRaceStart();
+}
+
+function bootstrapWhenReady() {
+    applyPdaModeClass();
+    if (typeof pageWindow.$ !== 'function' || !document.body) {
+        setTimeout(bootstrapWhenReady, 50);
+        return;
+    }
+    tornAjax(() => { init(); });
+    init();
+}
+
+bootstrapWhenReady();
