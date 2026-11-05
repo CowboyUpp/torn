@@ -892,6 +892,14 @@
             return;
         }
 
+        // Compact note explaining page-scoped script registration. Keep this
+        // inline with Settings rather than adding a separate help/FAQ section.
+        const hint = document.createElement('div');
+        hint.className = 'tsh-prefs-page-hint';
+        hint.textContent = 'Settings are shown only for scripts currently active on this page. If a script is missing, visit one of the pages it supports, then reopen Script Hub → Settings.';
+        hint.title = 'Scripts register with Script Hub only while they are running on a supported Torn page.';
+        container.appendChild(hint);
+
         const list = document.createElement('div');
         list.className = 'tsh-prefs-list';
 
@@ -2239,6 +2247,12 @@ function closeMultiPopover() {
             .tsh-script-toggle.active { color:#4e8ac7; border-color:rgba(78,138,199,.65); opacity:1; }
             .tsh-script-inactive-note { margin-right:10px; font-size:10px; opacity:.55; font-style:italic; white-space:nowrap; }
 
+            .tsh-prefs-page-hint {
+                margin:0 0 8px; padding:8px 10px;
+                border:1px solid var(--tsh-border,#bbb); border-radius:4px;
+                background:var(--tsh-row-bg,rgba(0,0,0,.025));
+                color:var(--tsh-text,#222); font-size:11px; line-height:1.45; opacity:.8;
+            }
             .tsh-prefs-list { display:flex; flex-direction:column; gap:4px; }
             .tsh-prefs-row {
                 min-height:36px; display:flex; align-items:center; justify-content:space-between;
