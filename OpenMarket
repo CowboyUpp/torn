@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.3
+// @version      1.9.4
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -32,7 +32,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.9.3';
+    const HUB_VERSION = '1.9.4';
     const HUB_ICON = '';
 
     // =========================================================================
@@ -45,8 +45,8 @@
     // =========================================================================
     const DEFAULT_COLOURS = {
         tiers: {
-            dark:  ['#e4e4e4', '#57efea', '#c286ff', '#ffd700'],
-            light: ['#717171', '#009590', '#8e19c1', '#e37100']
+            dark:  ['#e4e4e4', '#57efea', '#c286ff', '#ffd700', '#e05555'],
+            light: ['#717171', '#009590', '#8e19c1', '#e37100', '#e05555']
         },
         bonus:        { dark: '#e8d1ff', light: '#370b40' },
         qualityBoxBg: { dark: 'rgba(0,0,0,0.8)', light: 'rgba(255,255,255,0.9)' }
@@ -118,6 +118,7 @@
             case 'tier2': return isDark ? DEFAULT_COLOURS.tiers.dark[1]  : DEFAULT_COLOURS.tiers.light[1];
             case 'tier3': return isDark ? DEFAULT_COLOURS.tiers.dark[2]  : DEFAULT_COLOURS.tiers.light[2];
             case 'tier4': return isDark ? DEFAULT_COLOURS.tiers.dark[3]  : DEFAULT_COLOURS.tiers.light[3];
+            case 'tier5': return '#e05555';
             case 'bonus': return isDark ? DEFAULT_COLOURS.bonus.dark     : DEFAULT_COLOURS.bonus.light;
             case 'qbg':   return isDark ? DEFAULT_COLOURS.qualityBoxBg.dark : DEFAULT_COLOURS.qualityBoxBg.light;
             default: return '#000000';
@@ -130,6 +131,7 @@
         'colour.tier2': 'tier2',
         'colour.tier3': 'tier3',
         'colour.tier4': 'tier4',
+        'colour.tier5': 'tier5',
         'colour.bonus': 'bonus',
         'colour.qbg':   'qbg'
     };
@@ -160,6 +162,7 @@
         tier2: 'default',
         tier3: 'default',
         tier4: 'default',
+        tier5: 'default',
         bonus: 'default',
         qbg:   'default'
     };
@@ -169,13 +172,15 @@
             resolvePreset(PRESETS.tier1, 'tier1', true),
             resolvePreset(PRESETS.tier2, 'tier2', true),
             resolvePreset(PRESETS.tier3, 'tier3', true),
-            resolvePreset(PRESETS.tier4, 'tier4', true)
+            resolvePreset(PRESETS.tier4, 'tier4', true),
+            resolvePreset(PRESETS.tier5, 'tier5', true)
         ];
         COLOURS.tiers.light = [
             resolvePreset(PRESETS.tier1, 'tier1', false),
             resolvePreset(PRESETS.tier2, 'tier2', false),
             resolvePreset(PRESETS.tier3, 'tier3', false),
-            resolvePreset(PRESETS.tier4, 'tier4', false)
+            resolvePreset(PRESETS.tier4, 'tier4', false),
+            resolvePreset(PRESETS.tier5, 'tier5', false)
         ];
         COLOURS.bonus.dark        = resolvePreset(PRESETS.bonus, 'bonus', true);
         COLOURS.bonus.light       = resolvePreset(PRESETS.bonus, 'bonus', false);
@@ -197,7 +202,7 @@
             }
             // New preset-based format. If the key exists and looks like the
             // preset format, adopt it. Otherwise ignore and use defaults.
-            const roles = ['tier1', 'tier2', 'tier3', 'tier4', 'bonus', 'qbg'];
+            const roles = ['tier1', 'tier2', 'tier3', 'tier4', 'tier5', 'bonus', 'qbg'];
             let anyAdopted = false;
             roles.forEach(role => {
                 if (typeof saved[role] === 'string' && paletteEntry(saved[role])) {
@@ -207,7 +212,7 @@
             });
             if (!anyAdopted) {
                 // Old format or unrecognised. Reset to Default (per user decision).
-                PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', bonus: 'default', qbg: 'default' };
+                PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
             }
             applyPresetsToColours();
         } catch (_) {
@@ -255,6 +260,7 @@
             mk('colour.tier2', PRESETS.tier2),
             mk('colour.tier3', PRESETS.tier3),
             mk('colour.tier4', PRESETS.tier4),
+            mk('colour.tier5', PRESETS.tier5),
             mk('colour.bonus', PRESETS.bonus),
             mk('colour.qbg',   PRESETS.qbg),
             { key: 'colour.reset', type: 'button', label: 'OK', icon: 'OK' }
@@ -282,6 +288,12 @@
                 rows: [[
                     'colour.tier3', 'colour.tier4'
                 ]]
+            },
+            {
+                table: true,
+                columns: ['Tier 5 (100%+)'],
+                widths: 'minmax(0, 220px)',
+                rows: [['colour.tier5']]
             },
             {
                 table: true,
@@ -315,6 +327,7 @@
             'colour.tier2': PRESETS.tier2,
             'colour.tier3': PRESETS.tier3,
             'colour.tier4': PRESETS.tier4,
+            'colour.tier5': PRESETS.tier5,
             'colour.bonus': PRESETS.bonus,
             'colour.qbg':   PRESETS.qbg
         };
@@ -364,6 +377,7 @@
                     PRESETS.tier2 = v['colour.tier2'] || 'default';
                     PRESETS.tier3 = v['colour.tier3'] || 'default';
                     PRESETS.tier4 = v['colour.tier4'] || 'default';
+                    PRESETS.tier5 = v['colour.tier5'] || 'default';
                     PRESETS.bonus = v['colour.bonus'] || 'default';
                     PRESETS.qbg   = v['colour.qbg']   || 'default';
                     applyPresetsToColours();
@@ -470,7 +484,7 @@
 
     function debugWarn(...args) { if (CONFIG.debug) console.warn('[OpenMarket]', ...args); }
     function checkDarkMode() { darkMode = document.body.classList.contains('dark-mode'); }
-    function getTierColour(percent) { const c = darkMode ? COLOURS.tiers.dark : COLOURS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; return c[3]; }
+    function getTierColour(percent) { const c = darkMode ? COLOURS.tiers.dark : COLOURS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
     function qs(selector, parent = document) { try { return parent.querySelector(selector); } catch (e) { return null; } }
     function qsa(selector, parent = document) { try { return Array.from(parent.querySelectorAll(selector)); } catch (e) { return null; } }
     function create(tag, attrs = {}, children = []) {
@@ -487,7 +501,7 @@
     function computeItemKey(itemID, stats, bonuses) { return `${colourEpoch}|${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
     function isProcessed(el, key) { return processedElements.get(el) === key; }
     function markProcessed(el, key) { processedElements.set(el, key); }
-    function getQualityColour(value, maxRange) { return getTierColour(Math.min(value, 100));}
+    function getQualityColour(value, maxRange) { return getTierColour(value);}
     function getBonusColour() { return darkMode ? COLOURS.bonus.dark : COLOURS.bonus.light; }
 
     function extractStats(el, selectors) {
