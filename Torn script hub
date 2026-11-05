@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      4.5.1
+// @version      4.5.7
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -19,7 +19,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.5.1';
+    const HUB_VERSION = '4.5.7';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -58,6 +58,7 @@
     // =========================================================================
     const CONTACT_URL = 'https://www.torn.com/messages.php#/p=compose&XID=1496324';
     const LIBRARY_SCRIPTS = [
+        { id: 600909, name: 'Crime Morale Scamming', description: 'Scamming solver extracted from Crime Morale. Includes Exp, Decepticon, and Grift Horse strategies.' },
         { id: 586532, name: 'Bustr+', description: 'Busting reminder with a jail-page UI and PDA support.' },
         { id: 587751, name: 'No Confirm Market & Bazaar', description: 'Skips the confirmation step when buying on the Item Market or Bazaar.' },
         { id: 596397, name: 'Market Quick Buy', description: 'Moves TornW3B bazaar listings below the native Item Market seller row. Layout only — no purchase clicks.' },
@@ -66,11 +67,14 @@
         { id: 591579, name: 'Pickpocketing Alert', description: 'Beeps and highlights pickpocketing targets you choose, filtered by gender, status and build.' },
         { id: 589775, name: 'OpenMarket', description: 'Overlays item quality % and bonus info on the Item Market, Auction House, and Bazaar.' },
         { id: 587089, name: 'Cracking Heat Badge', description: 'Shows a live heat badge while cracking.' },
+        { id: 598946, name: 'Cute Cop Running', description: 'Tracks the female Police Officer running: sightings, outcomes, timestamps, and the countdown to her next appearance.' },
+        { id: 593630, name: 'Armory Loaned Status & Bounty Timers incl Points Market', description: 'Armory status dots + live hospital/travel timers on the Bounties page. Uses a minimal custom API key.' },
         { id: 585434, name: 'Item Market Portfolio', description: 'Tracks the value of your Item Market listings over time.' },
         { id: 582128, name: 'Activity Log Filter & CSV', description: 'Filters your activity log and exports it to CSV.' },
         { id: 588262, name: 'Torn: Travel Inventory', description: 'Shows your travel inventory and item info while abroad.' },
         { id: 583629, name: 'Torn City Map Finder', description: 'Map pins and city-find list above the city map. Optional Public API values; no automated pickup.' },
-        { id: 592376, name: 'Torn Rental Ledger', description: 'Per-property + portfolio rental income ledger on yourProperties. Hub settings; Generate User/Log key (user=log,properties).' }
+        { id: 592376, name: 'Torn Rental Ledger', description: 'Per-property + portfolio rental income ledger on yourProperties. Hub settings; Generate User/Log key (user=log,properties).' },
+        { id: 601351, name: 'Simple Voice Navigation', description: 'Voice commands for Torn: open pages and Crimes 2.0 subcrimes, or train a stat, with a microphone button in the chat bar. Desktop Chrome/Edge only.' },
     ];
 
     const registry = new Map();
@@ -919,11 +923,11 @@
 
         container.innerHTML = '';
 
+        // Match v4.5.1 behaviour: the settings panel never widens. Any table
+        // too wide for the standard panel scrolls inside its own container
+        // (the scroll hint arrow appears automatically when needed).
         const widePanel = container.closest('.tsh-dash-panel');
-        if (widePanel) {
-            widePanel.classList.toggle('tsh-dash-wide',
-                Array.isArray(script.prefs.sections) && script.prefs.sections.some(s => s && s.table));
-        }
+        if (widePanel) widePanel.classList.remove('tsh-dash-wide');
 
         const header = document.createElement('div');
         header.className = 'tsh-prefs-detail-header';
@@ -1049,17 +1053,24 @@
         const sec = document.createElement('div');
         sec.className = 'tsh-pref-section tsh-pref-section-row';
 
-        const headRow = document.createElement('div');
-        headRow.className = 'tsh-pref-section-head';
-        const title = document.createElement('div');
-        title.className = 'tsh-pref-section-title';
-        title.textContent = section.title || '';
-        const hint = document.createElement('button');
-        hint.type = 'button';
-        hint.className = 'tsh-scroll-hint';
-        hint.hidden = true;
-        headRow.append(title, hint);
-        sec.appendChild(headRow);
+        // Only render the section header row when there's a title to show.
+        // When absent, the table floats without a header strip.
+        if (section.title) {
+            const headRow = document.createElement('div');
+            headRow.className = 'tsh-pref-section-head';
+            const title = document.createElement('div');
+            title.className = 'tsh-pref-section-title';
+            title.textContent = section.title;
+            const hint = document.createElement('button');
+            hint.type = 'button';
+            hint.className = 'tsh-scroll-hint';
+            hint.hidden = true;
+            headRow.append(title, hint);
+            sec.appendChild(headRow);
+
+            // Stash the hint on the section so attachScrollHint can find it.
+            sec._tshScrollHint = hint;
+        }
 
         const outer = document.createElement('div');
         outer.className = 'tsh-table-outer';
@@ -1097,7 +1108,11 @@
         outer.appendChild(wrap);
         sec.appendChild(outer);
         body.appendChild(sec);
-        attachScrollHint(wrap, outer, hint);
+
+        // Attach the scroll hint only if a header row was rendered.
+        if (sec._tshScrollHint) {
+            attachScrollHint(wrap, outer, sec._tshScrollHint);
+        }
     }
 
     function appendLegacyPrefGroups(body, fields, script, refreshStatus) {
@@ -1203,6 +1218,41 @@ function closeMultiPopover() {
         document.addEventListener('keydown', onKey, true);
     }
 
+    // -------------------------------------------------------------------------
+    // COLOR HELPERS — normalise any CSS colour string to #rrggbb for the
+    // native <input type="color"> swatch, keeping the original string as the
+    // authoritative value (so rgba() alpha round-trips).
+    // -------------------------------------------------------------------------
+    function isRgbaString(str) {
+        return /^rgba?\s*\(/i.test(String(str || '').trim());
+    }
+
+    function rgbaToHex(str) {
+        const m = String(str || '').trim().match(/^rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+        if (!m) return '#000000';
+        const hex = n => Number(n).toString(16).padStart(2, '0');
+        return '#' + hex(m[1]) + hex(m[2]) + hex(m[3]);
+    }
+
+    function hexToRgba(hex, alpha) {
+        const h = String(hex || '').replace('#', '');
+        if (!/^[0-9a-f]{6}$/i.test(h)) return hex;
+        const r = parseInt(h.slice(0, 2), 16);
+        const g = parseInt(h.slice(2, 4), 16);
+        const b = parseInt(h.slice(4, 6), 16);
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    function normaliseHex(str) {
+        const s = String(str || '').trim();
+        if (/^#[0-9a-f]{6}$/i.test(s)) return s.toLowerCase();
+        if (/^#[0-9a-f]{3}$/i.test(s)) {
+            return ('#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3]).toLowerCase();
+        }
+        if (isRgbaString(s)) return rgbaToHex(s);
+        return '#000000';
+    }
+
     function createPrefField(script, field, onAfterSave, compact) {
         const wrap = document.createElement('div');
         wrap.className = 'tsh-pref-field';
@@ -1293,6 +1343,61 @@ function closeMultiPopover() {
                 input.setAttribute('aria-pressed', script.prefs.values[field.key] ? 'true' : 'false');
                 triggerSave();
             });
+        } else if (field.type === 'color') {
+            // Native color swatch paired with a text input so rgba() strings
+            // (with alpha) survive a round-trip. The text input is authoritative.
+            const current = String(script.prefs.values[field.key] ?? field.default ?? '#000000');
+
+            const row = document.createElement('div');
+            row.className = 'tsh-pref-color';
+
+            const swatch = document.createElement('input');
+            swatch.type = 'color';
+            swatch.className = 'tsh-pref-color-swatch';
+            swatch.value = normaliseHex(current);
+            swatch.title = field.hint || field.label || 'Pick colour';
+            swatch.setAttribute('aria-label', (field.label || field.key) + ' swatch');
+
+            const text = document.createElement('input');
+            text.type = 'text';
+            text.className = 'tsh-pref-color-text';
+            text.value = current;
+            text.spellcheck = false;
+            text.title = 'Accepts #rrggbb or rgba(r,g,b,a)';
+            text.setAttribute('aria-label', (field.label || field.key) + ' value');
+
+            swatch.addEventListener('input', () => {
+                // Preserve alpha if the current value was rgba — only the RGB changes.
+                let next = swatch.value;
+                const prev = String(script.prefs.values[field.key] || '');
+                if (isRgbaString(prev)) {
+                    const alphaMatch = prev.match(/,\s*([0-9.]+)\s*\)\s*$/);
+                    const alpha = alphaMatch ? alphaMatch[1] : '1';
+                    next = hexToRgba(swatch.value, alpha);
+                }
+                text.value = next;
+                script.prefs.values[field.key] = next;
+                triggerSave();
+            });
+
+            text.addEventListener('change', () => {
+                const v = text.value.trim();
+                script.prefs.values[field.key] = v;
+                swatch.value = normaliseHex(v);
+                triggerSave();
+            });
+            text.addEventListener('blur', () => {
+                if (text.value !== script.prefs.values[field.key]) {
+                    const v = text.value.trim();
+                    script.prefs.values[field.key] = v;
+                    swatch.value = normaliseHex(v);
+                    triggerSave();
+                }
+            });
+
+            row.append(swatch, text);
+            wrap.appendChild(row);
+            return wrap;
         } else if (field.type === 'multi' && Array.isArray(field.options)) {
             input = document.createElement('button');
             input.type = 'button';
@@ -1335,10 +1440,42 @@ function closeMultiPopover() {
                 if (String(script.prefs.values[field.key]) === String(o.value)) o.selected = true;
                 input.appendChild(o);
             });
+
+            // Optional tiny swatch that mirrors the currently selected value.
+            let swatch = null;
+            if (field.swatch === true) {
+                swatch = document.createElement('span');
+                swatch.className = 'tsh-pref-swatch';
+                swatch.setAttribute('aria-hidden', 'true');
+
+                const paintSwatch = () => {
+                    let colour = 'transparent';
+                    if (typeof field.swatchValue === 'function') {
+                        try {
+                            const v = field.swatchValue(input.value);
+                            if (typeof v === 'string' && v.trim()) colour = v.trim();
+                        } catch (_) { /* keep fallback */ }
+                    }
+                    swatch.style.background = colour;
+                };
+                paintSwatch();
+                input.addEventListener('change', paintSwatch);
+            }
+
             input.addEventListener('change', () => {
                 script.prefs.values[field.key] = input.value;
                 triggerSave();
             });
+
+            // Wrap select + optional swatch in a flex row so the swatch sits
+            // inline, vertically centred, no taller than the text.
+            if (swatch) {
+                const row = document.createElement('div');
+                row.className = 'tsh-pref-select-row';
+                row.append(input, swatch);
+                wrap.appendChild(row);
+                return wrap;
+            }
         } else {
             input = document.createElement('input');
             input.className = 'tsh-pref-input';
@@ -2132,7 +2269,7 @@ function closeMultiPopover() {
                 display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:6px;
             }
             .tsh-pref-stack { display:flex; flex-direction:column; gap:6px; }
-            .tsh-pref-btn-row { display:flex; flex-wrap:wrap; gap:6px; }
+            .tsh-pref-btn-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
             .tsh-pref-section-row {
                 padding:8px 10px; border:1px solid var(--tsh-border,#bbb); border-radius:4px;
                 background:var(--tsh-row-bg,rgba(0,0,0,.02));
@@ -2156,6 +2293,20 @@ function closeMultiPopover() {
                 background:var(--tsh-input-bg,#fff); color:var(--tsh-text,#222);
                 font-size:12px; min-height:26px;
             }
+            /* Select + inline swatch */
+            .tsh-pref-select-row {
+                display:flex; align-items:center; gap:6px; min-width:0;
+            }
+            .tsh-pref-select-row .tsh-pref-select { flex:1 1 auto; min-width:0; }
+            .tsh-pref-swatch {
+                flex:0 0 auto;
+                display:inline-block;
+                width:12px; height:12px;
+                border-radius:2px;
+                border:1px solid var(--tsh-border,#bbb);
+                vertical-align:middle;
+                box-sizing:border-box;
+            }
             .tsh-pref-toggle {
                 align-self:flex-start; min-width:44px; min-height:22px; padding:2px 8px;
                 border:1px solid var(--tsh-border,#bbb); border-radius:11px;
@@ -2164,14 +2315,32 @@ function closeMultiPopover() {
             }
             .tsh-pref-toggle.active { background:#4e8ac7; border-color:#4e8ac7; color:#fff; }
             .tsh-pref-btn {
-                padding:5px 10px; border:1px solid #3d6eac; border-radius:3px;
+                padding:6px 14px; border:1px solid #3d6eac; border-radius:3px;
                 background:#3d6eac; color:#fff; font-size:12px; font-weight:600;
                 cursor:pointer; min-height:28px;
+                white-space:nowrap;
             }
             .tsh-pref-btn:hover { background:#355e94; }
             .tsh-prefs-footer {
                 margin-top:10px; padding-top:6px; border-top:1px solid var(--tsh-border,#bbb);
                 font-size:10px; opacity:.5; text-align:center;
+            }
+
+            /* Colour picker field: swatch + text input on one line */
+            .tsh-pref-color {
+                display:flex; align-items:center; gap:4px; min-width:0;
+            }
+            .tsh-pref-color-swatch {
+                flex:0 0 auto; width:28px; height:26px; padding:0; margin:0;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:transparent; cursor:pointer;
+            }
+            .tsh-pref-color-text {
+                flex:1 1 auto; min-width:0; box-sizing:border-box;
+                padding:3px 6px; min-height:26px;
+                border:1px solid var(--tsh-border,#bbb); border-radius:3px;
+                background:var(--tsh-input-bg,#fff); color:var(--tsh-text,#222);
+                font-size:11px; font-family:monospace;
             }
 
             .tsh-dash-panel.tsh-dash-wide { width:min(100%, 720px); }
@@ -2185,7 +2354,7 @@ function closeMultiPopover() {
                 font-size:12px; line-height:1; cursor:pointer;
             }
             .tsh-scroll-hint { background:#4e8ac7; border-color:#4e8ac7; color:#fff; }
-            .tsh-scroll-hint:hover { filter:brightness(.92); } }
+            .tsh-scroll-hint:hover { filter:brightness(.92); }
             .tsh-scroll-hint[hidden] { display:none; }
             .tsh-table-outer { position:relative; }
             .tsh-table-outer.tsh-more::after {
@@ -2193,7 +2362,7 @@ function closeMultiPopover() {
                 pointer-events:none;
                 background:linear-gradient(to right, transparent, var(--tsh-bg,#f5f5f5));
             }
-            .tsh-table { min-width:500px; display:flex; flex-direction:column; gap:6px; }
+            .tsh-table { min-width:0; display:flex; flex-direction:column; gap:6px; }
             .tsh-table-row { display:grid; gap:4px; align-items:center; }
             .tsh-table-head {
                 font-size:10px; font-weight:700; opacity:.6;
@@ -2384,6 +2553,9 @@ function closeMultiPopover() {
                 .tsh-pref-row { grid-template-columns:1fr 1fr; }
                 .tsh-lib-row { flex-direction:column; align-items:flex-start; }
                 .tsh-lib-install { align-self:flex-end; }
+                /* Stack colour swatch above text input on very narrow screens */
+                .tsh-pref-color { flex-direction:column; align-items:stretch; }
+                .tsh-pref-color-swatch { width:100%; height:30px; }
             }
             @media (max-width: 360px) {
                 .tsh-pref-grid, .tsh-pref-toggles { grid-template-columns:1fr; }
