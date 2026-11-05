@@ -227,7 +227,7 @@
     }
 
     function resetColours() {
-        PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', bonus: 'default', qbg: 'default' };
+        PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
         applyPresetsToColours();
         saveColours();
         colourEpoch++;
