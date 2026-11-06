@@ -8,7 +8,8 @@
 // @match        https://www.torn.com/amarket.php*
 // @match        https://www.torn.com/bazaar.php*
 // @match        https://www.torn.com/displaycase.php*
-// @match        https://www.torn.com/item.php*\n// @match        https://www.torn.com/factions.php*
+// @match        https://www.torn.com/item.php*
+// @match        https://www.torn.com/factions.php*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @run-at       document-start
@@ -1084,7 +1085,8 @@
         if (href.includes('amarket.php')) return 'auctionHouse';
         if (href.includes('bazaar.php')) return 'bazaar';
         if (href.includes('displaycase.php')) return 'displayCase';
-        if (href.includes('item.php')) return 'inventory';\n        if (href.includes('factions.php') && href.includes('armoury') && /[?&#]sub=(weapons|armour)/.test(href)) return 'factionArmoury';
+        if (href.includes('item.php')) return 'inventory';
+        if (href.includes('factions.php') && href.includes('armoury') && /[?&#]sub=(weapons|armour)/.test(href)) return 'factionArmoury';
         return null;
     }
 
@@ -1106,7 +1108,8 @@
             auctionHouse: CONFIG.enableAuctionHouse,
             bazaar: CONFIG.enableBazaar,
             displayCase: CONFIG.enableDisplayCase,
-            inventory: CONFIG.enableInventory
+            inventory: CONFIG.enableInventory,
+            factionArmoury: true
         };
         if (!type || !enabledMap[type]) { teardownCurrentHandler(); currentHandler = null; return; }
         const nextHandler = handlers[type];
