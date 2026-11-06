@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.4
+// @version      1.9.5
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
 // @match        https://www.torn.com/bazaar.php*
 // @match        https://www.torn.com/displaycase.php*
-// @match        https://www.torn.com/item.php*
+// @match        https://www.torn.com/item.php*\n// @match        https://www.torn.com/factions.php*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @run-at       document-start
@@ -32,7 +32,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.9.4';
+    const HUB_VERSION = '1.9.5';
     const HUB_ICON = '';
 
     // =========================================================================
@@ -1016,6 +1016,64 @@
         }
     };
 
+    // =========================================================================
+    // FACTION ARMOURY — quality badges for weapons and armour
+    // =========================================================================
+    const factionArmoury = {
+        observer: null,
+        processAll() {
+            if (!isPageActive()) return;
+            const href = window.location.href;
+            if (!href.includes('factions.php') || !href.includes('armoury')) return;
+            const subMatch = href.match(/[?&#]sub=(weapons|armour)(?:[&#]|$)/);
+            if (!subMatch) return;
+            const isArmour = subMatch[1] === 'armour';
+
+            document.querySelectorAll('img[src*="/images/items/"]').forEach(img => {
+                const match = img.src.match(/\/images\/items\/(\d+)\//);
+                if (!match) return;
+                const itemID = parseInt(match[1], 10);
+                const base = BASE_STATS_MAP[itemID];
+                if (!base || (isArmour && !base.baseArmour) || (!isArmour && base.baseArmour)) return;
+
+                const card = img.closest('li') || img.closest('[class*="item"]') || img.parentElement?.parentElement;
+                if (!card || card.querySelector('.openmarket-quality-inline')) return;
+                const text = (card.innerText || card.textContent || '').replace(/\s+/g, ' ');
+                const readStat = (label) => {
+                    const re = new RegExp('(?:^|\\s)' + label + '\\s*[:\\-]?\\s*([\\d.]+)', 'i');
+                    const found = text.match(re);
+                    return found ? parseFloat(found[1]) : 0;
+                };
+                const stats = {
+                    damage: readStat('damage'),
+                    accuracy: readStat('accuracy'),
+                    armour: readStat('(?:armor|armour|defence)')
+                };
+                if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) return;
+                const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
+                if (quality === null) return;
+                const maxRange = isArmour ? 100 : 300;
+                const numericQuality = parseFloat(quality);
+                if (numericQuality < -10 || numericQuality > maxRange + 10) return;
+
+                const nameEl = card.querySelector('[class*="name"], [class*="title"]') || img.parentElement;
+                insertQualityInline(nameEl, quality, maxRange);
+            });
+        },
+        init() {
+            const root = document.querySelector('#mainContainer') || document.body;
+            this.observer = new MutationObserver(() => this.processAll());
+            this.observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+            this.processAll();
+        },
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
+            document.querySelectorAll('.openmarket-quality-inline').forEach(el => {
+                if (el.closest('li, [class*="item"]')) el.remove();
+            });
+        }
+    };
+
     function detectPageType(href) {
         if (href.includes('sid=ItemMarket')) {
             if (href.includes('#/addListing') || href.includes('#/viewListing')) {
@@ -1026,7 +1084,7 @@
         if (href.includes('amarket.php')) return 'auctionHouse';
         if (href.includes('bazaar.php')) return 'bazaar';
         if (href.includes('displaycase.php')) return 'displayCase';
-        if (href.includes('item.php')) return 'inventory';
+        if (href.includes('item.php')) return 'inventory';\n        if (href.includes('factions.php') && href.includes('armoury') && /[?&#]sub=(weapons|armour)/.test(href)) return 'factionArmoury';
         return null;
     }
 
@@ -1041,7 +1099,7 @@
 
     function activateHandlerForCurrentUrl() {
         const type = detectPageType(window.location.href);
-        const handlers = { itemMarket, itemMarketSingle, auctionHouse, bazaar, displayCase, inventory };
+        const handlers = { itemMarket, itemMarketSingle, auctionHouse, bazaar, displayCase, inventory, factionArmoury };
         const enabledMap = {
             itemMarket: CONFIG.enableItemMarket,
             itemMarketSingle: CONFIG.enableItemMarket,
