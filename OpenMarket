@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.8
+// @version      1.9.9
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -33,7 +33,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.9.8';
+    const HUB_VERSION = '1.9.9';
     const HUB_ICON = '';
 
     // =========================================================================
@@ -1084,33 +1084,29 @@
                         color: getQualityColour(clamped, maxRange)
                     }
                 });
-                // Keep the item name and quality badge on one line.
-                // Long names shrink with an ellipsis; the badge never wraps below.
-                const titleRow = create('div', {
-                    className: 'openmarket-quality-title-row',
-                    style: {
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        width: '100%',
-                        minWidth: '0',
-                        boxSizing: 'border-box'
-                    }
-                });
-                nameEl.parentNode.insertBefore(titleRow, nameEl);
-                titleRow.appendChild(nameEl);
-                titleRow.appendChild(badge);
+                // Keep the badge inside Torn's existing item-name field.
+                // Reserve space for it and truncate the name behind the badge,
+                // preserving the native Armoury row structure and height.
+                const fullName = nameEl.textContent.trim();
+                if (fullName) nameEl.title = fullName;
                 Object.assign(nameEl.style, {
-                    display: 'block',
-                    flex: '1 1 0%',
-                    minWidth: '0',
-                    maxWidth: '100%',
+                    position: 'relative',
+                    boxSizing: 'border-box',
+                    paddingRight: '62px',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap'
                 });
-                badge.style.flex = '0 0 auto';
-                badge.style.marginLeft = '0';
+                Object.assign(badge.style, {
+                    position: 'absolute',
+                    right: '0',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    marginLeft: '0',
+                    zIndex: '2',
+                    background: getQualityBoxBg()
+                });
+                nameEl.appendChild(badge);
             });
         },
         init() {
