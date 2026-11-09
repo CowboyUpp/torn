@@ -701,12 +701,14 @@
                     <button data-tab="prefs" class="tsh-dash-tab">Settings</button>
                     <button data-tab="library" class="tsh-dash-tab">Library</button>
                     <button data-tab="debug" class="tsh-dash-tab">Debug</button>
+                    <button data-tab="help" class="tsh-dash-tab">Help &amp; Q&amp;A</button>
                 </div>
                 <div class="tsh-dash-body">
                     <div data-panel="launch" class="tsh-dash-panel-content active"></div>
                     <div data-panel="prefs" class="tsh-dash-panel-content"></div>
                     <div data-panel="library" class="tsh-dash-panel-content"></div>
                     <div data-panel="debug" class="tsh-dash-panel-content"></div>
+                    <div data-panel="help" class="tsh-dash-panel-content"></div>
                 </div>
             </div>
         `;
@@ -730,6 +732,7 @@
                 if (tab.dataset.tab === 'launch') renderLaunchPanel(panel);
                 if (tab.dataset.tab === 'library') renderLibraryPanel(panel);
                 if (tab.dataset.tab === 'debug') renderDebugPanel(panel);
+                if (tab.dataset.tab === 'help') renderHelpPanel(panel);
             });
         });
 
@@ -750,6 +753,85 @@
         renderPrefsPanel(dash.querySelector('[data-panel="prefs"]'));
         renderLibraryPanel(dash.querySelector('[data-panel="library"]'));
         renderDebugPanel(dash.querySelector('[data-panel="debug"]'));
+        renderHelpPanel(dash.querySelector('[data-panel="help"]'));
+    }
+
+    // ----- Help & Q&A tab -----
+    function renderHelpPanel(container) {
+        if (!container) return;
+        container.innerHTML = '';
+
+        const intro = document.createElement('div');
+        intro.className = 'tsh-help-intro';
+        intro.textContent = 'Quick answers to common questions about Torn Script Hub and Hub-compatible scripts.';
+        container.appendChild(intro);
+
+        const groups = [
+            {
+                title: 'Getting started',
+                items: [
+                    ['What is Torn Script Hub?',
+                     'Script Hub is a central place to access compatible Torn userscripts, open their settings, browse the Hub library, and check third-party scripts for updates. Your userscript manager still installs and runs the scripts.'],
+                    ['Does Script Hub install scripts for me?',
+                     'No. Install scripts through your userscript manager, such as Tampermonkey, Violentmonkey, or the userscript manager built into Torn PDA. Script Hub provides a central interface for scripts that support its integration.']
+                ]
+            },
+            {
+                title: 'Scripts and settings',
+                items: [
+                    ['Why is a script missing from the Scripts tab?',
+                     'The Hub only lists scripts that have registered with it. A script usually registers when it runs on a Torn page it supports. Open a page where that script is designed to work, then refresh Torn and check the Hub again.'],
+                    ['Why can’t I see a script’s settings?',
+                     'Settings are supplied by the script itself. If the script has not loaded and registered on the current page, its settings may not be available yet. Try opening one of the pages supported by that script and refreshing.'],
+                    ['Does a script need to support Script Hub?',
+                     'Yes. Only scripts that include Script Hub integration can appear in the Scripts and Settings tabs. Other userscripts can still run normally through your userscript manager; they just won’t be managed from those Hub tabs.'],
+                    ['Why does a script show as inactive?',
+                     'The script may not be active on the current page, even though it is installed. Some scripts only run on specific Torn pages. Visit a supported page to let it load and register.']
+                ]
+            },
+            {
+                title: 'Library and Watching',
+                items: [
+                    ['What is the Library?',
+                     'The Library lists scripts that are compatible with Script Hub. Availability and installed status are shown where the Hub can identify them. Select a script’s install option to open its installation page.'],
+                    ['What is Watching?',
+                     'Watching lets you track third-party GreasyFork scripts by pasting a script ID or link. The Hub checks their published version information periodically and can flag an update. Watching does not install, enable, or update the script for you.'],
+                    ['How often are watched scripts checked?',
+                     'Automatic checks are limited to roughly once every 12 hours. You can also use the check option in Watching to request a fresh version check.']
+                ]
+            },
+            {
+                title: 'Troubleshooting',
+                items: [
+                    ['A script is installed, but it still does not appear. What should I try?',
+                     'First, confirm that the script is enabled in your userscript manager. Then visit a Torn page supported by that script and refresh. If it still does not appear, open the Debug tab and use Copy diagnostics when reporting the problem.'],
+                    ['Does disabling Script Hub disable my scripts?',
+                     'No. Disabling the Hub interface hides its controls; it does not turn off the userscripts themselves. Manage script activation in your userscript manager.']
+                ]
+            }
+        ];
+
+        groups.forEach(group => {
+            const heading = document.createElement('div');
+            heading.className = 'tsh-help-group-title';
+            heading.textContent = group.title;
+            container.appendChild(heading);
+
+            group.items.forEach(([question, answer]) => {
+                const details = document.createElement('details');
+                details.className = 'tsh-help-item';
+
+                const summary = document.createElement('summary');
+                summary.textContent = question;
+
+                const content = document.createElement('div');
+                content.className = 'tsh-help-answer';
+                content.textContent = answer;
+
+                details.append(summary, content);
+                container.appendChild(details);
+            });
+        });
     }
 
     // ----- Scripts tab -----
@@ -2221,6 +2303,35 @@ function closeMultiPopover() {
             .tsh-dash-panel-content.active { display:block; }
             .tsh-dash-empty { text-align:center; padding:24px 12px; opacity:.6; font-size:12px; line-height:1.5; }
             .tsh-dash-empty span { font-size:11px; display:block; margin-top:4px; }
+
+            .tsh-help-intro {
+                margin:0 0 10px; font-size:11px; line-height:1.5; opacity:.7;
+            }
+            .tsh-help-group-title {
+                margin:14px 0 6px; font-size:11px; font-weight:700;
+                text-transform:uppercase; letter-spacing:.04em; opacity:.65;
+            }
+            .tsh-help-group-title:first-of-type { margin-top:4px; }
+            .tsh-help-item {
+                margin:0 0 5px; border:1px solid var(--tsh-border,#bbb);
+                border-radius:4px; background:var(--tsh-row-bg,rgba(0,0,0,.02));
+                overflow:hidden;
+            }
+            .tsh-help-item summary {
+                position:relative; padding:9px 28px 9px 10px; cursor:pointer;
+                list-style:none; font-size:11px; font-weight:600; line-height:1.4;
+            }
+            .tsh-help-item summary::-webkit-details-marker { display:none; }
+            .tsh-help-item summary::after {
+                content:'+'; position:absolute; right:10px; top:50%;
+                transform:translateY(-50%); font-size:15px; font-weight:400; opacity:.65;
+            }
+            .tsh-help-item[open] summary::after { content:'−'; }
+            .tsh-help-item summary:hover { background:var(--tsh-hover,rgba(0,0,0,.05)); }
+            .tsh-help-answer {
+                padding:0 10px 10px; font-size:11px; line-height:1.55;
+                opacity:.78; white-space:normal;
+            }
 
             .tsh-script-list { display:flex; flex-direction:column; gap:4px; }
             .tsh-script-row {
