@@ -701,7 +701,7 @@
                     <button data-tab="prefs" class="tsh-dash-tab">Settings</button>
                     <button data-tab="library" class="tsh-dash-tab">Library</button>
                     <button data-tab="debug" class="tsh-dash-tab">Debug</button>
-                    <button data-tab="help" class="tsh-dash-tab">Help &amp; Q&amp;A</button>
+                    <button data-tab="help" class="tsh-dash-tab">Q&amp;A</button>
                 </div>
                 <div class="tsh-dash-body">
                     <div data-panel="launch" class="tsh-dash-panel-content active"></div>
@@ -771,7 +771,7 @@
                 title: 'Getting started',
                 items: [
                     ['What is Torn Script Hub?',
-                     'Script Hub is a central place to access compatible Torn userscripts, open their settings, browse the Hub library, and check third-party scripts for updates. Your userscript manager still installs and runs the scripts.'],
+                     'Script Hub brings the controls and settings for compatible Torn scripts together in one place, instead of having them scattered across different Torn pages. You can also browse the Hub library and track third-party script updates. Your userscript manager still installs and runs the scripts.'],
                     ['Does Script Hub install scripts for me?',
                      'No. Install scripts through your userscript manager, such as Tampermonkey, Violentmonkey, or the userscript manager built into Torn PDA. Script Hub provides a central interface for scripts that support its integration.']
                 ]
@@ -806,7 +806,7 @@
                     ['A script is installed, but it still does not appear. What should I try?',
                      'First, confirm that the script is enabled in your userscript manager. Then visit a Torn page supported by that script and refresh. If it still does not appear, open the Debug tab and use Copy diagnostics when reporting the problem.'],
                     ['Does disabling Script Hub disable my scripts?',
-                     'No. Disabling the Hub interface hides its controls; it does not turn off the userscripts themselves. Manage script activation in your userscript manager.']
+                     'Not necessarily. Disabling the Hub does not directly turn off the userscripts, but some Hub-compatible scripts rely on the Hub interface to display their controls and provide access to their settings. Those controls may disappear while the scripts continue running. To manage whether a script itself is enabled, use your userscript manager.']
                 ]
             }
         ];
