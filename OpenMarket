@@ -1154,6 +1154,9 @@
                 const maxRange = stats.armour > 0 ? 100 : 300;
                 const numericQuality = parseFloat(quality);
                 if (numericQuality < -10 || numericQuality > maxRange + 10) return;
+                const badgeText = `Q ${Math.min(Math.max(numericQuality, 0), maxRange).toFixed(1)}%`;
+                const existingBadge = nameEl.parentElement?.querySelector('.openmarket-quality-inline');
+                if (existingBadge && existingBadge.textContent === badgeText) return;
                 insertQualityInline(nameEl, quality, maxRange);
             });
         },
