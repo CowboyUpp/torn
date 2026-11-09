@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.9.9
+// @version      1.10.0
 // @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -33,7 +33,7 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.9.9';
+    const HUB_VERSION = '1.10.0';
     const HUB_ICON = '';
 
     // =========================================================================
@@ -1123,6 +1123,54 @@
         }
     };
 
+    // =========================================================================
+    // BAZAAR ADD ITEM — inline quality badge in Torn's React item rows
+    // =========================================================================
+    const bazaarAdd = {
+        observer: null,
+        processAll() {
+            if (!isPageActive()) return;
+            document.querySelectorAll('li[data-group="child"]').forEach(row => {
+                const img = row.querySelector('img[src*="/images/items/"]');
+                const nameEl = row.querySelector('.name-wrap .t-overflow');
+                if (!img || !nameEl) return;
+                const match = img.src.match(/\/images\/items\/(\d+)\//);
+                if (!match) return;
+                const itemID = parseInt(match[1], 10);
+                if (!BASE_STATS_MAP[itemID]) return;
+                const stats = { damage: 0, accuracy: 0, armour: 0 };
+                row.querySelectorAll('.bonus-attachment-item-damage-bonus, .bonus-attachment-item-accuracy-bonus, .bonus-attachment-item-armour-bonus, .bonus-attachment-item-armor-bonus, .bonus-attachment-item-defence-bonus, .bonus-attachment-item-defense-bonus').forEach(icon => {
+                    const valueEl = icon.parentElement?.querySelector('span');
+                    const value = parseFloat(valueEl?.textContent);
+                    if (!Number.isFinite(value) || value <= 0) return;
+                    const cls = String(icon.className).toLowerCase();
+                    if (cls.includes('damage')) stats.damage = value;
+                    else if (cls.includes('accuracy')) stats.accuracy = value;
+                    else if (cls.includes('armour') || cls.includes('armor') || cls.includes('defence') || cls.includes('defense')) stats.armour = value;
+                });
+                if (!stats.damage && !stats.accuracy && !stats.armour) return;
+                const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
+                if (quality === null) return;
+                const maxRange = stats.armour > 0 ? 100 : 300;
+                const numericQuality = parseFloat(quality);
+                if (numericQuality < -10 || numericQuality > maxRange + 10) return;
+                insertQualityInline(nameEl, quality, maxRange);
+            });
+        },
+        init() {
+            const root = document.querySelector('#bazaarRoot') || document.querySelector('#mainContainer') || document.body;
+            this.observer = new MutationObserver(() => this.processAll());
+            this.observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class'] });
+            this.processAll();
+        },
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
+            document.querySelectorAll('.openmarket-quality-inline').forEach(el => {
+                if (el.closest('li[data-group="child"]')) el.remove();
+            });
+        }
+    };
+
     function detectPageType(href) {
         if (href.includes('sid=ItemMarket')) {
             if (href.includes('#/addListing') || href.includes('#/viewListing')) {
@@ -1131,7 +1179,7 @@
             return 'itemMarket';
         }
         if (href.includes('amarket.php')) return 'auctionHouse';
-        if (href.includes('bazaar.php')) return 'bazaar';
+        if (href.includes('bazaar.php')) { if (href.includes('#/add')) return 'bazaarAdd'; return 'bazaar'; }
         if (href.includes('displaycase.php')) return 'displayCase';
         if (href.includes('item.php')) return 'inventory';
         if (href.includes('factions.php') && href.includes('armoury') && /[?&#]sub=(weapons|armour)/.test(href)) return 'factionArmoury';
@@ -1149,12 +1197,13 @@
 
     function activateHandlerForCurrentUrl() {
         const type = detectPageType(window.location.href);
-        const handlers = { itemMarket, itemMarketSingle, auctionHouse, bazaar, displayCase, inventory, factionArmoury };
+        const handlers = { itemMarket, itemMarketSingle, auctionHouse, bazaar, bazaarAdd, displayCase, inventory, factionArmoury };
         const enabledMap = {
             itemMarket: CONFIG.enableItemMarket,
             itemMarketSingle: CONFIG.enableItemMarket,
             auctionHouse: CONFIG.enableAuctionHouse,
             bazaar: CONFIG.enableBazaar,
+            bazaarAdd: CONFIG.enableBazaar,
             displayCase: CONFIG.enableDisplayCase,
             inventory: CONFIG.enableInventory,
             factionArmoury: true
