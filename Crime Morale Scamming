@@ -786,6 +786,7 @@
     }
 
     function rememberExistingTargets() {
+      knownTargetEmails.clear();
       document.querySelectorAll(TARGET_SELECTOR).forEach(card => {
         const email = readTargetEmail(card);
         if (email) knownTargetEmails.add(email);
