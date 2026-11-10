@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.40
+// @version      1.4.41
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.41: Do not close an active wave when navigating away from the Scamming page.
 // CHANGELOG 1.4.40: Persist active Spam Wave Tracker state so its timer survives page navigation and reloads.
 // CHANGELOG 1.4.37: Add independent Spam Wave Tracker with live timing, address usage and wave history.
 // CHANGELOG 1.4.36: Bundle jQuery 3.7.0 directly; remove external @require dependency.
@@ -910,6 +911,12 @@
         // Torn may briefly re-render the notice; confirm it is truly gone.
         finishTimer = setTimeout(() => {
           finishTimer = null;
+          // Leaving the Scamming page is not the end of a wave.
+          // Keep the active wave persisted; it will resume when the page returns.
+          if (!document.querySelector('.scamming-root')) {
+            saveTrackerState();
+            return;
+          }
           if (!isWaiting()) finishWave();
           else sync();
         }, 1400);
@@ -1160,7 +1167,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.40',
+      version: '1.4.41',
       order: 20,
       open: handleOpen,
       close: handleClose,
