@@ -746,7 +746,9 @@
     let clockTimer = null;
     let panelOpen = false;
     let lastRender = '';
-    const knownTargetEmails = new Set();
+    const knownTargetEmails = new Set(
+      activeWave && Array.isArray(activeWave.targetEmails) ? activeWave.targetEmails : []
+    );
 
     function readAddressCount() {
       const el = document.querySelector(EMAIL_COUNT_SELECTOR);
