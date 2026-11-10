@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.36
+// @version      1.4.37
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.37: Add independent Spam Wave Tracker with live timing, address usage and wave history.
 // CHANGELOG 1.4.36: Bundle jQuery 3.7.0 directly; remove external @require dependency.
 // CHANGELOG 1.4.35: Guard fetch interceptor to only run on Scamming page. Cap Accelerate recommendations at 3. Fix Hub name matching.
 
@@ -718,6 +719,324 @@
     if ($) $('#crime-morale-value').text(morale.toString());
   }
 
+
+  // =========================================================================
+  // SPAM WAVE TRACKER — observational only; does not touch solver behaviour.
+  // =========================================================================
+  function startSpamWaveTracker() {
+    if (window.__cmSpamWaveTrackerStarted) return;
+    window.__cmSpamWaveTrackerStarted = true;
+
+    const STORAGE_KEY = 'spamWaveTracker';
+    const MAX_HISTORY = 50;
+    const WAITING_SELECTOR = '[class*="awaitingResponses"]';
+    const EMAIL_COUNT_SELECTOR = '[class*="emailAddresses"] [class*="count"] span';
+    const TARGET_SELECTOR = '.crime-option';
+    const LEVELS = {
+      delivery: 1, family: 1, prize: 1, charity: 20, 'tech support': 20,
+      vacation: 40, tax: 40, 'advance-fee': 60, job: 60, romance: 80, investment: 80
+    };
+
+    let saved = getValue(STORAGE_KEY, {}) || {};
+    let history = Array.isArray(saved.waves) ? saved.waves : [];
+    let activeWave = null;
+    let observer = null;
+    let finishTimer = null;
+    let clockTimer = null;
+    let panelOpen = false;
+    let lastRender = '';
+
+    function readAddressCount() {
+      const el = document.querySelector(EMAIL_COUNT_SELECTOR);
+      if (!el) return null;
+      const n = Number(String(el.textContent || '').replace(/[^\d]/g, ''));
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function isWaiting() {
+      return Array.from(document.querySelectorAll(WAITING_SELECTOR))
+        .some(el => /awaiting\s+responses/i.test(el.textContent || ''));
+    }
+
+    function formatDuration(ms) {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      return h > 0
+        ? String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0')
+        : String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[ch]);
+    }
+
+    function saveHistory() {
+      history = history.slice(0, MAX_HISTORY);
+      setValue(STORAGE_KEY, { waves: history });
+    }
+
+    function identifyMethod(target) {
+      const el = target.querySelector('[class*="scamMethod"]');
+      if (!el) return null;
+      const method = String(el.textContent || '').trim();
+      return method || null;
+    }
+
+    function methodLevel(method) {
+      if (!method) return null;
+      const key = method.toLowerCase();
+      return Object.prototype.hasOwnProperty.call(LEVELS, key) ? LEVELS[key] : null;
+    }
+
+    function startWave() {
+      if (activeWave) return;
+      if (finishTimer) {
+        clearTimeout(finishTimer);
+        finishTimer = null;
+      }
+      activeWave = {
+        id: Date.now(),
+        startedAt: Date.now(),
+        finishedAt: null,
+        startAddresses: readAddressCount(),
+        endAddresses: null,
+        outcomes: 0,
+        targetCount: 0,
+        firstTargetAt: null,
+        lastTargetAt: null,
+        method: null,
+        level: null,
+        targetEmails: []
+      };
+      updateTargets();
+      renderPanel();
+    }
+
+    function updateTargets() {
+      if (!activeWave) return;
+      const seen = new Set(activeWave.targetEmails);
+      const cards = document.querySelectorAll(TARGET_SELECTOR);
+      for (const card of cards) {
+        const emailEl = card.querySelector('[class*="email___"], [class*="email_"]');
+        const email = emailEl ? String(emailEl.textContent || '').trim().toLowerCase() : '';
+        if (!email || seen.has(email)) continue;
+        seen.add(email);
+        activeWave.targetEmails.push(email);
+        activeWave.targetCount = activeWave.targetEmails.length;
+        const method = identifyMethod(card);
+        if (!activeWave.method && method) {
+          activeWave.method = method;
+          activeWave.level = methodLevel(method);
+        }
+        const now = Date.now();
+        if (!activeWave.firstTargetAt) activeWave.firstTargetAt = now;
+        activeWave.lastTargetAt = now;
+      }
+    }
+
+    function updateAddressUsage() {
+      if (!activeWave) return;
+      const current = readAddressCount();
+      if (current !== null && activeWave.startAddresses !== null) {
+        activeWave.endAddresses = current;
+        activeWave.outcomes = Math.max(0, activeWave.startAddresses - current);
+      }
+    }
+
+    function finishWave() {
+      if (!activeWave) return;
+      updateTargets();
+      updateAddressUsage();
+      activeWave.finishedAt = Date.now();
+      activeWave.durationMs = activeWave.finishedAt - activeWave.startedAt;
+      activeWave.firstResponseMs = activeWave.firstTargetAt
+        ? activeWave.firstTargetAt - activeWave.startedAt : null;
+      activeWave.method = activeWave.method || 'Unknown';
+      history.unshift({
+        id: activeWave.id,
+        startedAt: activeWave.startedAt,
+        finishedAt: activeWave.finishedAt,
+        durationMs: activeWave.durationMs,
+        startAddresses: activeWave.startAddresses,
+        endAddresses: activeWave.endAddresses,
+        outcomes: activeWave.outcomes,
+        targetCount: activeWave.targetCount,
+        firstResponseMs: activeWave.firstResponseMs,
+        method: activeWave.method,
+        level: activeWave.level
+      });
+      saveHistory();
+      activeWave = null;
+      renderPanel();
+    }
+
+    function sync() {
+      if (!isEnabled) return;
+      const waiting = isWaiting();
+      if (waiting) {
+        if (finishTimer) {
+          clearTimeout(finishTimer);
+          finishTimer = null;
+        }
+        if (!activeWave) startWave();
+        updateTargets();
+        updateAddressUsage();
+      } else if (activeWave && !finishTimer) {
+        // Torn may briefly re-render the notice; confirm it is truly gone.
+        finishTimer = setTimeout(() => {
+          finishTimer = null;
+          if (!isWaiting()) finishWave();
+          else sync();
+        }, 1400);
+      }
+      renderPanel();
+    }
+
+    function renderPanel() {
+      const panel = document.getElementById('cm-sw-panel');
+      if (!panel || !panelOpen) return;
+      const wave = activeWave;
+      const elapsed = wave ? Date.now() - wave.startedAt : 0;
+      const used = wave && wave.startAddresses !== null && wave.endAddresses !== null
+        ? Math.max(0, wave.startAddresses - wave.endAddresses) : (wave ? wave.outcomes : 0);
+      const currentStatus = wave ? 'WAVE ACTIVE' : 'STANDBY';
+      const method = wave ? (wave.method || 'Detecting…') : 'No active wave';
+      const level = wave && wave.level ? 'Level ' + wave.level : '';
+      const responseDelay = wave && wave.firstTargetAt
+        ? formatDuration(wave.firstTargetAt - wave.startedAt) : '—';
+      const historyHtml = history.slice(0, 6).map(item => {
+        const date = new Date(item.startedAt);
+        const stamp = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return '<div class="cm-sw-history-row">' +
+          '<div class="cm-sw-history-main"><strong>' + escapeHtml(item.method || 'Unknown') +
+          (item.level ? ' ' + escapeHtml(item.level) : '') + '</strong><small>' + escapeHtml(stamp) + '</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + Number(item.outcomes || 0) + '</b><small>outcomes</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + formatDuration(item.durationMs || 0) + '</b><small>duration</small></div>' +
+          '</div>';
+      }).join('');
+      const html = '<div class="cm-sw-topline"><div><div class="cm-sw-kicker">COWBOYUP · CRIME TOOLS</div>' +
+        '<div class="cm-sw-title">Spam Wave Tracker</div></div><button type="button" class="cm-sw-close" aria-label="Close">×</button></div>' +
+        '<div class="cm-sw-status"><span class="cm-sw-dot ' + (wave ? 'is-live' : '') + '"></span>' + currentStatus +
+        '<span class="cm-sw-status-right">' + (wave ? 'OBSERVING' : 'READY') + '</span></div>' +
+        '<div class="cm-sw-hero"><div><small>CURRENT WAVE</small><strong>' + escapeHtml(method) +
+        (level ? ' <em>' + escapeHtml(level) + '</em>' : '') + '</strong></div><div class="cm-sw-clock">' +
+        (wave ? formatDuration(elapsed) : '—') + '</div></div>' +
+        '<div class="cm-sw-metrics">' +
+        '<div><small>OUTCOMES</small><b>' + (wave ? used.toLocaleString() : '—') + '</b></div>' +
+        '<div><small>TARGETS</small><b>' + (wave ? wave.targetCount : '—') + '</b></div>' +
+        '<div><small>FIRST RESPONSE</small><b>' + responseDelay + '</b></div>' +
+        '</div>' +
+        '<div class="cm-sw-addresses"><span>EMAIL ADDRESSES</span><strong>' +
+        (wave && wave.startAddresses !== null ? wave.startAddresses.toLocaleString() : '—') +
+        '</strong><span class="cm-sw-arrow">→</span><strong>' +
+        (wave && wave.endAddresses !== null ? wave.endAddresses.toLocaleString() : (wave ? '…' : '—')) +
+        '</strong></div>' +
+        '<div class="cm-sw-section-title"><span>RECENT WAVES</span><span>' + history.length + ' SAVED</span></div>' +
+        '<div class="cm-sw-history">' + (historyHtml || '<div class="cm-sw-empty">No completed waves yet. Your results will appear here.</div>') + '</div>' +
+        '<div class="cm-sw-footnote">Observational only · Does not alter the Scamming solver</div>';
+      if (panel.innerHTML !== html) panel.innerHTML = html;
+    }
+
+    function ensureUi() {
+      const header = document.querySelector('.crimes-app-header');
+      if (header && !document.getElementById('cm-sw-toggle')) {
+        const button = document.createElement('button');
+        button.id = 'cm-sw-toggle';
+        button.type = 'button';
+        button.className = 'torn-btn';
+        button.textContent = 'Wave Tracker';
+        button.addEventListener('click', () => {
+          panelOpen = !panelOpen;
+          const panel = document.getElementById('cm-sw-panel');
+          if (panel) panel.classList.toggle('is-open', panelOpen);
+          renderPanel();
+        });
+        header.appendChild(button);
+      }
+      if (!document.getElementById('cm-sw-panel') && document.body) {
+        const panel = document.createElement('section');
+        panel.id = 'cm-sw-panel';
+        panel.setAttribute('aria-label', 'Spam Wave Tracker');
+        panel.addEventListener('click', event => {
+          if (event.target.closest('.cm-sw-close')) {
+            panelOpen = false;
+            panel.classList.remove('is-open');
+          }
+        });
+        document.body.appendChild(panel);
+      }
+      const toggle = document.getElementById('cm-sw-toggle');
+      if (toggle) toggle.classList.toggle('cm-sw-live', !!activeWave);
+    }
+
+    function installStyle() {
+      if (document.getElementById('cm-sw-style')) return;
+      const style = document.createElement('style');
+      style.id = 'cm-sw-style';
+      style.textContent = [
+        '#cm-sw-toggle{margin-left:10px!important;font-size:12px!important;line-height:1.4!important;white-space:nowrap!important}',
+        '#cm-sw-toggle.cm-sw-live{border-color:var(--default-blue-color,#4b91d1)!important}',
+        '#cm-sw-panel{display:none;position:fixed;z-index:99999;right:18px;bottom:22px;width:360px;max-width:calc(100vw - 28px);max-height:calc(100vh - 44px);overflow:auto;box-sizing:border-box;padding:16px;border:1px solid var(--crimes-crimeOption-borderBottomColor,#444);border-radius:10px;background:var(--default-bg-panel-color,#20242a);color:var(--crimes-baseText-color,#eee);box-shadow:0 10px 35px #0008;font:13px/1.4 Arial,sans-serif}',
+        '#cm-sw-panel.is-open{display:block}',
+        '.cm-sw-topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}',
+        '.cm-sw-kicker{font-size:9px;letter-spacing:1.5px;color:var(--default-blue-color,#72a9dc);font-weight:700}',
+        '.cm-sw-title{font-size:19px;font-weight:800;letter-spacing:-.3px}',
+        '.cm-sw-close{border:0;background:transparent;color:inherit;font-size:25px;line-height:1;cursor:pointer;padding:0 3px}',
+        '.cm-sw-status{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:5px;background:#7772;font-size:10px;font-weight:800;letter-spacing:1px}',
+        '.cm-sw-dot{width:7px;height:7px;border-radius:50%;background:#888;display:inline-block}',
+        '.cm-sw-dot.is-live{background:#42c985;box-shadow:0 0 8px #42c98599}',
+        '.cm-sw-status-right{margin-left:auto;opacity:.65;font-size:9px}',
+        '.cm-sw-hero{display:flex;align-items:center;justify-content:space-between;padding:16px 2px 13px;border-bottom:1px solid #8884}',
+        '.cm-sw-hero small,.cm-sw-metrics small{display:block;font-size:9px;letter-spacing:1px;opacity:.65;font-weight:700}',
+        '.cm-sw-hero strong{display:block;font-size:16px;margin-top:3px}',
+        '.cm-sw-hero em{font-size:10px;font-style:normal;color:var(--default-blue-color,#72a9dc);font-weight:700}',
+        '.cm-sw-clock{font-size:27px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:1px;color:var(--default-blue-color,#72a9dc)}',
+        '.cm-sw-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:13px 0;border-bottom:1px solid #8884}',
+        '.cm-sw-metrics b{display:block;font-size:20px;margin-top:3px;font-variant-numeric:tabular-nums}',
+        '.cm-sw-addresses{display:flex;align-items:center;gap:8px;padding:11px 0;border-bottom:1px solid #8884;font-size:12px}',
+        '.cm-sw-addresses>span:first-child{margin-right:auto;font-size:9px;letter-spacing:.8px;opacity:.65;font-weight:700}',
+        '.cm-sw-addresses strong{font-variant-numeric:tabular-nums}',
+        '.cm-sw-arrow{opacity:.5}',
+        '.cm-sw-section-title{display:flex;justify-content:space-between;margin:14px 0 7px;font-size:9px;letter-spacing:1px;font-weight:800;opacity:.7}',
+        '.cm-sw-history-row{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid #8883}',
+        '.cm-sw-history-main strong,.cm-sw-history-main small,.cm-sw-history-stats b,.cm-sw-history-stats small{display:block}',
+        '.cm-sw-history-main small,.cm-sw-history-stats small{font-size:9px;opacity:.6;margin-top:2px}',
+        '.cm-sw-history-stats{text-align:right}.cm-sw-history-stats b{font-size:13px;font-variant-numeric:tabular-nums}',
+        '.cm-sw-empty{padding:14px 4px;text-align:center;opacity:.6;font-size:11px}',
+        '.cm-sw-footnote{margin-top:12px;padding-top:9px;border-top:1px solid #8883;font-size:9px;opacity:.55;text-align:center}',
+        '@media(max-width:600px){#cm-sw-panel{right:8px;bottom:8px;width:calc(100vw - 16px);max-width:none}}'
+      ].join('');
+      (document.head || document.documentElement).appendChild(style);
+    }
+
+    function boot() {
+      installStyle();
+      ensureUi();
+      observer = new MutationObserver(() => {
+        ensureUi();
+        sync();
+      });
+      if (document.body) observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+      sync();
+      clockTimer = setInterval(() => {
+        if (activeWave) {
+          ensureUi();
+          renderPanel();
+        }
+      }, 1000);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', boot, { once: true });
+    } else {
+      boot();
+    }
+  }
+
   function renderStyle() {
     addStyle(`
       .cm-sc-info { transform: translateY(1px); }
@@ -757,6 +1076,7 @@
 
   interceptFetch();
   renderMorale();
+  startSpamWaveTracker();
 
   if (document.readyState === 'loading') {
     document.addEventListener('readystatechange', () => {
@@ -788,7 +1108,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.35',
+      version: '1.4.37',
       order: 20,
       open: handleOpen,
       close: handleClose,
