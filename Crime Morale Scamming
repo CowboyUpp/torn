@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.38
+// @version      1.4.39
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,7 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
-// CHANGELOG 1.4.38: Fix Spam Wave Tracker text contrast independently of system/Torn light or dark mode.
+// CHANGELOG 1.4.39: Use a light Torn-style tracker panel, inherit Torn typography and remove CowboyUp branding.
 // CHANGELOG 1.4.37: Add independent Spam Wave Tracker with live timing, address usage and wave history.
 // CHANGELOG 1.4.36: Bundle jQuery 3.7.0 directly; remove external @require dependency.
 // CHANGELOG 1.4.35: Guard fetch interceptor to only run on Scamming page. Cap Accelerate recommendations at 3. Fix Hub name matching.
@@ -932,8 +932,7 @@
           '<div class="cm-sw-history-stats"><b>' + formatDuration(item.durationMs || 0) + '</b><small>duration</small></div>' +
           '</div>';
       }).join('');
-      const html = '<div class="cm-sw-topline"><div><div class="cm-sw-kicker">COWBOYUP · CRIME TOOLS</div>' +
-        '<div class="cm-sw-title">Spam Wave Tracker</div></div><button type="button" class="cm-sw-close" aria-label="Close">×</button></div>' +
+      const html = '<div class="cm-sw-topline"><div class="cm-sw-title">Spam Wave Tracker</div><button type="button" class="cm-sw-close" aria-label="Close">×</button></div>' +
         '<div class="cm-sw-status"><span class="cm-sw-dot ' + (wave ? 'is-live' : '') + '"></span>' + currentStatus +
         '<span class="cm-sw-status-right">' + (wave ? 'OBSERVING' : 'READY') + '</span></div>' +
         '<div class="cm-sw-hero"><div><small>CURRENT WAVE</small><strong>' + escapeHtml(method) +
@@ -1001,40 +1000,40 @@
       style.textContent = [
         '#cm-sw-toggle{margin-left:10px!important;font-size:12px!important;line-height:1.4!important;white-space:nowrap!important}',
         '#cm-sw-toggle.cm-sw-live{border-color:var(--default-blue-color,#4b91d1)!important}',
-        '#cm-sw-panel{display:none;position:fixed;z-index:99999;right:18px;bottom:22px;width:360px;max-width:calc(100vw - 28px);max-height:calc(100vh - 44px);overflow:auto;box-sizing:border-box;padding:16px;border:1px solid #454d58;border-radius:10px;background:#20242a!important;color:#f1f4f8!important;box-shadow:0 10px 35px #0008;font:13px/1.4 Arial,sans-serif;color-scheme:dark}',
-        '#cm-sw-panel *{box-sizing:border-box;color:inherit}',
-        '#cm-sw-panel .cm-sw-kicker,#cm-sw-panel .cm-sw-hero em,#cm-sw-panel .cm-sw-clock{color:#79b8ff}',
-        '#cm-sw-panel .cm-sw-dot.is-live{background:#42c985}',
-        '#cm-sw-panel .cm-sw-close{color:#f1f4f8;background:transparent}',
-        '#cm-sw-panel .cm-sw-empty,#cm-sw-panel .cm-sw-footnote,#cm-sw-panel .cm-sw-history-main small,#cm-sw-panel .cm-sw-history-stats small,#cm-sw-panel .cm-sw-hero small,#cm-sw-panel .cm-sw-metrics small{color:#aeb8c5}',
+        '#cm-sw-panel{display:none;position:fixed;z-index:99999;right:18px;bottom:22px;width:360px;max-width:calc(100vw - 28px);max-height:calc(100vh - 44px);overflow:auto;box-sizing:border-box;padding:16px;border:1px solid #d7dce2;border-radius:10px;background:#fff!important;color:#333!important;box-shadow:0 10px 35px #0003;font:inherit;line-height:1.4;color-scheme:light}',
+        '#cm-sw-panel *{box-sizing:border-box;color:inherit;font-family:inherit}',
+        '#cm-sw-panel .cm-sw-hero em,#cm-sw-panel .cm-sw-clock{color:var(--default-blue-color,#2878bd)}',
+        '#cm-sw-panel .cm-sw-dot.is-live{background:#2da66b}',
+        '#cm-sw-panel .cm-sw-close{color:#333;background:transparent}',
+        '#cm-sw-panel .cm-sw-empty,#cm-sw-panel .cm-sw-footnote,#cm-sw-panel .cm-sw-history-main small,#cm-sw-panel .cm-sw-history-stats small,#cm-sw-panel .cm-sw-hero small,#cm-sw-panel .cm-sw-metrics small{color:#737b84}',
 
         '#cm-sw-panel.is-open{display:block}',
         '.cm-sw-topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}',
-        '.cm-sw-kicker{font-size:9px;letter-spacing:1.5px;color:var(--default-blue-color,#72a9dc);font-weight:700}',
+        
         '.cm-sw-title{font-size:19px;font-weight:800;letter-spacing:-.3px}',
         '.cm-sw-close{border:0;background:transparent;color:inherit;font-size:25px;line-height:1;cursor:pointer;padding:0 3px}',
-        '.cm-sw-status{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:5px;background:#7772;font-size:10px;font-weight:800;letter-spacing:1px}',
+        '.cm-sw-status{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:5px;background:#f0f2f4;font-size:10px;font-weight:800;letter-spacing:1px}',
         '.cm-sw-dot{width:7px;height:7px;border-radius:50%;background:#888;display:inline-block}',
         '.cm-sw-dot.is-live{background:#42c985;box-shadow:0 0 8px #42c98599}',
         '.cm-sw-status-right{margin-left:auto;opacity:.65;font-size:9px}',
-        '.cm-sw-hero{display:flex;align-items:center;justify-content:space-between;padding:16px 2px 13px;border-bottom:1px solid #8884}',
-        '.cm-sw-hero small,.cm-sw-metrics small{display:block;font-size:9px;letter-spacing:1px;opacity:.65;font-weight:700}',
+        '.cm-sw-hero{display:flex;align-items:center;justify-content:space-between;padding:16px 2px 13px;border-bottom:1px solid #e0e3e7}',
+        '.cm-sw-hero small,.cm-sw-metrics small{display:block;font-size:9px;letter-spacing:1px;font-weight:700}',
         '.cm-sw-hero strong{display:block;font-size:16px;margin-top:3px}',
-        '.cm-sw-hero em{font-size:10px;font-style:normal;color:var(--default-blue-color,#72a9dc);font-weight:700}',
-        '.cm-sw-clock{font-size:27px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:1px;color:var(--default-blue-color,#72a9dc)}',
-        '.cm-sw-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:13px 0;border-bottom:1px solid #8884}',
+        '.cm-sw-hero em{font-size:10px;font-style:normal;color:var(--default-blue-color,#2878bd);font-weight:700}',
+        '.cm-sw-clock{font-size:27px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:1px;color:var(--default-blue-color,#2878bd)}',
+        '.cm-sw-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:13px 0;border-bottom:1px solid #e0e3e7}',
         '.cm-sw-metrics b{display:block;font-size:20px;margin-top:3px;font-variant-numeric:tabular-nums}',
-        '.cm-sw-addresses{display:flex;align-items:center;gap:8px;padding:11px 0;border-bottom:1px solid #8884;font-size:12px}',
+        '.cm-sw-addresses{display:flex;align-items:center;gap:8px;padding:11px 0;border-bottom:1px solid #e0e3e7;font-size:12px}',
         '.cm-sw-addresses>span:first-child{margin-right:auto;font-size:9px;letter-spacing:.8px;opacity:.65;font-weight:700}',
         '.cm-sw-addresses strong{font-variant-numeric:tabular-nums}',
         '.cm-sw-arrow{opacity:.5}',
-        '.cm-sw-section-title{display:flex;justify-content:space-between;margin:14px 0 7px;font-size:9px;letter-spacing:1px;font-weight:800;opacity:.7}',
-        '.cm-sw-history-row{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid #8883}',
+        '.cm-sw-section-title{display:flex;justify-content:space-between;margin:14px 0 7px;font-size:9px;letter-spacing:1px;font-weight:800;color:#626a73}',
+        '.cm-sw-history-row{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid #e6e8eb}',
         '.cm-sw-history-main strong,.cm-sw-history-main small,.cm-sw-history-stats b,.cm-sw-history-stats small{display:block}',
-        '.cm-sw-history-main small,.cm-sw-history-stats small{font-size:9px;opacity:.6;margin-top:2px}',
+        '.cm-sw-history-main small,.cm-sw-history-stats small{font-size:9px;color:#737b84;margin-top:2px}',
         '.cm-sw-history-stats{text-align:right}.cm-sw-history-stats b{font-size:13px;font-variant-numeric:tabular-nums}',
-        '.cm-sw-empty{padding:14px 4px;text-align:center;opacity:.6;font-size:11px}',
-        '.cm-sw-footnote{margin-top:12px;padding-top:9px;border-top:1px solid #8883;font-size:9px;opacity:.55;text-align:center}',
+        '.cm-sw-empty{padding:14px 4px;text-align:center;color:#737b84;font-size:11px}',
+        '.cm-sw-footnote{margin-top:12px;padding-top:9px;border-top:1px solid #e6e8eb;font-size:9px;color:#737b84;text-align:center}',
         '@media(max-width:600px){#cm-sw-panel{right:8px;bottom:8px;width:calc(100vw - 16px);max-width:none}}'
       ].join('');
       (document.head || document.documentElement).appendChild(style);
@@ -1151,7 +1150,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.38',
+      version: '1.4.39',
       order: 20,
       open: handleOpen,
       close: handleClose,
