@@ -12,7 +12,7 @@
 // @run-at       document-start
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
-// @require      https://unpkg.com/jquery@3.7.0/dist/jquery.min.js
+// @require      https://raw.githubusercontent.com/CowboyUpp/torn/main/vendor/jquery-3.7.0.min.js
 // ==/UserScript==
 // CHANGELOG 1.4.35: Guard fetch interceptor to only run on Scamming page. Cap Accelerate recommendations at 3. Fix Hub name matching.
 
