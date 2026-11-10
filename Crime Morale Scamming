@@ -745,6 +745,7 @@
     let clockTimer = null;
     let panelOpen = false;
     let lastRender = '';
+    const knownTargetEmails = new Set();
 
     function readAddressCount() {
       const el = document.querySelector(EMAIL_COUNT_SELECTOR);
@@ -777,6 +778,18 @@
     function saveHistory() {
       history = history.slice(0, MAX_HISTORY);
       setValue(STORAGE_KEY, { waves: history });
+    }
+
+    function readTargetEmail(target) {
+      const emailEl = target.querySelector('[class*="email___"], [class*="email_"]');
+      return emailEl ? String(emailEl.textContent || '').trim().toLowerCase() : '';
+    }
+
+    function rememberExistingTargets() {
+      document.querySelectorAll(TARGET_SELECTOR).forEach(card => {
+        const email = readTargetEmail(card);
+        if (email) knownTargetEmails.add(email);
+      });
     }
 
     function identifyMethod(target) {
@@ -812,19 +825,16 @@
         level: null,
         targetEmails: []
       };
-      updateTargets();
       renderPanel();
     }
 
     function updateTargets() {
       if (!activeWave) return;
-      const seen = new Set(activeWave.targetEmails);
       const cards = document.querySelectorAll(TARGET_SELECTOR);
       for (const card of cards) {
-        const emailEl = card.querySelector('[class*="email___"], [class*="email_"]');
-        const email = emailEl ? String(emailEl.textContent || '').trim().toLowerCase() : '';
-        if (!email || seen.has(email)) continue;
-        seen.add(email);
+        const email = readTargetEmail(card);
+        if (!email || knownTargetEmails.has(email)) continue;
+        knownTargetEmails.add(email);
         activeWave.targetEmails.push(email);
         activeWave.targetCount = activeWave.targetEmails.length;
         const method = identifyMethod(card);
@@ -892,6 +902,8 @@
           if (!isWaiting()) finishWave();
           else sync();
         }, 1400);
+      } else if (!activeWave) {
+        rememberExistingTargets();
       }
       renderPanel();
     }
