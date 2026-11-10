@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.37
+// @version      1.4.38
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.38: Fix Spam Wave Tracker text contrast independently of system/Torn light or dark mode.
 // CHANGELOG 1.4.37: Add independent Spam Wave Tracker with live timing, address usage and wave history.
 // CHANGELOG 1.4.36: Bundle jQuery 3.7.0 directly; remove external @require dependency.
 // CHANGELOG 1.4.35: Guard fetch interceptor to only run on Scamming page. Cap Accelerate recommendations at 3. Fix Hub name matching.
@@ -1000,7 +1001,13 @@
       style.textContent = [
         '#cm-sw-toggle{margin-left:10px!important;font-size:12px!important;line-height:1.4!important;white-space:nowrap!important}',
         '#cm-sw-toggle.cm-sw-live{border-color:var(--default-blue-color,#4b91d1)!important}',
-        '#cm-sw-panel{display:none;position:fixed;z-index:99999;right:18px;bottom:22px;width:360px;max-width:calc(100vw - 28px);max-height:calc(100vh - 44px);overflow:auto;box-sizing:border-box;padding:16px;border:1px solid var(--crimes-crimeOption-borderBottomColor,#444);border-radius:10px;background:var(--default-bg-panel-color,#20242a);color:var(--crimes-baseText-color,#eee);box-shadow:0 10px 35px #0008;font:13px/1.4 Arial,sans-serif}',
+        '#cm-sw-panel{display:none;position:fixed;z-index:99999;right:18px;bottom:22px;width:360px;max-width:calc(100vw - 28px);max-height:calc(100vh - 44px);overflow:auto;box-sizing:border-box;padding:16px;border:1px solid #454d58;border-radius:10px;background:#20242a!important;color:#f1f4f8!important;box-shadow:0 10px 35px #0008;font:13px/1.4 Arial,sans-serif;color-scheme:dark}',
+        '#cm-sw-panel *{box-sizing:border-box;color:inherit}',
+        '#cm-sw-panel .cm-sw-kicker,#cm-sw-panel .cm-sw-hero em,#cm-sw-panel .cm-sw-clock{color:#79b8ff}',
+        '#cm-sw-panel .cm-sw-dot.is-live{background:#42c985}',
+        '#cm-sw-panel .cm-sw-close{color:#f1f4f8;background:transparent}',
+        '#cm-sw-panel .cm-sw-empty,#cm-sw-panel .cm-sw-footnote,#cm-sw-panel .cm-sw-history-main small,#cm-sw-panel .cm-sw-history-stats small,#cm-sw-panel .cm-sw-hero small,#cm-sw-panel .cm-sw-metrics small{color:#aeb8c5}',
+
         '#cm-sw-panel.is-open{display:block}',
         '.cm-sw-topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}',
         '.cm-sw-kicker{font-size:9px;letter-spacing:1.5px;color:var(--default-blue-color,#72a9dc);font-weight:700}',
@@ -1144,7 +1151,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.37',
+      version: '1.4.38',
       order: 20,
       open: handleOpen,
       close: handleClose,
