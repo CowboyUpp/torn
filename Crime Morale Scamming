@@ -955,6 +955,13 @@
     }
 
     function ensureUi() {
+      const root = document.querySelector('.scamming-root');
+      if (!root) {
+        document.getElementById('cm-sw-toggle')?.remove();
+        document.getElementById('cm-sw-panel')?.remove();
+        panelOpen = false;
+        return;
+      }
       const header = document.querySelector('.crimes-app-header');
       if (header && !document.getElementById('cm-sw-toggle')) {
         const button = document.createElement('button');
@@ -1027,7 +1034,7 @@
     }
 
     function isRelevantMutation(record) {
-      const selector = WAITING_SELECTOR + ', ' + EMAIL_COUNT_SELECTOR + ', ' + TARGET_SELECTOR + ', .crimes-app-header';
+      const selector = WAITING_SELECTOR + ', ' + EMAIL_COUNT_SELECTOR + ', ' + TARGET_SELECTOR + ', .crimes-app-header, .scamming-root';
       const relevantNode = node => {
         if (!node) return false;
         const el = node.nodeType === 1 ? node : node.parentElement;
