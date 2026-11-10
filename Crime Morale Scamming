@@ -1026,10 +1026,26 @@
       (document.head || document.documentElement).appendChild(style);
     }
 
+    function isRelevantMutation(record) {
+      const selector = WAITING_SELECTOR + ', ' + EMAIL_COUNT_SELECTOR + ', ' + TARGET_SELECTOR + ', .crimes-app-header';
+      const relevantNode = node => {
+        if (!node) return false;
+        const el = node.nodeType === 1 ? node : node.parentElement;
+        if (!el || el.closest('#cm-sw-panel, #cm-sw-toggle')) return false;
+        return (el.matches && el.matches(selector)) || (el.closest && !!el.closest(TARGET_SELECTOR + ', ' + WAITING_SELECTOR + ', [class*="emailAddresses"], .crimes-app-header')) ||
+          (el.querySelector && !!el.querySelector(selector));
+      };
+      if (relevantNode(record.target)) return true;
+      for (const node of record.addedNodes || []) if (relevantNode(node)) return true;
+      for (const node of record.removedNodes || []) if (relevantNode(node)) return true;
+      return false;
+    }
+
     function boot() {
       installStyle();
       ensureUi();
-      observer = new MutationObserver(() => {
+      observer = new MutationObserver(records => {
+        if (!records.some(isRelevantMutation)) return;
         ensureUi();
         sync();
       });
