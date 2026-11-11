@@ -826,6 +826,10 @@
       area.remove();
     }
 
+    if (activeWave) {
+      debugEvent('tracker-restored', { trackerId: activeWave.id, startedAt: new Date(activeWave.startedAt).toISOString(), method: activeWave.method, level: activeWave.level, targetCount: activeWave.targetCount });
+    }
+
     function saveHistory() {
       saveTrackerState();
     }
