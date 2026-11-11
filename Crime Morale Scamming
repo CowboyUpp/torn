@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.42
+// @version      1.4.43
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,7 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
-// CHANGELOG 1.4.42: Add in-panel Spam Wave Tracker debug log with persistent event capture and copy.
+// CHANGELOG 1.4.43: Extend existing debug log with game-data snapshots for spam levels, targets, progress and collection data; clarify addresses used.
 // CHANGELOG 1.4.41: Do not close an active wave when navigating away from the Scamming page.
 // CHANGELOG 1.4.40: Persist active Spam Wave Tracker state so its timer survives page navigation and reloads.
 // CHANGELOG 1.4.37: Add independent Spam Wave Tracker with live timing, address usage and wave history.
@@ -676,6 +676,11 @@
   }
 
   async function onCrimeData(crimeType, data) {
+    try {
+      if (typeof window.__cmSpamWaveTrackerData === 'function') {
+        window.__cmSpamWaveTrackerData(crimeType, data);
+      }
+    } catch (e) { /* diagnostics must never interfere with solver data */ }
     await checkDemoralization(data);
     await checkScamming(crimeType, data);
   }
@@ -741,6 +746,8 @@
     };
 
     let saved = getValue(STORAGE_KEY, {}) || {};
+    let gameDataState = saved.gameData && typeof saved.gameData === 'object'
+      ? saved.gameData : { targets: {}, spams: {}, farmsSignature: null };
     let history = Array.isArray(saved.waves) ? saved.waves : [];
     let debugLog = Array.isArray(saved.debug) ? saved.debug.slice(-150) : [];
     let debugOpen = false;
@@ -786,7 +793,7 @@
 
     function saveTrackerState() {
       history = history.slice(0, MAX_HISTORY);
-      setValue(STORAGE_KEY, { waves: history, active: activeWave, debug: debugLog.slice(-150) });
+      setValue(STORAGE_KEY, { waves: history, active: activeWave, debug: debugLog.slice(-150), gameData: gameDataState });
     }
 
     function debugEvent(type, details) {
@@ -825,6 +832,167 @@
       try { document.execCommand('copy'); } catch (err) { /* clipboard fallback unavailable */ }
       area.remove();
     }
+
+    // Game-data diagnostics are observational. Never treat solution.action or
+    // individual bar entries as a final scam result.
+    function summarizeTarget(target) {
+      const bar = Array.isArray(target.bar) ? target.bar : null;
+      const summary = {
+        id: target.id || null,
+        email: target.email || null,
+        level: target.level ?? null,
+        mark: target.mark ?? null,
+        round: target.round ?? null,
+        turns: target.turns ?? null,
+        multiplierUsed: target.multiplierUsed ?? null,
+        pip: target.pip ?? null,
+        expire: target.expire ?? null,
+        bar: bar ? {
+          length: bar.length,
+          tail: bar.slice(-8),
+          failEntries: bar.filter(value => value === 'fail').length
+        } : null,
+        suspicion: target.suspicion ?? null,
+        resolvingBitmap: target.resolvingBitmap ?? null,
+        driftBitmap: target.driftBitmap ?? null,
+        algos: Array.isArray(target.algos) ? target.algos.slice() : null,
+        suggestedAction: target.solution && target.solution.action || null,
+        unsynced: target.unsynced ?? null
+      };
+      const resultKeys = ['finalOutcome', 'outcome', 'result'];
+      for (const key of resultKeys) {
+        const value = target[key];
+        if (typeof value === 'string' && /^(success|fail|failed|abandon|abandoned)$/i.test(value.trim())) {
+          summary.confirmedOutcome = value.trim().toLowerCase();
+          summary.confirmedOutcomeField = key;
+          break;
+        }
+      }
+      return summary;
+    }
+
+    function summarizeFarmData(farms) {
+      if (!farms || typeof farms !== 'object') return { type: typeof farms, value: farms ?? null };
+      const keys = Object.keys(farms);
+      const summary = { keys: keys.slice(0, 50), count: keys.length, entries: {} };
+      keys.slice(0, 20).forEach(key => {
+        const value = farms[key];
+        if (value && typeof value === 'object') {
+          summary.entries[key] = Array.isArray(value)
+            ? { type: 'array', length: value.length, sample: value.slice(0, 5) }
+            : Object.fromEntries(Object.entries(value).slice(0, 20));
+        } else {
+          summary.entries[key] = value;
+        }
+      });
+      return summary;
+    }
+
+    function captureCrimeData(crimeType, data) {
+      if (String(crimeType) !== '12' || !data || typeof data !== 'object') return;
+      const scamming = data.scamming && typeof data.scamming === 'object' ? data.scamming : {};
+      const targets = scamming.targets && typeof scamming.targets === 'object' ? scamming.targets : {};
+      const spams = data.spams && typeof data.spams === 'object' ? data.spams : {};
+      const farms = data.farms && typeof data.farms === 'object' ? data.farms : {};
+      let changed = false;
+
+      const targetIds = Object.keys(targets);
+      if (!gameDataState.targets || typeof gameDataState.targets !== 'object') gameDataState.targets = {};
+      if (!gameDataState.targetBaselineCaptured) {
+        debugEvent('target-data-baseline', {
+          count: targetIds.length,
+          targets: targetIds.map(id => summarizeTarget(targets[id]))
+        });
+        gameDataState.targetBaselineCaptured = true;
+        changed = true;
+      }
+      for (const id of targetIds) {
+        const current = summarizeTarget(targets[id] || {});
+        const previous = gameDataState.targets[id];
+        if (!previous) {
+          debugEvent('target-created', { targetId: id, target: current, source: 'new-game-data-entry' });
+          gameDataState.targets[id] = current;
+          changed = true;
+          if (current.confirmedOutcome) {
+            debugEvent('target-result-confirmed', {
+              targetId: id, email: current.email,
+              outcome: current.confirmedOutcome, field: current.confirmedOutcomeField
+            });
+          }
+          continue;
+        }
+        if (JSON.stringify(previous) !== JSON.stringify(current)) {
+          debugEvent('target-progress-change', {
+            targetId: id, email: current.email, before: previous, after: current
+          });
+          gameDataState.targets[id] = current;
+          changed = true;
+        }
+        if (current.confirmedOutcome &&
+            current.confirmedOutcome !== previous.confirmedOutcome) {
+          debugEvent('target-result-confirmed', {
+            targetId: id, email: current.email,
+            outcome: current.confirmedOutcome, field: current.confirmedOutcomeField
+          });
+        }
+      }
+
+      if (!gameDataState.spams || typeof gameDataState.spams !== 'object') gameDataState.spams = {};
+      const spamIds = Object.keys(spams);
+      if (!gameDataState.spamBaselineCaptured) {
+        debugEvent('spam-data-baseline', {
+          levels: spamIds.map(id => ({
+            levelId: id, count: spams[id]?.count ?? null,
+            accurate: spams[id]?.accurate ?? null,
+            since: spams[id]?.since ?? null,
+            timestamp: spams[id]?.ts ?? null,
+            depreciation: spams[id]?.depreciation ?? null
+          }))
+        });
+        gameDataState.spamBaselineCaptured = true;
+        changed = true;
+      }
+      for (const id of spamIds) {
+        const item = spams[id] || {};
+        const current = {
+          count: item.count ?? null,
+          accurate: item.accurate ?? null,
+          since: item.since ?? null,
+          ts: item.ts ?? null,
+          depreciation: item.depreciation ?? null
+        };
+        const previous = gameDataState.spams[id];
+        if (!previous || JSON.stringify(previous) !== JSON.stringify(current)) {
+          if (previous) {
+            debugEvent('spam-level-change', {
+              levelId: id, before: previous, after: current,
+              sinceMeaning: 'Game-provided timestamp; interpretation not assumed'
+            });
+          }
+          gameDataState.spams[id] = current;
+          changed = true;
+        }
+      }
+
+      const farmJson = JSON.stringify(farms);
+      const farmSignature = farmJson.length + ':' + farmJson;
+      if (gameDataState.farmsSignature !== farmSignature) {
+        const preview = farmJson.length <= 10000 ? farms : farmJson.slice(0, 10000);
+        debugEvent('collection-data-change', {
+          source: 'farms',
+          classification: 'unclassified-game-data',
+          summary: summarizeFarmData(farms),
+          data: preview,
+          truncated: farmJson.length > 10000
+        });
+        gameDataState.farmsSignature = farmSignature;
+        changed = true;
+      }
+      if (changed) saveTrackerState();
+    }
+
+    // Called by the existing crimesData fetch interceptor; no extra polling.
+    window.__cmSpamWaveTrackerData = captureCrimeData;
 
     if (activeWave) {
       debugEvent('tracker-restored', { trackerId: activeWave.id, startedAt: new Date(activeWave.startedAt).toISOString(), method: activeWave.method, level: activeWave.level, targetCount: activeWave.targetCount });
@@ -1016,7 +1184,7 @@
         (level ? ' <em>' + escapeHtml(level) + '</em>' : '') + '</strong></div><div class="cm-sw-clock">' +
         (wave ? formatDuration(elapsed) : '—') + '</div></div>' +
         '<div class="cm-sw-metrics">' +
-        '<div><small>OUTCOMES</small><b>' + (wave ? used.toLocaleString() : '—') + '</b></div>' +
+        '<div><small>ADDRESSES USED</small><b>' + (wave ? used.toLocaleString() : '—') + '</b></div>' +
         '<div><small>TARGETS</small><b>' + (wave ? wave.targetCount : '—') + '</b></div>' +
         '<div><small>FIRST RESPONSE</small><b>' + responseDelay + '</b></div>' +
         '</div>' +
@@ -1246,7 +1414,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.42',
+      version: '1.4.43',
       order: 20,
       open: handleOpen,
       close: handleClose,
