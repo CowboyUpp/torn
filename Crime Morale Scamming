@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.41
+// @version      1.4.42
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.42: Add in-panel Spam Wave Tracker debug log with persistent event capture and copy.
 // CHANGELOG 1.4.41: Do not close an active wave when navigating away from the Scamming page.
 // CHANGELOG 1.4.40: Persist active Spam Wave Tracker state so its timer survives page navigation and reloads.
 // CHANGELOG 1.4.37: Add independent Spam Wave Tracker with live timing, address usage and wave history.
@@ -741,6 +742,10 @@
 
     let saved = getValue(STORAGE_KEY, {}) || {};
     let history = Array.isArray(saved.waves) ? saved.waves : [];
+    let debugLog = Array.isArray(saved.debug) ? saved.debug.slice(-150) : [];
+    let debugOpen = false;
+    let lastWaitingState = null;
+    let lastLoggedAddressCount = null;
     let activeWave = saved.active && typeof saved.active.startedAt === 'number' ? saved.active : null;
     let observer = null;
     let finishTimer = null;
@@ -781,7 +786,44 @@
 
     function saveTrackerState() {
       history = history.slice(0, MAX_HISTORY);
-      setValue(STORAGE_KEY, { waves: history, active: activeWave });
+      setValue(STORAGE_KEY, { waves: history, active: activeWave, debug: debugLog.slice(-150) });
+    }
+
+    function debugEvent(type, details) {
+      const entry = {
+        time: new Date().toISOString(),
+        type,
+        url: location.href,
+        details: details || {}
+      };
+      debugLog.push(entry);
+      if (debugLog.length > 150) debugLog.splice(0, debugLog.length - 150);
+      saveTrackerState();
+      renderPanel();
+    }
+
+    function debugSnapshot() {
+      const selectors = [WAITING_SELECTOR, '[class*="crimeOptionWrapper"]', '[class*="levelLabel"]', '[class*="spam"]'];
+      const elements = [];
+      selectors.forEach(selector => {
+        document.querySelectorAll(selector).forEach(el => {
+          if (elements.length >= 25) return;
+          elements.push({ selector, tag: el.tagName, className: String(el.className || ''), text: String(el.innerText || el.textContent || '').trim().slice(0, 300), html: el.outerHTML.slice(0, 1800) });
+        });
+      });
+      debugEvent('manual-dom-snapshot', { waiting: isWaiting(), addressCount: readAddressCount(), elements });
+    }
+
+    function copyDebugLog() {
+      const text = JSON.stringify({ exportedAt: new Date().toISOString(), url: location.href, events: debugLog }, null, 2);
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand('copy'); } catch (err) { /* clipboard fallback unavailable */ }
+      area.remove();
     }
 
     function saveHistory() {
@@ -834,7 +876,7 @@
         level: null,
         targetEmails: []
       };
-      saveTrackerState();
+      debugEvent('wave-started', { trackerId: activeWave.id, startAddresses: activeWave.startAddresses, waitingHtml: document.querySelector(WAITING_SELECTOR)?.outerHTML?.slice(0, 1800) || null });
       renderPanel();
     }
 
@@ -855,6 +897,7 @@
         const now = Date.now();
         if (!activeWave.firstTargetAt) activeWave.firstTargetAt = now;
         activeWave.lastTargetAt = now;
+        debugEvent('target-detected', { email, method, level: methodLevel(method), targetText: String(card.innerText || '').trim().slice(0, 400), targetHtml: card.outerHTML.slice(0, 1800) });
       }
       saveTrackerState();
     }
@@ -865,6 +908,10 @@
       if (current !== null && activeWave.startAddresses !== null) {
         activeWave.endAddresses = current;
         activeWave.outcomes = Math.max(0, activeWave.startAddresses - current);
+        if (current !== lastLoggedAddressCount) {
+          lastLoggedAddressCount = current;
+          debugEvent('address-count', { current, start: activeWave.startAddresses, outcomes: activeWave.outcomes });
+        }
       }
       saveTrackerState();
     }
@@ -877,6 +924,7 @@
       activeWave.durationMs = activeWave.finishedAt - activeWave.startedAt;
       activeWave.firstResponseMs = activeWave.firstTargetAt
         ? activeWave.firstTargetAt - activeWave.startedAt : null;
+      debugEvent('wave-finished', { trackerId: activeWave.id, method: activeWave.method, level: activeWave.level, outcomes: activeWave.outcomes, targetCount: activeWave.targetCount, durationMs: activeWave.durationMs });
       activeWave.method = activeWave.method || 'Unknown';
       history.unshift({
         id: activeWave.id,
@@ -899,6 +947,10 @@
     function sync() {
       if (!isEnabled) return;
       const waiting = isWaiting();
+      if (waiting !== lastWaitingState) {
+        lastWaitingState = waiting;
+        debugEvent('waiting-state', { waiting, addressCount: readAddressCount(), activeTrackerId: activeWave?.id || null });
+      }
       if (waiting) {
         if (finishTimer) {
           clearTimeout(finishTimer);
@@ -949,7 +1001,11 @@
           '<div class="cm-sw-history-stats"><b>' + formatDuration(item.durationMs || 0) + '</b><small>duration</small></div>' +
           '</div>';
       }).join('');
-      const html = '<div class="cm-sw-topline"><div class="cm-sw-title">Spam Wave Tracker</div><button type="button" class="cm-sw-close" aria-label="Close">×</button></div>' +
+      const debugHtml = debugOpen
+        ? '<div class="cm-sw-debug"><div class="cm-sw-debug-actions"><button type="button" data-cm-debug="snapshot">Capture DOM</button><button type="button" data-cm-debug="copy">Copy log</button><button type="button" data-cm-debug="clear">Clear</button></div><div class="cm-sw-debug-log">' +
+          (debugLog.length ? debugLog.slice().reverse().map(entry => '<div class="cm-sw-debug-entry"><b>' + escapeHtml(entry.type) + '</b><small>' + escapeHtml(entry.time) + '</small><pre>' + escapeHtml(JSON.stringify(entry.details || {})) + '</pre></div>').join('') : '<div class="cm-sw-empty">No debug events yet.</div>') +
+          '</div></div>' : '';
+      const html = '<div class="cm-sw-topline"><div class="cm-sw-title">Spam Wave Tracker</div><div class="cm-sw-top-actions"><button type="button" class="cm-sw-debug-toggle">' + (debugOpen ? 'Hide Debug' : 'Debug') + '</button><button type="button" class="cm-sw-close" aria-label="Close">×</button></div></div>' +
         '<div class="cm-sw-status"><span class="cm-sw-dot ' + (wave ? 'is-live' : '') + '"></span>' + currentStatus +
         '<span class="cm-sw-status-right">' + (wave ? 'OBSERVING' : 'READY') + '</span></div>' +
         '<div class="cm-sw-hero"><div><small>CURRENT WAVE</small><strong>' + escapeHtml(method) +
@@ -967,6 +1023,7 @@
         '</strong></div>' +
         '<div class="cm-sw-section-title"><span>RECENT WAVES</span><span>' + history.length + ' SAVED</span></div>' +
         '<div class="cm-sw-history">' + (historyHtml || '<div class="cm-sw-empty">No completed waves yet. Your results will appear here.</div>') + '</div>' +
+        debugHtml +
         '<div class="cm-sw-footnote">Observational only · Does not alter the Scamming solver</div>';
       if (panel.innerHTML !== html) panel.innerHTML = html;
     }
@@ -999,6 +1056,15 @@
         panel.id = 'cm-sw-panel';
         panel.setAttribute('aria-label', 'Spam Wave Tracker');
         panel.addEventListener('click', event => {
+          if (event.target.closest('.cm-sw-debug-toggle')) {
+            debugOpen = !debugOpen;
+            renderPanel();
+            return;
+          }
+          const debugAction = event.target.closest('[data-cm-debug]')?.getAttribute('data-cm-debug');
+          if (debugAction === 'snapshot') { debugSnapshot(); return; }
+          if (debugAction === 'copy') { copyDebugLog(); return; }
+          if (debugAction === 'clear') { debugLog = []; saveTrackerState(); renderPanel(); return; }
           if (event.target.closest('.cm-sw-close')) {
             panelOpen = false;
             panel.classList.remove('is-open');
@@ -1028,6 +1094,15 @@
         '.cm-sw-topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}',
         
         '.cm-sw-title{font-size:19px;font-weight:800;letter-spacing:-.3px}',
+        '.cm-sw-top-actions{display:flex;align-items:center;gap:8px}',
+        '.cm-sw-debug-toggle,.cm-sw-debug-actions button{border:1px solid #cfd5dc;border-radius:4px;background:#f5f6f7;padding:5px 8px;font:inherit;font-size:10px;cursor:pointer;color:#333}',
+        '.cm-sw-debug{margin-top:12px;border-top:1px solid #e0e3e7;padding-top:10px}',
+        '.cm-sw-debug-actions{display:flex;gap:6px;margin-bottom:8px}',
+        '.cm-sw-debug-log{max-height:260px;overflow:auto;background:#f5f6f8;border:1px solid #e0e3e7;border-radius:5px;padding:7px}',
+        '.cm-sw-debug-entry{padding:6px 2px;border-bottom:1px solid #e0e3e7;font-size:10px}',
+        '.cm-sw-debug-entry:last-child{border-bottom:0}',
+        '.cm-sw-debug-entry small{display:block;color:#737b84;font-size:9px;margin-top:2px}',
+        '.cm-sw-debug-entry pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0 0;font:10px/1.35 monospace;color:#444}',
         '.cm-sw-close{border:0;background:transparent;color:inherit;font-size:25px;line-height:1;cursor:pointer;padding:0 3px}',
         '.cm-sw-status{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:5px;background:#f0f2f4;font-size:10px;font-weight:800;letter-spacing:1px}',
         '.cm-sw-dot{width:7px;height:7px;border-radius:50%;background:#888;display:inline-block}',
@@ -1167,7 +1242,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.41',
+      version: '1.4.42',
       order: 20,
       open: handleOpen,
       close: handleClose,
