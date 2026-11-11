@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.43
+// @version      1.4.44
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,7 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
-// CHANGELOG 1.4.43: Extend existing debug log with game-data snapshots for spam levels, targets, progress and collection data; clarify addresses used.
+// CHANGELOG 1.4.44: Baseline existing target cards at wave launch so old targets are not attributed to a new wave.
 // CHANGELOG 1.4.41: Do not close an active wave when navigating away from the Scamming page.
 // CHANGELOG 1.4.40: Persist active Spam Wave Tracker state so its timer survives page navigation and reloads.
 // CHANGELOG 1.4.37: Add independent Spam Wave Tracker with live timing, address usage and wave history.
@@ -759,9 +759,10 @@
     let clockTimer = null;
     let panelOpen = false;
     let lastRender = '';
-    const knownTargetEmails = new Set(
-      activeWave && Array.isArray(activeWave.targetEmails) ? activeWave.targetEmails : []
-    );
+    const knownTargetEmails = new Set([
+      ...(activeWave && Array.isArray(activeWave.baselineEmails) ? activeWave.baselineEmails : []),
+      ...(activeWave && Array.isArray(activeWave.targetEmails) ? activeWave.targetEmails : [])
+    ]);
 
     function readAddressCount() {
       const el = document.querySelector(EMAIL_COUNT_SELECTOR);
@@ -1048,9 +1049,14 @@
         clearTimeout(finishTimer);
         finishTimer = null;
       }
+      // Existing cards belong to earlier activity. Baseline them before
+      // tracking this wave so they cannot set its method/level or target count.
+      rememberExistingTargets();
+      const baselineEmails = Array.from(knownTargetEmails);
       activeWave = {
         id: Date.now(),
         startedAt: Date.now(),
+        baselineEmails,
         finishedAt: null,
         startAddresses: readAddressCount(),
         endAddresses: null,
@@ -1062,7 +1068,7 @@
         level: null,
         targetEmails: []
       };
-      debugEvent('wave-started', { trackerId: activeWave.id, startAddresses: activeWave.startAddresses, waitingHtml: document.querySelector(WAITING_SELECTOR)?.outerHTML?.slice(0, 1800) || null });
+      debugEvent('wave-started', { trackerId: activeWave.id, startAddresses: activeWave.startAddresses, baselineTargetCount: baselineEmails.length, baselineEmails, waitingHtml: document.querySelector(WAITING_SELECTOR)?.outerHTML?.slice(0, 1800) || null });
       renderPanel();
     }
 
@@ -1428,7 +1434,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.43',
+      version: '1.4.44',
       order: 20,
       open: handleOpen,
       close: handleClose,
