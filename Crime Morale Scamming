@@ -899,10 +899,13 @@
       const targetIds = Object.keys(targets);
       if (!gameDataState.targets || typeof gameDataState.targets !== 'object') gameDataState.targets = {};
       if (!gameDataState.targetBaselineCaptured) {
+        const baselineTargets = {};
+        targetIds.forEach(id => { baselineTargets[id] = summarizeTarget(targets[id]); });
         debugEvent('target-data-baseline', {
           count: targetIds.length,
-          targets: targetIds.map(id => summarizeTarget(targets[id]))
+          targets: Object.values(baselineTargets)
         });
+        gameDataState.targets = baselineTargets;
         gameDataState.targetBaselineCaptured = true;
         changed = true;
       }
@@ -912,6 +915,10 @@
         if (!previous) {
           debugEvent('target-created', { targetId: id, target: current, source: 'new-game-data-entry' });
           gameDataState.targets[id] = current;
+          const trackedIds = Object.keys(gameDataState.targets);
+          if (trackedIds.length > 300) {
+            trackedIds.slice(0, trackedIds.length - 300).forEach(oldId => delete gameDataState.targets[oldId]);
+          }
           changed = true;
           if (current.confirmedOutcome) {
             debugEvent('target-result-confirmed', {
@@ -975,12 +982,19 @@
       }
 
       const farmJson = JSON.stringify(farms);
-      const farmSignature = farmJson.length + ':' + farmJson;
+      let farmHash = 2166136261;
+      for (let i = 0; i < farmJson.length; i++) {
+        farmHash ^= farmJson.charCodeAt(i);
+        farmHash = Math.imul(farmHash, 16777619);
+      }
+      const farmSignature = farmJson.length + ':' + (farmHash >>> 0);
       if (gameDataState.farmsSignature !== farmSignature) {
+        const firstFarmSnapshot = gameDataState.farmsSignature == null;
         const preview = farmJson.length <= 10000 ? farms : farmJson.slice(0, 10000);
-        debugEvent('collection-data-change', {
+        debugEvent(firstFarmSnapshot ? 'collection-data-baseline' : 'collection-data-change', {
           source: 'farms',
           classification: 'unclassified-game-data',
+          empty: Object.keys(farms).length === 0,
           summary: summarizeFarmData(farms),
           data: preview,
           truncated: farmJson.length > 10000
@@ -1169,7 +1183,7 @@
         return '<div class="cm-sw-history-row">' +
           '<div class="cm-sw-history-main"><strong>' + escapeHtml(item.method || 'Unknown') +
           (item.level ? ' ' + escapeHtml(item.level) : '') + '</strong><small>' + escapeHtml(stamp) + '</small></div>' +
-          '<div class="cm-sw-history-stats"><b>' + Number(item.outcomes || 0) + '</b><small>outcomes</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + Number(item.outcomes || 0) + '</b><small>addresses used</small></div>' +
           '<div class="cm-sw-history-stats"><b>' + formatDuration(item.durationMs || 0) + '</b><small>duration</small></div>' +
           '</div>';
       }).join('');
