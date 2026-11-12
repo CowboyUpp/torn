@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.44
+// @version      1.4.45
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.45: Rename the wave panel to Scam Tracker, add acquired/used/remaining metrics and a full reset button.
 // CHANGELOG 1.4.44: Baseline existing target cards at wave launch so old targets are not attributed to a new wave.
 // CHANGELOG 1.4.41: Do not close an active wave when navigating away from the Scamming page.
 // CHANGELOG 1.4.40: Persist active Spam Wave Tracker state so its timer survives page navigation and reloads.
@@ -1197,18 +1198,18 @@
         ? '<div class="cm-sw-debug"><div class="cm-sw-debug-actions"><button type="button" data-cm-debug="snapshot">Capture DOM</button><button type="button" data-cm-debug="copy">Copy log</button><button type="button" data-cm-debug="clear">Clear</button></div><div class="cm-sw-debug-log">' +
           (debugLog.length ? debugLog.slice().reverse().map(entry => '<div class="cm-sw-debug-entry"><b>' + escapeHtml(entry.type) + '</b><small>' + escapeHtml(entry.time) + '</small><pre>' + escapeHtml(JSON.stringify(entry.details || {})) + '</pre></div>').join('') : '<div class="cm-sw-empty">No debug events yet.</div>') +
           '</div></div>' : '';
-      const html = '<div class="cm-sw-topline"><div class="cm-sw-title">Spam Wave Tracker</div><div class="cm-sw-top-actions"><button type="button" class="cm-sw-debug-toggle">' + (debugOpen ? 'Hide Debug' : 'Debug') + '</button><button type="button" class="cm-sw-close" aria-label="Close">×</button></div></div>' +
+      const html = '<div class="cm-sw-topline"><div class="cm-sw-title">Scam Tracker</div><div class="cm-sw-top-actions"><button type="button" class="cm-sw-reset" title="Clear all saved tracker data">Reset</button><button type="button" class="cm-sw-debug-toggle">' + (debugOpen ? 'Hide Debug' : 'Debug') + '</button><button type="button" class="cm-sw-close" aria-label="Close">×</button></div></div>' +
         '<div class="cm-sw-status"><span class="cm-sw-dot ' + (wave ? 'is-live' : '') + '"></span>' + currentStatus +
         '<span class="cm-sw-status-right">' + (wave ? 'OBSERVING' : 'READY') + '</span></div>' +
         '<div class="cm-sw-hero"><div><small>CURRENT WAVE</small><strong>' + escapeHtml(method) +
         (level ? ' <em>' + escapeHtml(level) + '</em>' : '') + '</strong></div><div class="cm-sw-clock">' +
         (wave ? formatDuration(elapsed) : '—') + '</div></div>' +
         '<div class="cm-sw-metrics">' +
-        '<div><small>ADDRESSES USED</small><b>' + (wave ? used.toLocaleString() : '—') + '</b></div>' +
-        '<div><small>TARGETS</small><b>' + (wave ? wave.targetCount : '—') + '</b></div>' +
-        '<div><small>FIRST RESPONSE</small><b>' + responseDelay + '</b></div>' +
+        '<div><small>ACQUIRED</small><b>' + (wave ? wave.targetCount.toLocaleString() : '—') + '</b></div>' +
+        '<div><small>USED</small><b>' + (wave ? used.toLocaleString() : '—') + '</b></div>' +
+        '<div><small>REMAINING</small><b>' + (wave ? Math.max(0, wave.targetCount - used).toLocaleString() : '—') + '</b></div>' +
         '</div>' +
-        '<div class="cm-sw-addresses"><span>EMAIL ADDRESSES</span><strong>' +
+        '<div class="cm-sw-addresses"><span>ADDRESS STOCK</span><strong>' +
         (wave && wave.startAddresses !== null ? wave.startAddresses.toLocaleString() : '—') +
         '</strong><span class="cm-sw-arrow">→</span><strong>' +
         (wave && wave.endAddresses !== null ? wave.endAddresses.toLocaleString() : (wave ? '…' : '—')) +
@@ -1216,7 +1217,7 @@
         '<div class="cm-sw-section-title"><span>RECENT WAVES</span><span>' + history.length + ' SAVED</span></div>' +
         '<div class="cm-sw-history">' + (historyHtml || '<div class="cm-sw-empty">No completed waves yet. Your results will appear here.</div>') + '</div>' +
         debugHtml +
-        '<div class="cm-sw-footnote">Observational only · Does not alter the Scamming solver</div>';
+        '<div class="cm-sw-footnote">Nerve and cash totals will appear when reliable game data is available · Solver unchanged</div>';
       if (panel.innerHTML !== html) panel.innerHTML = html;
     }
 
@@ -1234,7 +1235,7 @@
         button.id = 'cm-sw-toggle';
         button.type = 'button';
         button.className = 'torn-btn';
-        button.textContent = 'Wave Tracker';
+        button.textContent = 'Scam Tracker';
         button.addEventListener('click', () => {
           panelOpen = !panelOpen;
           const panel = document.getElementById('cm-sw-panel');
@@ -1248,6 +1249,21 @@
         panel.id = 'cm-sw-panel';
         panel.setAttribute('aria-label', 'Spam Wave Tracker');
         panel.addEventListener('click', event => {
+          if (event.target.closest('.cm-sw-reset')) {
+            if (!window.confirm('Reset Scam Tracker? This clears all saved waves, active tracking data and debug history.')) return;
+            history = [];
+            activeWave = null;
+            gameDataState = { targets: {}, spams: {}, farmsSignature: null, targetBaselineCaptured: false, spamBaselineCaptured: false };
+            debugLog = [];
+            knownTargetEmails.clear();
+            lastLoggedAddressCount = null;
+            lastWaitingState = null;
+            saveTrackerState();
+            debugEvent('tracker-reset', { resetAt: new Date().toISOString() });
+            if (isWaiting()) startWave();
+            renderPanel();
+            return;
+          }
           if (event.target.closest('.cm-sw-debug-toggle')) {
             debugOpen = !debugOpen;
             renderPanel();
@@ -1287,6 +1303,7 @@
         
         '.cm-sw-title{font-size:19px;font-weight:800;letter-spacing:-.3px}',
         '.cm-sw-top-actions{display:flex;align-items:center;gap:8px}',
+        '.cm-sw-reset{border:1px solid #d7b5b5;border-radius:4px;background:#fff5f5;padding:5px 8px;font:inherit;font-size:10px;cursor:pointer;color:#a33!important}',
         '.cm-sw-debug-toggle,.cm-sw-debug-actions button{border:1px solid #cfd5dc;border-radius:4px;background:#f5f6f7;padding:5px 8px;font:inherit;font-size:10px;cursor:pointer;color:#333}',
         '.cm-sw-debug{margin-top:12px;border-top:1px solid #e0e3e7;padding-top:10px}',
         '.cm-sw-debug-actions{display:flex;gap:6px;margin-bottom:8px}',
@@ -1434,7 +1451,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.44',
+      version: '1.4.45',
       order: 20,
       open: handleOpen,
       close: handleClose,
