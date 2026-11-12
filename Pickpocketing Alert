@@ -1,0 +1,1261 @@
+// ==UserScript==
+// @name         Pickpocketing Alert
+// @namespace    https://greasyfork.org/users/cowboyup
+// @version      1.9.1
+// @description  Acoustical + green highlight alerts for Torn pickpocketing targets, plus color-coded difficulty tiers (extracted from Crime Morale). Standalone or Script Hub.
+// @author       cowboyup
+// @match        https://www.torn.com/page.php?sid=crimes*
+// @match        https://www.torn.com/loader.php?sid=crimes*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
+// @grant        none
+// @license      MIT
+// ==/UserScript==
+// CHANGELOG 1.9.1: Fix difficulty colors not applying when navigating via SPA. Observer now attaches dynamically to the root element.
+
+(function () {
+'use strict';
+
+const HUB_ID = 'mobster-cyclist-alert';
+const SCRIPT_NAME = 'Pickpocketing Alert';
+const SCRIPT_VERSION = '1.9.1';
+const QUEUE_PROPERTY = '__tornScriptHubQueue';
+
+// Status icon values as Torn reports them (crimeInfo.status.icon) -> display label.
+const STATUS_LABELS = {
+    walking: 'Walking',
+    running: 'Running',
+    phone: 'On Phone',
+    music: 'Listening to music',
+    distracted: 'Distracted',
+    stumbling: 'Stumbling',
+    loitering: 'Loitering',
+    begging: 'Begging',
+    soliciting: 'Soliciting',
+    cycling: 'Cycling'
+};
+
+// id: kept stable so saved settings carry over (legacy = the original five targets).
+// title: as Torn reports it, lowercase. gender: set when the name already says it.
+// statuses: the statuses seen for that target in Torn's payload.
+const TARGET_DEFS = [
+    { id: 'businessman', title: 'businessman', label: 'Businessman', gender: 'male', statuses: ['walking', 'phone'] },
+    { id: 'businesswoman', title: 'businesswoman', label: 'Businesswoman', gender: 'female', statuses: ['walking', 'phone'] },
+    { id: 'classyLadyWalking', title: 'classy lady', label: 'Classy Lady', gender: 'female', statuses: ['walking', 'phone'], legacy: true, defaultBeeps: 2, defaultStatuses: ['walking'] },
+    { id: 'cyclist', title: 'cyclist', label: 'Cyclist', statuses: ['cycling'], legacy: true, defaultBeeps: 1 },
+    { id: 'drunkMan', title: 'drunk man', label: 'Drunk Man', gender: 'male', statuses: ['distracted', 'stumbling'] },
+    { id: 'drunkWoman', title: 'drunk woman', label: 'Drunk Woman', gender: 'female', statuses: ['distracted', 'stumbling'] },
+    { id: 'elderlyMan', title: 'elderly man', label: 'Elderly Man', gender: 'male', statuses: ['walking'] },
+    { id: 'elderlyWoman', title: 'elderly woman', label: 'Elderly Woman', gender: 'female', statuses: ['walking'] },
+    { id: 'gangMember', title: 'gang member', label: 'Gang Member', statuses: ['loitering'] },
+    { id: 'homelessPerson', title: 'homeless person', label: 'Homeless Person', statuses: ['loitering', 'begging'] },
+    { id: 'jogger', title: 'jogger', label: 'Jogger', statuses: ['walking', 'running'], statusLabels: { running: 'Jogging' } },
+    { id: 'junkie', title: 'junkie', label: 'Junkie', statuses: ['loitering', 'stumbling'] },
+    { id: 'laborer', title: 'laborer', label: 'Laborer', statuses: ['walking', 'phone', 'distracted'] },
+    { id: 'mobster', title: 'mobster', label: 'Mobster', statuses: ['walking'], legacy: true, defaultBeeps: 3 },
+    { id: 'policeOfficerRunning', title: 'police officer', label: 'Police Officer', statuses: ['walking', 'running'], legacy: true, defaultBeeps: 4, defaultStatuses: ['running'] },
+    { id: 'postalWorkerWalking', title: 'postal worker', label: 'Postal Worker', statuses: ['walking', 'distracted'], legacy: true, defaultBeeps: 1, defaultStatuses: ['walking'] },
+    { id: 'richKid', title: 'rich kid', label: 'Rich Kid', statuses: ['walking', 'phone', 'music'] },
+    { id: 'sexWorker', title: 'sex worker', label: 'Sex Worker', statuses: ['phone', 'distracted', 'soliciting'] },
+    { id: 'student', title: 'student', label: 'Student', statuses: ['walking', 'running', 'phone', 'music'] },
+    { id: 'thug', title: 'thug', label: 'Thug', statuses: ['walking', 'running', 'loitering'] },
+    { id: 'youngMan', title: 'young man', label: 'Young Man', gender: 'male', statuses: ['walking', 'phone', 'music'] },
+    { id: 'youngWoman', title: 'young woman', label: 'Young Woman', gender: 'female', statuses: ['walking', 'phone', 'music', 'distracted'] }
+];
+
+// --- Extract from Crime Morale: Difficulty Matrix ---
+const PP_CYCLING = 0;
+const PP_DISTRACTED = 34;
+const PP_MUSIC = 102;
+const PP_LOITERING = 136;
+const PP_PHONE = 170;
+const PP_RUNNING = 204;
+const PP_SOLICITING = 238;
+const PP_STUMBLING = 272;
+const PP_WALKING = 306;
+const PP_BEGGING = 340;
+
+const PP_SKINNY = 'Skinny';
+const PP_AVERAGE = 'Average';
+const PP_ATHLETIC = 'Athletic';
+const PP_MUSCULAR = 'Muscular';
+const PP_HEAVYSET = 'Heavyset';
+const PP_ANY_BUILD = [PP_SKINNY, PP_AVERAGE, PP_ATHLETIC, PP_MUSCULAR, PP_HEAVYSET];
+
+const PP_MARKS = {
+    'Drunk Man': { level: 1, status: [PP_STUMBLING], build: PP_ANY_BUILD },
+    'Drunk Woman': { level: 1, status: [PP_STUMBLING], build: PP_ANY_BUILD },
+    'Homeless Person': { level: 1, status: [PP_BEGGING], build: [PP_AVERAGE] },
+    Junkie: { level: 1, status: [PP_STUMBLING], build: PP_ANY_BUILD },
+    'Elderly Man': { level: 1, status: [PP_WALKING], build: [PP_SKINNY, PP_AVERAGE, PP_ATHLETIC, PP_HEAVYSET] },
+    'Elderly Woman': { level: 1, status: [PP_WALKING], build: [PP_SKINNY, PP_AVERAGE, PP_ATHLETIC, PP_HEAVYSET] },
+
+    'Young Man': { level: 2, status: [PP_MUSIC], build: [PP_SKINNY, PP_AVERAGE, PP_ATHLETIC] },
+    'Young Woman': { level: 2, status: [PP_PHONE], build: [PP_SKINNY, PP_AVERAGE, PP_HEAVYSET] },
+    Student: { level: 2, status: [PP_PHONE], build: [PP_SKINNY, PP_AVERAGE] },
+    'Classy Lady': { level: 2, status: [PP_PHONE, PP_WALKING], build: [PP_SKINNY, PP_HEAVYSET], bestBuild: [PP_HEAVYSET] },
+    Laborer: { level: 2, status: [PP_PHONE], build: PP_ANY_BUILD },
+    'Postal Worker': { level: 2, status: [PP_WALKING], build: [PP_AVERAGE] },
+
+    'Rich Kid': { level: 3, status: [PP_WALKING, PP_PHONE], build: [PP_SKINNY, PP_ATHLETIC, PP_HEAVYSET], bestBuild: [PP_ATHLETIC] },
+    'Sex Worker': { level: 3, status: [PP_PHONE], build: [PP_SKINNY, PP_AVERAGE], bestBuild: [PP_AVERAGE] },
+    Thug: { level: 3, status: [PP_RUNNING], build: [PP_SKINNY, PP_AVERAGE, PP_ATHLETIC], bestBuild: [PP_SKINNY] },
+
+    Businessman: { level: 4, status: [PP_PHONE], build: [PP_AVERAGE, PP_MUSCULAR, PP_HEAVYSET], bestBuild: [PP_MUSCULAR, PP_HEAVYSET] },
+    Businesswoman: { level: 4, status: [PP_PHONE], build: [PP_SKINNY, PP_AVERAGE, PP_ATHLETIC], bestBuild: [PP_ATHLETIC] },
+    'Gang Member': { level: 4, status: [PP_LOITERING], build: [PP_AVERAGE, PP_ATHLETIC, PP_MUSCULAR], bestBuild: [PP_AVERAGE] },
+    Jogger: { level: 4, status: [PP_WALKING], build: [PP_ATHLETIC, PP_MUSCULAR], bestBuild: [PP_MUSCULAR] },
+    Mobster: { level: 4, status: [PP_WALKING], build: [PP_SKINNY] },
+
+    Cyclist: { level: 5, status: [PP_CYCLING], build: ['1.52 m', `5'0"`, '1.62 m', `5'4"`] },
+    'Police Officer': { level: 6, status: [PP_RUNNING], build: PP_ANY_BUILD, bestBuild: [PP_SKINNY, '1.52 m', `5'0"`, '1.62 m', `5'4"`] },
+};
+
+const TARGETS = {};
+TARGET_DEFS.forEach(d => {
+    TARGETS[d.id] = {
+        titleMatch: d.title,
+        label: d.label,
+        fixedGender: d.gender || null,
+        statuses: d.statuses,
+        statusLabels: d.statusLabels || {},
+        legacy: !!d.legacy,
+        defaultBeeps: d.defaultBeeps || 1,
+        defaultStatuses: d.defaultStatuses || []
+    };
+});
+
+const TYPES = TARGET_DEFS.map(d => d.id);
+const REQUIRED_MUSCULAR = 'skinny';
+const GENDER_VALUES = ['any', 'female', 'male'];
+const DEFAULT_WAVEFORM = 'sine';
+const DEFAULT_VOLUME = 75;
+const BEEP_DURATION = 0.15;
+const BEEP_GAP = 0.12;
+const HIGHLIGHT_COLOR = '#00ff00';
+const HIGHLIGHT_RETRY_MS = 300;
+const HIGHLIGHT_RETRY_COUNT = 12;
+const STORAGE_KEY = (type, suffix) => `mca-${type}-${suffix}`;
+
+const lastAvailable = {};
+TYPES.forEach(t => { lastAvailable[t] = false; });
+
+// -------------------------------------------------------------------------
+// Hub detection
+// -------------------------------------------------------------------------
+function isHubPresent() {
+    if (document.getElementById('tsh-sidebar-row')) return true;
+    const q = window[QUEUE_PROPERTY];
+    return !!(q && q.__tshPatched);
+}
+let hubPresent = isHubPresent();
+
+// -------------------------------------------------------------------------
+// Settings
+// -------------------------------------------------------------------------
+function loadSettings() {
+    const settings = {};
+    TYPES.forEach(type => {
+        const t = TARGETS[type];
+        const enabledRaw = localStorage.getItem(STORAGE_KEY(type, 'enabled'));
+        const waveformRaw = localStorage.getItem(STORAGE_KEY(type, 'waveform'));
+        const volumeRaw = localStorage.getItem(STORAGE_KEY(type, 'volume'));
+        const beepsRaw = localStorage.getItem(STORAGE_KEY(type, 'beeps'));
+        const genderRaw = localStorage.getItem(STORAGE_KEY(type, 'gender'));
+        const skinnyRaw = localStorage.getItem(STORAGE_KEY(type, 'skinny'));
+        const statusesRaw = localStorage.getItem(STORAGE_KEY(type, 'statuses'));
+
+        let volume = volumeRaw !== null ? Number(volumeRaw) : DEFAULT_VOLUME;
+        if (!Number.isFinite(volume)) volume = DEFAULT_VOLUME;
+        volume = Math.max(1, Math.min(100, volume));
+
+        let beeps = beepsRaw !== null ? Number(beepsRaw) : t.defaultBeeps;
+        if (!Number.isFinite(beeps) || beeps < 0) beeps = t.defaultBeeps;
+        beeps = Math.max(0, Math.min(10, beeps));
+
+        let statuses = t.defaultStatuses.slice();
+        if (statusesRaw !== null) {
+            try {
+                const parsed = JSON.parse(statusesRaw);
+                if (Array.isArray(parsed)) statuses = parsed.filter(v => t.statuses.includes(v));
+            } catch (err) { /* keep defaults */ }
+        }
+
+        settings[type] = {
+            enabled: enabledRaw !== null ? enabledRaw === 'true' : (t.legacy ? hubPresent : false),
+            waveform: waveformRaw || DEFAULT_WAVEFORM,
+            volume,
+            beeps,
+            gender: !t.fixedGender && GENDER_VALUES.includes(genderRaw) ? genderRaw : 'any',
+            skinny: skinnyRaw !== null ? skinnyRaw === 'true' : true,
+            statuses
+        };
+    });
+    return settings;
+}
+
+const settings = loadSettings();
+
+function persistType(type) {
+    const s = settings[type];
+    localStorage.setItem(STORAGE_KEY(type, 'enabled'), String(!!s.enabled));
+    localStorage.setItem(STORAGE_KEY(type, 'waveform'), s.waveform);
+    localStorage.setItem(STORAGE_KEY(type, 'volume'), String(s.volume));
+    localStorage.setItem(STORAGE_KEY(type, 'beeps'), String(s.beeps));
+    localStorage.setItem(STORAGE_KEY(type, 'gender'), s.gender);
+    localStorage.setItem(STORAGE_KEY(type, 'skinny'), String(!!s.skinny));
+    localStorage.setItem(STORAGE_KEY(type, 'statuses'), JSON.stringify(s.statuses));
+}
+
+// -------------------------------------------------------------------------
+// Audio
+// -------------------------------------------------------------------------
+let audioCtx = null;
+function getAudioCtx() {
+    if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        audioCtx = new Ctx();
+    }
+    return audioCtx;
+}
+
+function unlockAudio() {
+    const ctx = getAudioCtx();
+    if (!ctx) return Promise.resolve(null);
+    if (ctx.state === 'suspended') {
+        return ctx.resume().then(() => ctx).catch(() => ctx);
+    }
+    return Promise.resolve(ctx);
+}
+
+['pointerdown', 'keydown', 'touchstart'].forEach(evt => {
+    document.addEventListener(evt, () => { unlockAudio(); }, { once: true, passive: true, capture: true });
+});
+
+function scheduleBeeps(ctx, count, waveform, volumePercent) {
+    const peak = Math.max(0.0001, Math.min(1, (volumePercent || 0) / 100));
+    const type = waveform || DEFAULT_WAVEFORM;
+    for (let i = 0; i < count; i++) {
+        const startTime = ctx.currentTime + i * (BEEP_DURATION + BEEP_GAP);
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type;
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.0001, startTime);
+        gain.gain.exponentialRampToValueAtTime(peak, startTime + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startTime + BEEP_DURATION);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(startTime);
+        osc.stop(startTime + BEEP_DURATION + 0.02);
+    }
+}
+
+function playAlert(type) {
+    const s = settings[type];
+    if (!s) return;
+    const count = s.beeps;
+    if (!count) return;
+    unlockAudio().then(ctx => {
+        if (!ctx) return;
+        try {
+            scheduleBeeps(ctx, count, s.waveform, s.volume);
+        } catch (err) {
+            console.log('[MCA] Beep failed', err);
+        }
+    });
+}
+
+// -------------------------------------------------------------------------
+// Crime detection
+// -------------------------------------------------------------------------
+function crimesListFromPayload(response) {
+    const raw = response && response.DB && response.DB.crimesByType;
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw === 'object') return Object.values(raw);
+    return [];
+}
+
+function crimeActivity(c) {
+    const status = c && c.crimeInfo && c.crimeInfo.status;
+    if (!status) return '';
+    return String(status.icon || status.title || '').toLowerCase();
+}
+
+function crimeMuscular(c) {
+    const m = c && c.crimeInfo && c.crimeInfo.muscular;
+    return String(m || '').trim().toLowerCase();
+}
+
+function crimeGender(c) {
+    const g = c && c.crimeInfo && c.crimeInfo.gender;
+    return String(g || '').trim().toLowerCase();
+}
+
+function isAvailableFlag(c) {
+    return c && (c.available === true || c.available === 1 || c.available === '1');
+}
+
+function titlesMatch(crimeTitle, targetTitle) {
+    return String(crimeTitle || '').trim().toLowerCase() === String(targetTitle || '').trim().toLowerCase();
+}
+
+function isCrimeAvailable(crimes, type) {
+    const target = TARGETS[type];
+    if (!target) return false;
+    const s = settings[type];
+    for (let i = 0; i < crimes.length; i++) {
+        const c = crimes[i];
+        if (!c || !isAvailableFlag(c)) continue;
+        if (!titlesMatch(c.title, target.titleMatch)) continue;
+        if (s.skinny && crimeMuscular(c) !== REQUIRED_MUSCULAR) continue;
+        if (!target.fixedGender && s.gender !== 'any' && crimeGender(c) !== s.gender) continue;
+        if (s.statuses.length && !s.statuses.includes(crimeActivity(c))) continue;
+        return true;
+    }
+    return false;
+}
+
+// -------------------------------------------------------------------------
+// Green highlight on available crime tiles
+// -------------------------------------------------------------------------
+function applyHighlightOnce(titleMatch) {
+    const needle = String(titleMatch || '').toLowerCase();
+    if (!needle) return;
+    document.querySelectorAll('.crime-option').forEach(tile => {
+        if (tile.className.includes('locked')) return;
+        if (!tile.textContent.toLowerCase().includes(needle)) return;
+        tile.style.setProperty('background-color', HIGHLIGHT_COLOR, 'important');
+    });
+}
+
+function highlightAvailable(type) {
+    const titleMatch = TARGETS[type].titleMatch;
+    let tries = 0;
+    const timer = setInterval(() => {
+        tries++;
+        try {
+            applyHighlightOnce(titleMatch);
+        } catch (e) { /* ignore */ }
+        if (tries >= HIGHLIGHT_RETRY_COUNT) clearInterval(timer);
+    }, HIGHLIGHT_RETRY_MS);
+}
+
+function checkType(type, crimes) {
+    const available = isCrimeAvailable(crimes, type);
+    if (available && !lastAvailable[type] && settings[type] && settings[type].enabled) {
+        playAlert(type);
+        highlightAvailable(type);
+    }
+    lastAvailable[type] = available;
+}
+
+function handleCrimesPayload(response) {
+    const crimes = crimesListFromPayload(response);
+    if (!crimes.length) return;
+    TYPES.forEach(type => checkType(type, crimes));
+}
+
+// -------------------------------------------------------------------------
+// Fetch intercept
+// -------------------------------------------------------------------------
+let watching = false;
+function interceptFetch(pathNeedles, onJson) {
+    const needles = Array.isArray(pathNeedles) ? pathNeedles : [pathNeedles];
+    const originalFetch = window.fetch;
+    if (typeof originalFetch !== 'function') return;
+    window.fetch = function () {
+        const args = arguments;
+        return originalFetch.apply(this, args).then(response => {
+            try {
+                let url = '';
+                const arg0 = args[0];
+                if (typeof arg0 === 'string') url = arg0;
+                else if (arg0 && typeof arg0.url === 'string') url = arg0.url;
+                else url = String(arg0 || '');
+                if (needles.some(n => url.includes(n))) {
+                    response.clone().json().then(data => {
+                        try { onJson(data); } catch (e) {
+                            console.log('[MCA] handler error', e);
+                        }
+                    }).catch(() => {});
+                }
+            } catch (e) { /* ignore */ }
+            return response;
+        });
+    };
+}
+
+function startWatching() {
+    if (watching) return;
+    watching = true;
+    interceptFetch(['crimesData', 'sid=crimesData'], handleCrimesPayload);
+}
+
+// -------------------------------------------------------------------------
+// Standalone UI (when Hub is not present)
+// -------------------------------------------------------------------------
+const SETUP_OVERLAY_ID = 'mca-setup-overlay';
+const SETUP_STYLE_ID = 'mca-style';
+
+function installSetupStyles() {
+    if (document.getElementById(SETUP_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = SETUP_STYLE_ID;
+    style.textContent = `
+        .mca-overlay {
+            --mca-bg:#f5f5f5; --mca-text:#222; --mca-border:#c5c5c5;
+            --mca-hover:rgba(0,0,0,.07); --mca-row-bg:rgba(0,0,0,.025);
+            --mca-input-bg:#fff; --mca-toggle-off:#d8d8d8;
+            color-scheme:light;
+            position:fixed; inset:0; z-index:2147483000;
+            display:flex; align-items:flex-start; justify-content:center;
+            padding:12px; padding-top:max(12px, env(safe-area-inset-top, 0px));
+            font-family:Arial,Helvetica,sans-serif;
+        }
+        @media (prefers-color-scheme: dark) {
+            .mca-overlay {
+                --mca-bg:#252525; --mca-text:#e8e8e8; --mca-border:#4a4a4a;
+                --mca-hover:rgba(255,255,255,.08); --mca-row-bg:rgba(255,255,255,.03);
+                --mca-input-bg:#1a1a1a; --mca-toggle-off:#3a3a3a;
+                color-scheme:dark;
+            }
+        }
+        .mca-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.55); }
+        .mca-panel {
+            position:relative; width:min(100%, 720px);
+            max-height:calc(100vh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+            display:flex; flex-direction:column; overflow:hidden;
+            background:var(--mca-bg); color:var(--mca-text);
+            border:1px solid var(--mca-border); border-radius:4px;
+            box-shadow:0 10px 28px rgba(0,0,0,.4); font-size:12px;
+        }
+        .mca-header {
+            display:flex; align-items:center; justify-content:space-between;
+            padding:8px 10px; border-bottom:1px solid var(--mca-border); flex-shrink:0;
+        }
+        .mca-title { font-size:13px; font-weight:700; }
+        .mca-ver { opacity:.5; font-size:11px; font-weight:400; margin-left:5px; }
+        .mca-close {
+            width:26px; height:26px; border:0; border-radius:3px; background:transparent;
+            color:inherit; font-size:18px; line-height:1; cursor:pointer;
+        }
+        .mca-close:hover { background:var(--mca-hover); }
+        .mca-body { flex:1; overflow-y:auto; padding:10px; -webkit-overflow-scrolling:touch; }
+        .mca-section {
+            padding:8px 10px; border:1px solid var(--mca-border); border-radius:4px;
+            background:var(--mca-row-bg);
+        }
+        .mca-section-head {
+            display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;
+        }
+        .mca-section-title { font-size:12px; font-weight:700; }
+        .mca-scroll-hint {
+            display:inline-flex; align-items:center; justify-content:center;
+            width:24px; height:22px; padding:0; border:1px solid var(--mca-border);
+            border-radius:3px; background:var(--mca-input-bg); color:inherit;
+            font-size:12px; line-height:1; cursor:pointer;
+        }
+        .mca-scroll-hint { background:#4e8ac7; border-color:#4e8ac7; color:#fff; }
+        .mca-scroll-hint:hover { filter:brightness(.92); }
+        .mca-scroll-hint[hidden] { display:none; }
+        .mca-table-outer { position:relative; }
+        .mca-table-outer.mca-more::after {
+            content:''; position:absolute; top:0; right:0; bottom:0; width:28px;
+            pointer-events:none;
+            background:linear-gradient(to right, transparent, var(--mca-bg));
+        }
+        .mca-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+        .mca-table { min-width:500px; display:flex; flex-direction:column; gap:6px; }
+        .mca-row { display:grid; gap:4px; align-items:center; }
+        .mca-head {
+            font-size:10px; font-weight:700; opacity:.6;
+            padding-bottom:4px; border-bottom:1px solid var(--mca-border);
+        }
+        .mca-cell { display:flex; flex-direction:column; min-width:0; }
+        .mca-name { font-size:12px; font-weight:600; }
+        .mca-input {
+            width:100%; box-sizing:border-box; padding:3px 4px; min-height:26px;
+            border:1px solid var(--mca-border); border-radius:3px;
+            background:var(--mca-input-bg); color:var(--mca-text); font-size:12px;
+        }
+        .mca-input[type=number] { -moz-appearance:textfield; }
+        .mca-input[type=number]::-webkit-inner-spin-button,
+        .mca-input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+        .mca-check { width:16px; height:16px; margin:0; align-self:center; cursor:pointer; }
+        .mca-toggle {
+            width:100%; min-height:22px; padding:2px 0; text-align:center;
+            border:1px solid var(--mca-border); border-radius:11px;
+            background:var(--mca-toggle-off); color:inherit;
+            font-size:11px; font-weight:700; cursor:pointer;
+        }
+        .mca-toggle.mca-on { background:#4e8ac7; border-color:#4e8ac7; color:#fff; }
+        .mca-btn {
+            width:100%; min-height:26px; padding:2px 0;
+            border:1px solid #3d6eac; border-radius:3px; background:#3d6eac;
+            color:#fff; font-size:12px; cursor:pointer;
+        }
+        .mca-btn:hover { background:#355e94; }
+        .mca-input:disabled { opacity:.6; cursor:default; }
+        .mca-multi {
+            width:100%; box-sizing:border-box; padding:3px 4px; min-height:26px;
+            text-align:left; border:1px solid var(--mca-border); border-radius:3px;
+            background:var(--mca-input-bg); color:var(--mca-text); font-size:12px;
+            cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+        }
+        .mca-pop {
+            position:fixed; z-index:5; padding:4px;
+            background:var(--mca-bg); color:var(--mca-text);
+            border:1px solid var(--mca-border); border-radius:6px;
+            box-shadow:0 8px 24px rgba(0,0,0,.35); font-size:12px;
+        }
+        .mca-pop-row {
+            display:flex; align-items:center; justify-content:space-between; gap:12px;
+            padding:7px 8px; border-radius:4px; cursor:pointer;
+        }
+        .mca-pop-row:hover { background:var(--mca-hover); }
+        .mca-pop-row input { width:16px; height:16px; margin:0; cursor:pointer; }
+        .mca-footer {
+            padding:6px 10px; border-top:1px solid var(--mca-border);
+            font-size:10px; opacity:.5; text-align:center; flex-shrink:0;
+        }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+}
+
+function closeSetupMulti() {
+    const p = document.getElementById('mca-multi-pop');
+    if (p) {
+        if (p._cleanup) p._cleanup();
+        p.remove();
+    }
+}
+
+function openSetupMulti(anchor, options, getSel, onToggle) {
+    closeSetupMulti();
+    const pop = document.createElement('div');
+    pop.id = 'mca-multi-pop';
+    pop.className = 'mca-pop';
+    const sel = new Set(getSel());
+    options.forEach(opt => {
+        const row = document.createElement('label');
+        row.className = 'mca-pop-row';
+        const text = document.createElement('span');
+        text.textContent = opt.label;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = sel.has(opt.value);
+        cb.addEventListener('change', () => onToggle(opt.value, cb.checked));
+        row.append(text, cb);
+        pop.appendChild(row);
+    });
+    (anchor.closest('.mca-overlay') || document.body).appendChild(pop);
+
+    const r = anchor.getBoundingClientRect();
+    const w = Math.max(190, r.width);
+    const left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - w - 8));
+    let top = r.bottom + 4;
+    const h = pop.offsetHeight;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
+    pop.style.minWidth = w + 'px';
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+
+    const onDown = e => {
+        if (!pop.contains(e.target) && !anchor.contains(e.target)) closeSetupMulti();
+    };
+    const onKey = e => {
+        if (e.key === 'Escape') {
+            e.stopPropagation();
+            closeSetupMulti();
+        }
+    };
+    pop._cleanup = () => {
+        document.removeEventListener('pointerdown', onDown, true);
+        document.removeEventListener('keydown', onKey, true);
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    document.addEventListener('keydown', onKey, true);
+}
+
+function createSetupControl(field, values) {
+    const commit = () => applyPrefValues(values);
+    const wrap = document.createElement('div');
+    wrap.className = 'mca-cell';
+    let el = null;
+    if (field.type === 'label') {
+        el = document.createElement('span');
+        el.className = 'mca-name';
+        el.textContent = field.text || field.label || field.key;
+    } else if (field.type === 'toggle') {
+        el = document.createElement('button');
+        el.type = 'button';
+        const paint = () => {
+            const on = !!values[field.key];
+            el.textContent = on ? 'On' : 'Off';
+            el.className = 'mca-toggle' + (on ? ' mca-on' : '');
+            el.setAttribute('aria-pressed', on ? 'true' : 'false');
+        };
+        paint();
+        el.addEventListener('click', () => {
+            values[field.key] = !values[field.key];
+            paint();
+            commit();
+        });
+    } else if (field.type === 'check') {
+        el = document.createElement('input');
+        el.type = 'checkbox';
+        el.className = 'mca-check';
+        el.checked = !!values[field.key];
+        if (field.hint) el.title = field.hint;
+        el.addEventListener('change', () => {
+            values[field.key] = el.checked;
+            commit();
+        });
+    } else if (field.type === 'select') {
+        el = document.createElement('select');
+        el.className = 'mca-input';
+        (field.options || []).forEach(opt => {
+            const o = document.createElement('option');
+            o.value = opt.value;
+            o.textContent = opt.label;
+            if (String(values[field.key]) === String(opt.value)) o.selected = true;
+            el.appendChild(o);
+        });
+        if (field.hint) el.title = field.hint;
+        if (field.disabled) el.disabled = true;
+        el.addEventListener('change', () => {
+            values[field.key] = el.value;
+            commit();
+        });
+    } else if (field.type === 'multi') {
+        el = document.createElement('button');
+        el.type = 'button';
+        el.className = 'mca-multi';
+        const getSel = () => (Array.isArray(values[field.key]) ? values[field.key] : []);
+        const paint = () => {
+            const sel = getSel().filter(v => field.options.some(o => o.value === v));
+            let text = field.emptyLabel || 'Any';
+            if (sel.length === 1) {
+                const o = field.options.find(x => x.value === sel[0]);
+                text = o ? o.label : sel[0];
+            } else if (sel.length > 1) {
+                text = sel.length + ' selected';
+            }
+            el.textContent = text + ' \u25BE';
+            el.title = field.hint || '';
+        };
+        paint();
+        el.addEventListener('click', () => {
+            if (document.getElementById('mca-multi-pop')) { closeSetupMulti(); return; }
+            openSetupMulti(el, field.options, getSel, (value, on) => {
+                const next = getSel().filter(v => v !== value);
+                if (on) next.push(value);
+                values[field.key] = next;
+                paint();
+                commit();
+            });
+        });
+    } else if (field.type === 'number') {
+        el = document.createElement('input');
+        el.type = 'number';
+        el.className = 'mca-input';
+        if (field.min !== undefined) el.min = field.min;
+        if (field.max !== undefined) el.max = field.max;
+        if (field.step !== undefined) el.step = field.step;
+        if (field.hint) el.title = field.hint;
+        el.value = values[field.key];
+        el.addEventListener('change', () => {
+            let v = Number(el.value);
+            if (!Number.isFinite(v)) { el.value = values[field.key]; return; }
+            if (field.min !== undefined) v = Math.max(field.min, v);
+            if (field.max !== undefined) v = Math.min(field.max, v);
+            el.value = v;
+            values[field.key] = v;
+            commit();
+        });
+    } else if (field.type === 'button') {
+        el = document.createElement('button');
+        el.type = 'button';
+        el.className = 'mca-btn';
+        el.textContent = field.icon || field.label || field.key;
+        el.title = field.hint || field.label || '';
+        el.addEventListener('click', () => {
+            if (typeof field.onClick === 'function') field.onClick();
+        });
+    }
+    if (el) wrap.appendChild(el);
+    return wrap;
+}
+
+function attachScrollHint(wrap, outer, btn) {
+    const atEnd = () => wrap.scrollLeft >= (wrap.scrollWidth - wrap.clientWidth) - 2;
+    const update = () => {
+        const overflow = (wrap.scrollWidth - wrap.clientWidth) > 2;
+        const end = atEnd();
+        btn.hidden = !overflow;
+        outer.classList.toggle('mca-more', overflow && !end);
+        btn.textContent = end ? '\u25C2' : '\u25B8';
+        btn.title = end ? 'Scroll back left' : 'Scroll right for more settings';
+        btn.setAttribute('aria-label', btn.title);
+    };
+    btn.addEventListener('click', () => {
+        const max = wrap.scrollWidth - wrap.clientWidth;
+        const left = atEnd() ? 0 : Math.min(max, wrap.scrollLeft + wrap.clientWidth * 0.8);
+        if (typeof wrap.scrollTo === 'function') wrap.scrollTo({ left, behavior: 'smooth' });
+        else wrap.scrollLeft = left;
+    });
+    wrap.addEventListener('scroll', update, { passive: true });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(update).observe(wrap);
+    else window.addEventListener('resize', update);
+    requestAnimationFrame(update);
+}
+
+function renderSetupTable(body) {
+    const fields = buildPrefFields();
+    const byKey = new Map(fields.map(f => [f.key, f]));
+    const values = buildPrefValues();
+    const section = buildPrefSections()[0];
+
+    const sec = document.createElement('div');
+    sec.className = 'mca-section';
+
+    const head0 = document.createElement('div');
+    head0.className = 'mca-section-head';
+    const title = document.createElement('div');
+    title.className = 'mca-section-title';
+    title.textContent = section.title;
+    const hint = document.createElement('button');
+    hint.type = 'button';
+    hint.className = 'mca-scroll-hint';
+    hint.hidden = true;
+    head0.append(title, hint);
+    sec.appendChild(head0);
+
+    const outer = document.createElement('div');
+    outer.className = 'mca-table-outer';
+    const wrap = document.createElement('div');
+    wrap.className = 'mca-table-wrap';
+    const table = document.createElement('div');
+    table.className = 'mca-table';
+    if (section.minWidth) table.style.minWidth = section.minWidth;
+
+    const head = document.createElement('div');
+    head.className = 'mca-row mca-head';
+    head.style.gridTemplateColumns = section.widths;
+    section.columns.forEach(c => {
+        const cell = document.createElement('span');
+        cell.textContent = c;
+        head.appendChild(cell);
+    });
+    table.appendChild(head);
+
+    section.rows.forEach(keys => {
+        const row = document.createElement('div');
+        row.className = 'mca-row';
+        row.style.gridTemplateColumns = section.widths;
+        keys.forEach(k => {
+            const f = byKey.get(k);
+            row.appendChild(f ? createSetupControl(f, values) : document.createElement('span'));
+        });
+        table.appendChild(row);
+    });
+
+    wrap.appendChild(table);
+    outer.appendChild(wrap);
+    sec.appendChild(outer);
+    body.appendChild(sec);
+    attachScrollHint(wrap, outer, hint);
+}
+
+function onSetupKeydown(e) {
+    if (e.key !== 'Escape') return;
+    if (e.target && e.target.tagName === 'SELECT') return;
+    if (document.getElementById('mca-multi-pop')) return;
+    closeSetupPopup();
+}
+
+function closeSetupPopup() {
+    const overlay = document.getElementById(SETUP_OVERLAY_ID);
+    closeSetupMulti();
+    if (overlay) overlay.remove();
+    document.removeEventListener('keydown', onSetupKeydown, true);
+}
+
+function openSetupPopup() {
+    if (document.getElementById(SETUP_OVERLAY_ID)) return;
+    installSetupStyles();
+    unlockAudio();
+    const overlay = document.createElement('div');
+    overlay.id = SETUP_OVERLAY_ID;
+    overlay.className = 'mca-overlay';
+    const backdrop = document.createElement('div');
+    backdrop.className = 'mca-backdrop';
+    backdrop.addEventListener('click', closeSetupPopup);
+    const panel = document.createElement('div');
+    panel.className = 'mca-panel';
+    const header = document.createElement('div');
+    header.className = 'mca-header';
+    const title = document.createElement('div');
+    title.className = 'mca-title';
+    title.textContent = SCRIPT_NAME;
+    const ver = document.createElement('span');
+    ver.className = 'mca-ver';
+    ver.textContent = 'v' + SCRIPT_VERSION;
+    title.appendChild(ver);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'mca-close';
+    close.setAttribute('aria-label', 'Close');
+    close.textContent = '\u00D7';
+    close.addEventListener('click', closeSetupPopup);
+    header.append(title, close);
+    const body = document.createElement('div');
+    body.className = 'mca-body';
+    renderSetupTable(body);
+    const footer = document.createElement('div');
+    footer.className = 'mca-footer';
+    footer.textContent = 'Changes are saved automatically.';
+    panel.append(header, body, footer);
+    overlay.append(backdrop, panel);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onSetupKeydown, true);
+}
+
+// Torn is a single-page app: the pickpocketing view is created and destroyed as you
+// navigate, so the button is re-added whenever the view appears without it.
+let standaloneObserver = null;
+function ensureStandaloneButton() {
+    if (hubPresent) return;
+    const root = document.querySelector('.pickpocketing-root');
+    if (!root) return;
+    if (root.querySelector('#crime-alert-div')) return;
+    const stale = document.getElementById('crime-alert-div');
+    if (stale) stale.remove();
+    const box = document.createElement('div');
+    box.id = 'crime-alert-div';
+    box.style.marginBottom = '10px';
+    const btn = document.createElement('a');
+    btn.id = 'mca-setup-btn';
+    btn.className = 'torn-btn btn-big';
+    btn.style.display = 'inline-block';
+    btn.textContent = SCRIPT_NAME + ' Setup';
+    btn.addEventListener('click', e => {
+        e.preventDefault();
+        openSetupPopup();
+    });
+    box.appendChild(btn);
+    root.appendChild(box);
+}
+
+function initStandaloneUI() {
+    if (standaloneObserver) return;
+    let pending = false;
+    const schedule = () => {
+        if (pending) return;
+        pending = true;
+        requestAnimationFrame(() => {
+            pending = false;
+            ensureStandaloneButton();
+        });
+    };
+    standaloneObserver = new MutationObserver(schedule);
+    standaloneObserver.observe(document.documentElement, { childList: true, subtree: true });
+    schedule();
+}
+
+function removeStandaloneUI() {
+    if (standaloneObserver) {
+        standaloneObserver.disconnect();
+        standaloneObserver = null;
+    }
+    const div = document.getElementById('crime-alert-div');
+    if (div) div.remove();
+    closeSetupPopup();
+}
+
+// -------------------------------------------------------------------------
+// Script Hub prefs
+// -------------------------------------------------------------------------
+const WAVEFORM_OPTIONS = [
+    { value: 'sine', label: 'Sine' },
+    { value: 'triangle', label: 'Triangle' },
+    { value: 'square', label: 'Square' },
+    { value: 'sawtooth', label: 'Sawtooth' }
+];
+
+const GENDER_OPTIONS = [
+    { value: 'any', label: 'Any' },
+    { value: 'female', label: 'Female' },
+    { value: 'male', label: 'Male' }
+];
+
+const PREF_COLUMNS = ['On', 'Target', 'Gender', 'Status', 'Skinny', 'Beeps', 'Vol %', 'Tone', ''];
+const PREF_WIDTHS = '44px 112px 74px minmax(100px,1fr) 44px 44px 48px minmax(76px,.6fr) 30px';
+const PREF_MIN_WIDTH = '604px';
+const PREF_ROW_KEYS = ['Enabled', 'Name', 'Gender', 'Status', 'Skinny', 'Beeps', 'Volume', 'Waveform', 'Test'];
+
+function statusOptions(type) {
+    const t = TARGETS[type];
+    const order = Object.keys(STATUS_LABELS);
+    return t.statuses.slice()
+        .sort((a, b) => order.indexOf(a) - order.indexOf(b))
+        .map(v => ({ value: v, label: t.statusLabels[v] || STATUS_LABELS[v] || v }));
+}
+
+function buildPrefFields() {
+    const fields = [];
+    TYPES.forEach(type => {
+        const t = TARGETS[type];
+        fields.push({
+            key: type + 'Enabled',
+            label: 'On',
+            type: 'toggle',
+            default: settings[type].enabled
+        });
+        fields.push({
+            key: type + 'Name',
+            label: 'Target',
+            type: 'label',
+            text: t.label
+        });
+        fields.push({
+            key: type + 'Gender',
+            label: 'Gender',
+            type: 'select',
+            options: GENDER_OPTIONS,
+            disabled: !!t.fixedGender,
+            hint: t.fixedGender ? 'Gender is part of the name' : 'Any alerts for both genders'
+        });
+        fields.push({
+            key: type + 'Status',
+            label: 'Status',
+            type: 'multi',
+            options: statusOptions(type),
+            emptyLabel: 'Any',
+            hint: 'Tick the statuses to alert for; none ticked alerts for all'
+        });
+        fields.push({
+            key: type + 'Skinny',
+            label: 'Skinny',
+            type: 'check',
+            hint: 'Checked: only alert for skinny targets'
+        });
+        fields.push({
+            key: type + 'Beeps',
+            label: 'Beeps',
+            type: 'number',
+            min: 0,
+            max: 10,
+            step: 1,
+            hint: '0 = no sound, green highlight only'
+        });
+        fields.push({
+            key: type + 'Volume',
+            label: 'Volume (%)',
+            type: 'number',
+            min: 1,
+            max: 100,
+            step: 5
+        });
+        fields.push({
+            key: type + 'Waveform',
+            label: 'Tone',
+            type: 'select',
+            options: WAVEFORM_OPTIONS
+        });
+        fields.push({
+            key: type + 'Test',
+            label: 'Test tone',
+            type: 'button',
+            icon: '\uD83D\uDD0A',
+            onClick: () => unlockAudio().then(() => playAlert(type))
+        });
+    });
+    return fields;
+}
+
+function buildPrefSections() {
+    return [{
+        title: 'Targets',
+        table: true,
+        columns: PREF_COLUMNS,
+        widths: PREF_WIDTHS,
+        minWidth: PREF_MIN_WIDTH,
+        rows: TYPES.map(type => PREF_ROW_KEYS.map(k => type + k))
+    }];
+}
+
+function buildPrefValues() {
+    const values = {};
+    TYPES.forEach(type => {
+        const t = TARGETS[type];
+        values[type + 'Enabled'] = settings[type].enabled;
+        values[type + 'Gender'] = t.fixedGender || settings[type].gender;
+        values[type + 'Status'] = settings[type].statuses.slice();
+        values[type + 'Skinny'] = settings[type].skinny;
+        values[type + 'Beeps'] = settings[type].beeps;
+        values[type + 'Waveform'] = settings[type].waveform;
+        values[type + 'Volume'] = settings[type].volume;
+    });
+    return values;
+}
+
+function applyPrefValues(values) {
+    TYPES.forEach(type => {
+        const t = TARGETS[type];
+        const wasEnabled = settings[type].enabled;
+        const nowEnabled = !!values[type + 'Enabled'];
+        settings[type].enabled = nowEnabled;
+        settings[type].waveform = values[type + 'Waveform'] || DEFAULT_WAVEFORM;
+        settings[type].gender = !t.fixedGender && GENDER_VALUES.includes(values[type + 'Gender']) ? values[type + 'Gender'] : 'any';
+        settings[type].skinny = !!values[type + 'Skinny'];
+        settings[type].statuses = Array.isArray(values[type + 'Status'])
+            ? values[type + 'Status'].filter(v => t.statuses.includes(v))
+            : [];
+        let beeps = Number(values[type + 'Beeps']);
+        if (!Number.isFinite(beeps) || beeps < 0) beeps = t.defaultBeeps;
+        settings[type].beeps = Math.max(0, Math.min(10, beeps));
+        let vol = Number(values[type + 'Volume']);
+        if (!Number.isFinite(vol) || vol <= 0) vol = DEFAULT_VOLUME;
+        settings[type].volume = Math.max(1, Math.min(100, vol));
+        persistType(type);
+        if (nowEnabled && !wasEnabled) {
+            unlockAudio().then(() => playAlert(type));
+        }
+    });
+}
+
+function registerWithHub() {
+    const registration = {
+        id: HUB_ID,
+        name: SCRIPT_NAME,
+        version: SCRIPT_VERSION,
+        order: 200,
+        open: () => {
+            document.dispatchEvent(new CustomEvent('torn-script-hub:open', {
+                detail: { scriptId: HUB_ID }
+            }));
+        },
+        status: () => '',
+        prefs: {
+            fields: buildPrefFields(),
+            sections: buildPrefSections(),
+            values: buildPrefValues(),
+            onSave: values => applyPrefValues(values)
+        }
+    };
+    (window[QUEUE_PROPERTY] = window[QUEUE_PROPERTY] || []).push(registration);
+    document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail: registration }));
+}
+
+function adoptHubMode() {
+    hubPresent = true;
+    removeStandaloneUI();
+    registerWithHub();
+}
+
+function watchForHub() {
+    if (hubPresent) return;
+    const poll = setInterval(() => {
+        if (isHubPresent()) {
+            clearInterval(poll);
+            adoptHubMode();
+        }
+    }, 500);
+    document.addEventListener('torn-script-hub:ready', () => {
+        clearInterval(poll);
+        if (!hubPresent) adoptHubMode();
+    }, { once: true });
+}
+
+// =========================================================================
+// CRIME MORALE DIFFICULTY INJECTION
+// =========================================================================
+let ppObserver = null;
+let ppExitObserver = null;
+let ppRootObserver = null;
+let ppObservedRoot = null;
+
+function installDifficultyStyles() {
+    if (document.getElementById('mca-pp-style')) return;
+    const style = document.createElement('style');
+    style.id = 'mca-pp-style';
+    style.textContent = `
+        :root {
+            --cm-pp-level-1: #37b24d;
+            --cm-pp-level-2: #95af14;
+            --cm-pp-level-3: #f4cc00;
+            --cm-pp-level-4: #fa9201;
+            --cm-pp-level-5: #e01111;
+            --cm-pp-level-6: #a016eb;
+            --cm-pp-filter-level-1: brightness(0) saturate(100%) invert(61%) sepia(11%) saturate(2432%) hue-rotate(79deg) brightness(91%) contrast(96%);
+            --cm-pp-filter-level-2: brightness(0) saturate(100%) invert(62%) sepia(80%) saturate(2102%) hue-rotate(32deg) brightness(99%) contrast(84%);
+            --cm-pp-filter-level-3: brightness(0) saturate(100%) invert(71%) sepia(53%) saturate(1820%) hue-rotate(9deg) brightness(107%) contrast(102%);
+            --cm-pp-filter-level-4: brightness(0) saturate(100%) invert(61%) sepia(62%) saturate(1582%) hue-rotate(356deg) brightness(94%) contrast(108%);
+            --cm-pp-filter-level-5: brightness(0) saturate(100%) invert(12%) sepia(72%) saturate(5597%) hue-rotate(354deg) brightness(105%) contrast(101%);
+            --cm-pp-filter-level-6: brightness(0) saturate(100%) invert(26%) sepia(84%) saturate(4389%) hue-rotate(271deg) brightness(86%) contrast(119%);
+        }
+        @keyframes cm-fade-out {
+            from { opacity: 1; }
+            to { opacity: 0; visibility: hidden; }
+        }
+        .cm-overlay { position: relative; }
+        .cm-overlay:after {
+            content: ''; position: absolute;
+            background: repeating-linear-gradient(135deg, #2223, #2223 70px, #0003 70px, #0003 80px);
+            top: 0; left: 0; width: 100%; height: 100%; z-index: 900000;
+        }
+        .cm-overlay-fade:after {
+            animation-name: cm-fade-out;
+            animation-duration: 0.2s;
+            animation-timing-function: ease-in;
+            animation-fill-mode: forwards;
+            animation-delay: 0.4s
+        }
+        .cm-pp-level-1 { color: var(--cm-pp-level-1); }
+        .cm-pp-level-2 { color: var(--cm-pp-level-2); }
+        .cm-pp-level-3 { color: var(--cm-pp-level-3); }
+        .cm-pp-level-4 { color: var(--cm-pp-level-4); }
+        .cm-pp-level-5 { color: var(--cm-pp-level-5); }
+        .cm-pp-level-6 { color: var(--cm-pp-level-6); }
+        
+        .cm-pp-level-1 [class*=timerCircle___] [class*=icon___] { filter: var(--cm-pp-filter-level-1); }
+        .cm-pp-level-2 [class*=timerCircle___] [class*=icon___] { filter: var(--cm-pp-filter-level-2); }
+        .cm-pp-level-3 [class*=timerCircle___] [class*=icon___] { filter: var(--cm-pp-filter-level-3); }
+        .cm-pp-level-4 [class*=timerCircle___] [class*=icon___] { filter: var(--cm-pp-filter-level-4); }
+        .cm-pp-level-5 [class*=timerCircle___] [class*=icon___] { filter: var(--cm-pp-filter-level-5); }
+        .cm-pp-level-6 [class*=timerCircle___] [class*=icon___] { filter: var(--cm-pp-filter-level-6); }
+        
+        .cm-pp-level-1 [class*=timerCircle___] .CircularProgressbar-path { stroke: var(--cm-pp-level-1) !important; }
+        .cm-pp-level-2 [class*=timerCircle___] .CircularProgressbar-path { stroke: var(--cm-pp-level-2) !important; }
+        .cm-pp-level-3 [class*=timerCircle___] .CircularProgressbar-path { stroke: var(--cm-pp-level-3) !important; }
+        .cm-pp-level-4 [class*=timerCircle___] .CircularProgressbar-path { stroke: var(--cm-pp-level-4) !important; }
+        .cm-pp-level-5 [class*=timerCircle___] .CircularProgressbar-path { stroke: var(--cm-pp-level-5) !important; }
+        .cm-pp-level-6 [class*=timerCircle___] .CircularProgressbar-path { stroke: var(--cm-pp-level-6) !important; }
+        
+        .cm-pp-level-1 [class*=commitButton___] { border: 2px solid var(--cm-pp-level-1); }
+        .cm-pp-level-2 [class*=commitButton___] { border: 2px solid var(--cm-pp-level-2); }
+        .cm-pp-level-3 [class*=commitButton___] { border: 2px solid var(--cm-pp-level-3); }
+        .cm-pp-level-4 [class*=commitButton___] { border: 2px solid var(--cm-pp-level-4); }
+        .cm-pp-level-5 [class*=commitButton___] { border: 2px solid var(--cm-pp-level-5); }
+        .cm-pp-level-6 [class*=commitButton___] { border: 2px solid var(--cm-pp-level-6); }
+        
+        .cm-pp-best-build:not(.crime-option-locked) [class*=physicalProps___]:before {
+            content: '\u2713 '; font-weight: bold; color: var(--cm-pp-level-2);
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function refreshPickpocketing() {
+    const wrapper = document.querySelector('.pickpocketing-root');
+    if (!wrapper) return;
+    const now = Date.now();
+    
+    if (ppExitObserver) ppExitObserver.disconnect();
+    let isBelowExiting = false;
+    
+    wrapper.querySelectorAll('.crime-option').forEach((element) => {
+        const $this = $(element);
+        const top = Math.floor($this.position().top);
+        const oldTop = parseInt($this.attr('data-cm-top'));
+        if (top !== oldTop) {
+            $this.attr('data-cm-top', top.toString());
+            $this.attr('data-cm-timestamp', now.toString());
+        }
+        
+        const timestamp = parseInt($this.attr('data-cm-timestamp')) || now;
+        const isLocked = $this.is('[class*=locked___]');
+        const isExiting = $this.is('[class*=exitActive___]');
+        const isRecentlyMoved = now - timestamp <= 1000;
+        
+        $this.find('[class*=commitButtonSection___]')
+            .toggleClass('cm-overlay', !isLocked && (isBelowExiting || isRecentlyMoved))
+            .toggleClass('cm-overlay-fade', !isLocked && !isBelowExiting && isRecentlyMoved);
+            
+        isBelowExiting = isBelowExiting || isExiting;
+        
+        if (!$this.is('[class*=cm-pp-level-]')) {
+            const markAndTime = $this.find('[class*=titleAndProps___] > *:first-child').text().trim().toLowerCase();
+            const iconPosStr = $this.find('[class*=timerCircle___] [class*=icon___]').css('background-position-y');
+            const iconPosMatch = iconPosStr?.match(/(-?\d+)px/);
+            const iconPos = -parseInt(iconPosMatch?.[1] ?? '');
+            const build = $this.find('[class*=physicalProps___]').text().trim().toLowerCase();
+            
+            for (const [mark, markInfo] of Object.entries(PP_MARKS)) {
+                if (markAndTime.startsWith(mark.toLowerCase())) {
+                    if (markInfo.status.includes(iconPos) && markInfo.build.some((b) => build.includes(b.toLowerCase()))) {
+                        $this.addClass(`cm-pp-level-${markInfo.level}`);
+                        if (markInfo.bestBuild?.some((b) => build.includes(b.toLowerCase()))) {
+                            $this.addClass(`cm-pp-best-build`);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        
+        if (ppExitObserver) {
+            ppExitObserver.observe(element, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
+        }
+    });
+}
+
+function attachToRoot() {
+    const wrapper = document.querySelector('.pickpocketing-root');
+    if (!wrapper) return;
+
+    if (ppObservedRoot === wrapper && ppObserver) return;
+
+    if (ppObserver) { ppObserver.disconnect(); ppObserver = null; }
+    if (ppExitObserver) { ppExitObserver.disconnect(); ppExitObserver = null; }
+
+    ppObservedRoot = wrapper;
+    ppObserver = new MutationObserver(refreshPickpocketing);
+    ppExitObserver = new MutationObserver(function (mutations) {
+        for (const mutation of mutations) {
+            if (
+                mutation.oldValue.indexOf('exitActive___') < 0 &&
+                mutation.target.className.indexOf('exitActive___') >= 0
+            ) {
+                refreshPickpocketing();
+                return;
+            }
+        }
+    });
+
+    ppObserver.observe(wrapper, { childList: true, characterData: true, subtree: true });
+    refreshPickpocketing();
+}
+
+function startDifficultyTracking() {
+    installDifficultyStyles();
+
+    if (!ppRootObserver) {
+        ppRootObserver = new MutationObserver(() => {
+            attachToRoot();
+        });
+        ppRootObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    attachToRoot();
+}
+
+// -------------------------------------------------------------------------
+// Start
+// -------------------------------------------------------------------------
+startWatching();
+initStandaloneUI();
+registerWithHub();
+if (hubPresent) {
+    adoptHubMode();
+} else {
+    watchForHub();
+}
+
+startDifficultyTracking();
+
+console.log('[MCA] v' + SCRIPT_VERSION + ' started · hub=' + hubPresent);
+})();
