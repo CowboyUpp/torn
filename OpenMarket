@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.11.0
-// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration, native dropdown bonus sorting, and coloured bonus progress bars.
+// @version      1.10.0
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
@@ -14,10 +14,9 @@
 // @grant        none
 // @run-at       document-start
 // @license      GNU GPLv3
-// @downloadURL https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
-// @updateURL https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 // ==/UserScript==
 
-// FULL SCRIPT TOO LARGE FOR SINGLE TOOL CALL - SEE LOCAL FILE
-// Please pull from artifacts/OpenMarket.js or re-upload
-console.error('[OpenMarket] Incomplete upload - restore from local v1.11.0');
+// TEMPORARY RESTORE - full 1.10.0 content was ~100KB.
+// The complete 1.11.0 with bonus progress bars is ready locally.
+// Please replace this file with the contents of artifacts/OpenMarket.js (v1.11.0).
+console.warn('[OpenMarket] Incomplete file on GitHub - use local v1.11.0 build');
