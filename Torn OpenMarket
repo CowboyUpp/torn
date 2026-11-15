@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.7.11
-// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration and native dropdown bonus sorting.
+// @version      1.12.23
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration, native dropdown bonus sorting, and coloured bonus progress bars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
 // @match        https://www.torn.com/bazaar.php*
 // @match        https://www.torn.com/displaycase.php*
 // @match        https://www.torn.com/item.php*
+// @match        https://www.torn.com/factions.php*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @run-at       document-start
@@ -16,41 +17,6 @@
 // @downloadURL https://update.greasyfork.org/scripts/589775/OpenMarket.user.js
 // @updateURL https://update.greasyfork.org/scripts/589775/OpenMarket.meta.js
 // ==/UserScript==
-
-// CHANGELOG 1.7.11:
-// - Added the new Torn item Nightstick (ID 1552) to the base-stat map.
-// - Quality calculation and display now work for Nightstick in Item Market,
-//   Bazaar, Auction House, Display Case, and Inventory.
-// - No PDA layout, filtering, matching, sorting, cache, or network logic changed.
-
-// CHANGELOG 1.7.10:
-// - PDA layout refinement: removed the device-specific width/margin guess for
-//   injected Quality and bonus sliders. On PDA, each injected slider now measures
-//   Torn's actual native slider geometry and mirrors its horizontal position and
-//   width. A ResizeObserver keeps the alignment current when the PDA layout changes
-//   because of resizing, orientation changes, or other responsive reflow.
-// - Desktop layout is unchanged. No filtering, matching, sorting, cache, or network
-//   logic changed.
-
-// CHANGELOG 1.7.9:
-// - PDA layout refinement: OpenMarket's injected Quality and bonus sliders now
-//   stack one per row while matching the exact horizontal width of Torn's native
-//   Price / Damage / Accuracy sliders. The injected row copies the native row's
-//   horizontal padding instead of using an independent width/padding guess.
-// - No filtering, matching, sorting, cache, or network logic changed.
-//
-// CHANGELOG 1.7.8:
-// - Refined the dedicated OpenMarket filter-slider row to match Torn's native
-//   three-column spacing and divider treatment on wider layouts.
-//
-// CHANGELOG 1.7.7:
-// - Fixed the OpenMarket filter-slider layout after Torn UI changes. Injected
-//   sliders remain in their own dedicated row without affecting native
-//   Price / Damage / Accuracy sliders.
-//
-// CHANGELOG 1.7.6:
-// - Kept the injected filter-slider row independent of Torn's native slider-row
-//   classes so its layout can be controlled reliably by OpenMarket CSS.
 
 (function () {
     'use strict';
@@ -67,10 +33,327 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.7.11';
+    const HUB_VERSION = '1.12.23';
     const HUB_ICON = '';
 
+    // =========================================================================
+    // COLOURS
+    //
+    // Defaults are the original hardcoded values, kept per-mode. The user picks
+    // a preset from a fixed palette per role; unless they pick "Default", the
+    // same preset is applied to both dark and light mode (parallel behaviour).
+    // "Default" restores the mode-specific original value.
+    // =========================================================================
+    const DEFAULT_COLOURS = {
+        tiers: {
+            dark:  ['#e4e4e4', '#57efea', '#c286ff', '#ffd700', '#e05555'],
+            light: ['#717171', '#009590', '#8e19c1', '#e37100', '#e05555']
+        },
+        bonus:        { dark: '#e8d1ff', light: '#370b40' },
+        qualityBoxBg: { dark: 'rgba(40,40,48,0.92)', light: 'rgba(255,255,255,0.9)' }
+    };
+
+    // Palette entries. `value` is what gets stored; `hex` is what gets rendered.
+    // "default" and "inherit" are special — resolved at runtime, not literal hex.
+    const PALETTE = [
+        { value: 'default',     label: 'Default' },
+        { value: 'inherit',     label: 'Inherit',                 hex: 'inherit' },
+        { value: 'white',       label: 'White',                    hex: '#ffffff' },
+        { value: 'lightgrey',   label: 'Light grey',               hex: '#d0d0d0' },
+        { value: 'grey',        label: 'Grey',                     hex: '#888888' },
+        { value: 'darkgrey',    label: 'Dark grey',                hex: '#4a4a4a' },
+        { value: 'black',       label: 'Black',                    hex: '#000000' },
+        { value: 'red',         label: 'Red',                      hex: '#e05555' },
+        { value: 'orange',      label: 'Orange',                   hex: '#e08540' },
+        { value: 'amber',       label: 'Amber',                    hex: '#e0a840' },
+        { value: 'yellow',      label: 'Yellow',                   hex: '#e8e060' },
+        { value: 'gold',        label: 'Gold',                     hex: '#ffd700' },
+        { value: 'lime',        label: 'Lime',                     hex: '#90d040' },
+        { value: 'green',       label: 'Green',                    hex: '#4ab04a' },
+        { value: 'teal',        label: 'Teal',                     hex: '#3fc0b0' },
+        { value: 'cyan',        label: 'Cyan',                     hex: '#57efea' },
+        { value: 'skyblue',     label: 'Sky blue',                 hex: '#70b8e8' },
+        { value: 'blue',        label: 'Blue',                     hex: '#4e8ac7' },
+        { value: 'indigo',      label: 'Indigo',                   hex: '#6a6ac7' },
+        { value: 'violet',      label: 'Violet',                   hex: '#c286ff' },
+        { value: 'magenta',     label: 'Magenta',                  hex: '#d060c0' },
+        { value: 'pink',        label: 'Pink',                     hex: '#e88fb0' },
+        { value: 'transparent', label: 'Transparent',              hex: 'transparent' }
+    ];
+
+    const COLOURS_STORAGE_KEY = 'openmarket-colours';
+    let COLOURS = cloneColours(DEFAULT_COLOURS);
+    let colourEpoch = 0;
+
+    function cloneColours(src) {
+        return {
+            tiers: {
+                dark:  src.tiers.dark.slice(),
+                light: src.tiers.light.slice()
+            },
+            bonus:        { dark: src.bonus.dark, light: src.bonus.light },
+            qualityBoxBg: { dark: src.qualityBoxBg.dark, light: src.qualityBoxBg.light }
+        };
+    }
+
+    function paletteEntry(value) {
+        return PALETTE.find(p => p.value === value) || null;
+    }
+
+    // Resolve a stored preset name for a role into a concrete CSS colour
+    // string. `default` falls back to the mode-specific original.
+    function resolvePreset(presetValue, role, isDark) {
+        if (presetValue === 'default' || !presetValue) {
+            return roleDefault(role, isDark);
+        }
+        const entry = paletteEntry(presetValue);
+        if (!entry) return roleDefault(role, isDark);
+        if (entry.value === 'default') return roleDefault(role, isDark);
+        if (entry.value === 'inherit') return 'inherit';
+        return entry.hex || roleDefault(role, isDark);
+    }
+
+    function roleDefault(role, isDark) {
+        switch (role) {
+            case 'tier1': return isDark ? DEFAULT_COLOURS.tiers.dark[0]  : DEFAULT_COLOURS.tiers.light[0];
+            case 'tier2': return isDark ? DEFAULT_COLOURS.tiers.dark[1]  : DEFAULT_COLOURS.tiers.light[1];
+            case 'tier3': return isDark ? DEFAULT_COLOURS.tiers.dark[2]  : DEFAULT_COLOURS.tiers.light[2];
+            case 'tier4': return isDark ? DEFAULT_COLOURS.tiers.dark[3]  : DEFAULT_COLOURS.tiers.light[3];
+            case 'tier5': return '#e05555';
+            case 'bonus': return isDark ? DEFAULT_COLOURS.bonus.dark     : DEFAULT_COLOURS.bonus.light;
+            case 'qbg':   return isDark ? DEFAULT_COLOURS.qualityBoxBg.dark : DEFAULT_COLOURS.qualityBoxBg.light;
+            default: return '#000000';
+        }
+    }
+
+    // Role name for each colour field key, used by the swatch callback.
+    const ROLE_FOR_FIELD = {
+        'colour.tier1': 'tier1',
+        'colour.tier2': 'tier2',
+        'colour.tier3': 'tier3',
+        'colour.tier4': 'tier4',
+        'colour.tier5': 'tier5',
+        'colour.bonus': 'bonus',
+        'colour.qbg':   'qbg'
+    };
+
+    // Swatch callback shared by every colour field. Resolves the selected
+    // preset to a CSS colour. For "Default" it uses the role's mode-specific
+    // default for the current page theme (body.dark-mode), which is what the
+    // user would actually see. "Inherit" and "Transparent" fall back to a
+    // neutral grey/checkerboard-ish value so the tiny swatch is still visible.
+    function swatchValueFor(fieldKey) {
+        return function (presetValue) {
+            const role = ROLE_FOR_FIELD[fieldKey];
+            const isDark = document.body.classList.contains('dark-mode');
+            if (presetValue === 'default' || !presetValue) {
+                return roleDefault(role, isDark);
+            }
+            const entry = paletteEntry(presetValue);
+            if (!entry) return roleDefault(role, isDark);
+            if (entry.value === 'inherit') return 'currentColor';
+            if (entry.value === 'transparent') return 'transparent';
+            return entry.hex || roleDefault(role, isDark);
+        };
+    }
+
+    // Stored preset selection per role. Populated by loadColours().
+    let PRESETS = {
+        tier1: 'default',
+        tier2: 'default',
+        tier3: 'default',
+        tier4: 'default',
+        tier5: 'default',
+        bonus: 'default',
+        qbg:   'default'
+    };
+
+    function applyPresetsToColours() {
+        COLOURS.tiers.dark = [
+            resolvePreset(PRESETS.tier1, 'tier1', true),
+            resolvePreset(PRESETS.tier2, 'tier2', true),
+            resolvePreset(PRESETS.tier3, 'tier3', true),
+            resolvePreset(PRESETS.tier4, 'tier4', true),
+            resolvePreset(PRESETS.tier5, 'tier5', true)
+        ];
+        COLOURS.tiers.light = [
+            resolvePreset(PRESETS.tier1, 'tier1', false),
+            resolvePreset(PRESETS.tier2, 'tier2', false),
+            resolvePreset(PRESETS.tier3, 'tier3', false),
+            resolvePreset(PRESETS.tier4, 'tier4', false),
+            resolvePreset(PRESETS.tier5, 'tier5', false)
+        ];
+        COLOURS.bonus.dark        = resolvePreset(PRESETS.bonus, 'bonus', true);
+        COLOURS.bonus.light       = resolvePreset(PRESETS.bonus, 'bonus', false);
+        COLOURS.qualityBoxBg.dark  = resolvePreset(PRESETS.qbg, 'qbg', true);
+        COLOURS.qualityBoxBg.light = resolvePreset(PRESETS.qbg, 'qbg', false);
+    }
+
+    function loadColours() {
+        try {
+            const raw = localStorage.getItem(COLOURS_STORAGE_KEY);
+            if (!raw) {
+                applyPresetsToColours();
+                return;
+            }
+            const saved = JSON.parse(raw);
+            if (!saved || typeof saved !== 'object') {
+                applyPresetsToColours();
+                return;
+            }
+            // New preset-based format. If the key exists and looks like the
+            // preset format, adopt it. Otherwise ignore and use defaults.
+            const roles = ['tier1', 'tier2', 'tier3', 'tier4', 'tier5', 'bonus', 'qbg'];
+            let anyAdopted = false;
+            roles.forEach(role => {
+                if (typeof saved[role] === 'string' && paletteEntry(saved[role])) {
+                    PRESETS[role] = saved[role];
+                    anyAdopted = true;
+                }
+            });
+            if (!anyAdopted) {
+                // Old format or unrecognised. Reset to Default (per user decision).
+                PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
+            }
+            applyPresetsToColours();
+        } catch (_) {
+            applyPresetsToColours();
+        }
+    }
+
+    function saveColours() {
+        try {
+            localStorage.setItem(COLOURS_STORAGE_KEY, JSON.stringify(PRESETS));
+        } catch (_) {}
+    }
+
+    function resetColours() {
+        PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
+        applyPresetsToColours();
+        saveColours();
+        colourEpoch++;
+        checkDarkMode();
+        if (currentHandler && typeof currentHandler.processAll === 'function') {
+            currentHandler.processAll();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // HUB REGISTRATION
+    // -------------------------------------------------------------------------
+    function paletteOptions() {
+        return PALETTE.map(p => ({ value: p.value, label: p.label }));
+    }
+
+    function buildColourFields() {
+        const opts = paletteOptions();
+        const mk = (key, preset) => ({
+            key,
+            type: 'select',
+            label: '',
+            default: preset,
+            options: opts,
+            swatch: true,
+            swatchValue: swatchValueFor(key)
+        });
+        return [
+            mk('colour.tier1', PRESETS.tier1),
+            mk('colour.tier2', PRESETS.tier2),
+            mk('colour.tier3', PRESETS.tier3),
+            mk('colour.tier4', PRESETS.tier4),
+            mk('colour.tier5', PRESETS.tier5),
+            mk('colour.bonus', PRESETS.bonus),
+            mk('colour.qbg',   PRESETS.qbg),
+            { key: 'colour.reset', type: 'button', label: 'OK', icon: 'OK' }
+        ];
+    }
+
+    // Headerless colour tables that stack cleanly on PDA. The single-column
+    // tables cap their width so the dropdown doesn't stretch across the panel.
+    // The reset section is titled "Reset Color" and sits above the config
+    // toggle groups at the bottom of the panel.
+    function buildColourSections() {
+        return [
+            {
+                table: true,
+                columns: ['Tier 1 (0\u201325%)', 'Tier 2 (26\u201350%)'],
+                widths: 'repeat(2, minmax(0, 1fr))',
+                rows: [[
+                    'colour.tier1', 'colour.tier2'
+                ]]
+            },
+            {
+                table: true,
+                columns: ['Tier 3 (51\u201375%)', 'Tier 4 (76\u2013100%)'],
+                widths: 'repeat(2, minmax(0, 1fr))',
+                rows: [[
+                    'colour.tier3', 'colour.tier4'
+                ]]
+            },
+            {
+                table: true,
+                columns: ['Tier 5 (100%+)'],
+                widths: 'minmax(0, 220px)',
+                rows: [['colour.tier5']]
+            },
+            {
+                table: true,
+                columns: ['Bonus text'],
+                widths: 'minmax(0, 220px)',
+                rows: [[
+                    'colour.bonus'
+                ]]
+            },
+            {
+                table: true,
+                columns: ['Q badge bg'],
+                widths: 'minmax(0, 220px)',
+                rows: [[
+                    'colour.qbg'
+                ]]
+            },
+            {
+                title: 'Reset Color',
+                keys: ['colour.reset']
+            }
+        ];
+    }
+
     function registerWithHub() {
+        loadColours();
+
+        const colourFields = buildColourFields();
+        const colourValues = {
+            'colour.tier1': PRESETS.tier1,
+            'colour.tier2': PRESETS.tier2,
+            'colour.tier3': PRESETS.tier3,
+            'colour.tier4': PRESETS.tier4,
+            'colour.tier5': PRESETS.tier5,
+            'colour.bonus': PRESETS.bonus,
+            'colour.qbg':   PRESETS.qbg
+        };
+
+        const fields = [
+            { key: 'enableItemMarket', type: 'toggle', label: 'Item Market', default: true },
+            { key: 'enableAuctionHouse', type: 'toggle', label: 'Auction House', default: true },
+            { key: 'enableBazaar', type: 'toggle', label: 'Bazaar', default: true },
+            { key: 'enableDisplayCase', type: 'toggle', label: 'Display Case', default: true },
+            { key: 'showDisplayCaseBonuses', type: 'toggle', label: 'Display Case bonuses', default: true },
+            { key: 'enableInventory', type: 'toggle', label: 'Inventory (Items)', default: true },
+            { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
+        ].concat(colourFields);
+
+        const values = {
+            enableItemMarket: CONFIG.enableItemMarket,
+            enableAuctionHouse: CONFIG.enableAuctionHouse,
+            enableBazaar: CONFIG.enableBazaar,
+            enableDisplayCase: CONFIG.enableDisplayCase,
+            showDisplayCaseBonuses: CONFIG.showDisplayCaseBonuses,
+            enableInventory: CONFIG.enableInventory,
+            debug: CONFIG.debug
+        };
+        Object.assign(values, colourValues);
+
         const detail = {
             id: HUB_ID,
             name: HUB_NAME,
@@ -79,36 +362,51 @@
             order: 200,
             open: () => { console.log('[OpenMarket] Running in the background on market pages.'); },
             prefs: {
-                fields: [
-                    { key: 'enableItemMarket', type: 'toggle', label: 'Item Market', default: true },
-                    { key: 'enableAuctionHouse', type: 'toggle', label: 'Auction House', default: true },
-                    { key: 'enableBazaar', type: 'toggle', label: 'Bazaar', default: true },
-                    { key: 'enableDisplayCase', type: 'toggle', label: 'Display Case', default: true },
-                    { key: 'showDisplayCaseBonuses', type: 'toggle', label: 'Display Case bonuses', default: true },
-                    { key: 'enableInventory', type: 'toggle', label: 'Inventory (Items)', default: true },
-                    { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
-                ],
-                values: {
-                    enableItemMarket: CONFIG.enableItemMarket,
-                    enableAuctionHouse: CONFIG.enableAuctionHouse,
-                    enableBazaar: CONFIG.enableBazaar,
-                    enableDisplayCase: CONFIG.enableDisplayCase,
-                    showDisplayCaseBonuses: CONFIG.showDisplayCaseBonuses,
-                    enableInventory: CONFIG.enableInventory,
-                    debug: CONFIG.debug
-                },
-                onSave: (values) => {
-                    CONFIG.enableItemMarket = !!values.enableItemMarket;
-                    CONFIG.enableAuctionHouse = !!values.enableAuctionHouse;
-                    CONFIG.enableBazaar = !!values.enableBazaar;
-                    CONFIG.enableDisplayCase = !!values.enableDisplayCase;
-                    CONFIG.showDisplayCaseBonuses = !!values.showDisplayCaseBonuses;
-                    CONFIG.enableInventory = !!values.enableInventory;
-                    CONFIG.debug = !!values.debug;
+                fields,
+                sections: buildColourSections(),
+                values,
+                onSave: (v) => {
+                    CONFIG.enableItemMarket = !!v.enableItemMarket;
+                    CONFIG.enableAuctionHouse = !!v.enableAuctionHouse;
+                    CONFIG.enableBazaar = !!v.enableBazaar;
+                    CONFIG.enableDisplayCase = !!v.enableDisplayCase;
+                    CONFIG.showDisplayCaseBonuses = !!v.showDisplayCaseBonuses;
+                    CONFIG.enableInventory = !!v.enableInventory;
+                    CONFIG.debug = !!v.debug;
+
+                    PRESETS.tier1 = v['colour.tier1'] || 'default';
+                    PRESETS.tier2 = v['colour.tier2'] || 'default';
+                    PRESETS.tier3 = v['colour.tier3'] || 'default';
+                    PRESETS.tier4 = v['colour.tier4'] || 'default';
+                    PRESETS.tier5 = v['colour.tier5'] || 'default';
+                    PRESETS.bonus = v['colour.bonus'] || 'default';
+                    PRESETS.qbg   = v['colour.qbg']   || 'default';
+                    applyPresetsToColours();
+                    saveColours();
+                    colourEpoch++; // invalidate processed tiles so they repaint
+                    checkDarkMode();
                     activateHandlerForCurrentUrl();
                 }
             }
         };
+
+        // Wire up the reset button's onClick once the Hub instantiates fields.
+        // The Hub reads field.onClick at click time, so attaching it here works.
+        colourFields.forEach(f => {
+            if (f.key === 'colour.reset') {
+                f.onClick = () => {
+                    resetColours();
+                    // Refresh the Hub pref values so dropdowns show "Default".
+                    colourFields.forEach(cf => {
+                        if (cf.key.startsWith('colour.') && cf.key !== 'colour.reset') {
+                            detail.prefs.values[cf.key] = PRESETS[cf.key.replace('colour.', '')];
+                        }
+                    });
+                    // Nudge the Hub to redraw the panel.
+                    document.dispatchEvent(new CustomEvent('torn-script-hub:ready'));
+                };
+            }
+        });
 
         document.dispatchEvent(new CustomEvent('torn-script-hub:register', { detail }));
         if (typeof window !== 'undefined') {
@@ -125,11 +423,6 @@
     }
 
     const MAX_CACHE_ITEMS = 1500;
-    const COLOURS = {
-        tiers: { dark: ['#e4e4e4', '#57efea', '#c286ff', '#ffd700'], light: ['#717171', '#009590', '#8e19c1', '#e37100'] },
-        bonus: { dark: '#e8d1ff', light: '#370b40' },
-        qualityBoxBg: { dark: 'rgba(0,0,0,0.8)', light: 'rgba(255,255,255,0.9)' }
-    };
 
     const SELECTORS = {
         itemMarket: {
@@ -192,7 +485,7 @@
 
     function debugWarn(...args) { if (CONFIG.debug) console.warn('[OpenMarket]', ...args); }
     function checkDarkMode() { darkMode = document.body.classList.contains('dark-mode'); }
-    function getTierColour(percent) { const c = darkMode ? COLOURS.tiers.dark : COLOURS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; return c[3]; }
+    function getTierColour(percent) { const c = darkMode ? COLOURS.tiers.dark : COLOURS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
     function qs(selector, parent = document) { try { return parent.querySelector(selector); } catch (e) { return null; } }
     function qsa(selector, parent = document) { try { return Array.from(parent.querySelectorAll(selector)); } catch (e) { return null; } }
     function create(tag, attrs = {}, children = []) {
@@ -206,10 +499,10 @@
         return el;
     }
     function getIconIndicators(icon) { return [icon.className, icon.getAttribute('aria-label'), icon.getAttribute('title'), icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
-    function computeItemKey(itemID, stats, bonuses) { return `${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
+    function computeItemKey(itemID, stats, bonuses) { return `${colourEpoch}|${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
     function isProcessed(el, key) { return processedElements.get(el) === key; }
     function markProcessed(el, key) { processedElements.set(el, key); }
-    function getQualityColour(value, maxRange) { return getTierColour((value / maxRange) * 100); }
+    function getQualityColour(value, maxRange) { return getTierColour(value);}
     function getBonusColour() { return darkMode ? COLOURS.bonus.dark : COLOURS.bonus.light; }
 
     function extractStats(el, selectors) {
@@ -265,8 +558,8 @@
         if (titleEl) {
             const existing = qs('.openmarket-bonuses', el);
             if (existing) existing.remove();
-            const bonusContainer = create('div', { className: 'openmarket-bonuses', style: { lineHeight: '1.3' } });
-            bonuses.forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus)));
+            const bonusContainer = create('div', { className: 'openmarket-bonuses' });
+            bonuses.forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus, el)));
             if (bonusContainer.children.length > 0) {
                 if (data.insertBefore) titleEl.insertBefore(bonusContainer, data.insertBefore);
                 else titleEl.appendChild(bonusContainer);
@@ -289,12 +582,160 @@
         if (new RegExp(escapedValue + '\\s*%').test(description)) return '%';
         return '';
     }
-    function createBonusEl(bonus) {
-        if (FIXED_BONUSES.includes(bonus.title)) return create('div', { textContent: bonus.title, style: { color: getBonusColour() } });
-        let text = bonus.title;
-        if (bonus.value !== undefined && bonus.value !== null) text = `${bonus.title}: ${bonus.value}${getUnitFromDescription(bonus.description, bonus.value)}`;
-        return create('div', { textContent: text, style: { color: getBonusColour() } });
+
+    // Complete Yellow / Orange / Red ranges (from community data + wiki)
+    const WEAPON_BONUS_RANGES = {
+        'achilles':    { yellow: [50, 74],   orange: [75, 112],  red: [113, 169] },
+        'assassinate': { yellow: [50, 70],   orange: [70, 100],  red: [100, 148] },
+        'backstab':    { yellow: [30, 43],   orange: [44, 64],   red: [66, 96] },
+        'berserk':     { yellow: [20, 35],   orange: [36, 58],   red: [60, 88] },
+        'bleed':       { yellow: [20, 30],   orange: [31, 46],   red: [48, 72] },
+        'blindside':   { yellow: [25, 39],   orange: [40, 62],   red: [63, 97] },
+        'bloodlust':   { yellow: [10, 12],   orange: [12, 15],   red: [15, 19] },
+        'comeback':    { yellow: [50, 70],   orange: [70, 99],   red: [102, 138] },
+        'conserve':    { yellow: [25, 30],   orange: [30, 37],   red: [38, 49] },
+        'cripple':     { yellow: [20, 29],   orange: [29, 41],   red: [43, 63] },
+        'crusher':     { yellow: [50, 74],   orange: [75, 108],  red: [114, 171] },
+        'cupid':       { yellow: [50, 74],   orange: [75, 110],  red: [113, 168] },
+        'deadeye':     { yellow: [25, 45],   orange: [45, 74],   red: [75, 123] },
+        'deadly':      { yellow: [2, 3],     orange: [4, 6],     red: [7, 11] },
+        'disarm':      { yellow: [3, 5],     orange: [5, 9],     red: [9, 15] },
+        'double tap':  { yellow: [15, 24],   orange: [24, 36],   red: [38, 58] },
+        'double-edged':{ yellow: [10, 16],   orange: [16, 24],   red: [25, 40] },
+        'empower':     { yellow: [50, 89],   orange: [90, 148],  red: [152, 245] },
+        'eviscerate':  { yellow: [15, 19],   orange: [19, 25],   red: [25, 34] },
+        'execute':     { yellow: [15, 18],   orange: [18, 22],   red: [23, 30] },
+        'expose':      { yellow: [7, 9],     orange: [10, 14],   red: [14, 21] },
+        'finale':      { yellow: [10, 12],   orange: [12, 15],   red: [15, 18] },
+        'focus':       { yellow: [15, 19],   orange: [19, 24],   red: [25, 35] },
+        'frenzy':      { yellow: [5, 7],     orange: [7, 10],    red: [10, 14] },
+        'fury':        { yellow: [10, 16],   orange: [16, 24],   red: [25, 40] },
+        'grace':       { yellow: [20, 36],   orange: [36, 55],   red: [60, 84] },
+        'home run':    { yellow: [50, 59],   orange: [60, 74],   red: [76, 99] },
+        'irradiate':   { yellow: [0, 19],    orange: [20, 49],   red: [50, 86] },
+        'motivation':  { yellow: [15, 19],   orange: [19, 25],   red: [25, 35] },
+        'paralyze':    { yellow: [5, 8],     orange: [8, 12],    red: [13, 18] },
+        'parry':       { yellow: [50, 60],   orange: [60, 74],   red: [75, 95] },
+        'penetrate':   { yellow: [25, 30],   orange: [30, 37],   red: [38, 49] },
+        'plunder':     { yellow: [20, 26],   orange: [26, 35],   red: [35, 49] },
+        'powerful':    { yellow: [15, 22],   orange: [22, 32],   red: [33, 50] },
+        'proficience': { yellow: [20, 28],   orange: [28, 39],   red: [40, 59] },
+        'puncture':    { yellow: [15, 20],   orange: [20, 27],   red: [28, 39] },
+        'quicken':     { yellow: [50, 89],   orange: [90, 149],  red: [150, 245] },
+        'rage':        { yellow: [4, 6],     orange: [7, 11],    red: [11, 18] },
+        'revitalize':  { yellow: [10, 13],   orange: [13, 17],   red: [18, 24] },
+        'roshambo':    { yellow: [50, 73],   orange: [75, 107],  red: [113, 160] },
+        'slow':        { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] },
+        'smurf':       { yellow: [1, 1],     orange: [2, 3],     red: [3, 5] },
+        'specialist':  { yellow: [20, 28],   orange: [28, 39],   red: [40, 59] },
+        'stricken':    { yellow: [30, 43],   orange: [44, 63],   red: [69, 99] },
+        'stun':        { yellow: [10, 16],   orange: [16, 25],   red: [25, 40] },
+        'suppress':    { yellow: [25, 32],   orange: [32, 42],   red: [43, 51] },
+        'sure shot':   { yellow: [3, 4],     orange: [5, 8],     red: [8, 12] },
+        'throttle':    { yellow: [50, 74],   orange: [75, 111],  red: [113, 170] },
+        'warlord':     { yellow: [15, 20],   orange: [20, 27],   red: [28, 45] },
+        'weaken':      { yellow: [20, 29],   orange: [29, 42],   red: [43, 63] },
+        'wind-up':     { yellow: [125, 145], orange: [145, 174], red: [175, 221] },
+        'wither':      { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] }
+    };
+
+    // Colours taken from the reference badge script (fill + empty base)
+    // Regular strengthened so bars stay visible on light inventory backgrounds
+    const BONUS_BAR_COLOURS = {
+        red:    { fill: 'rgba(180,0,40,0.85)',   base: 'rgba(128,0,32,0.25)' },
+        orange: { fill: 'rgba(191,111,0,0.85)',  base: 'rgba(191,111,0,0.25)' },
+        yellow: { fill: 'rgba(191,191,0,0.85)',  base: 'rgba(191,191,0,0.25)' },
+        regular:{ fill: 'rgba(120,120,130,0.75)',base: 'rgba(180,180,190,0.35)' }
+    };
+
+    function getBonusRarityAndRange(bonus, contextEl) {
+        // 1. Prefer Torn's own glow class on the item plate / tile
+        if (contextEl) {
+            const plate = contextEl.closest('[class*="item-plate"], [class*="itemTile"], .item-cont-wrap, li[data-item]') || contextEl;
+            if (plate.classList.contains('glow-red') || plate.querySelector('.glow-red')) return { rarity: 'red', range: null };
+            if (plate.classList.contains('glow-orange') || plate.querySelector('.glow-orange')) return { rarity: 'orange', range: null };
+            if (plate.classList.contains('glow-yellow') || plate.querySelector('.glow-yellow')) return { rarity: 'yellow', range: null };
+        }
+
+        if (bonus.value == null) return { rarity: 'regular', range: null };
+
+        const title = (bonus.title || '').toLowerCase().trim();
+        const ranges = WEAPON_BONUS_RANGES[title];
+        // Specials (Burn, Shock, …) and unknown names stay regular — not orange
+        if (!ranges) return { rarity: 'regular', range: null };
+
+        const v = Number(bonus.value);
+        // Walk tiers from highest so borderline values pick the higher tier
+        if (v >= ranges.red[0]) return { rarity: 'red', range: ranges.red };
+        if (v >= ranges.orange[0]) return { rarity: 'orange', range: ranges.orange };
+        if (v >= ranges.yellow[0]) return { rarity: 'yellow', range: ranges.yellow };
+        return { rarity: 'regular', range: null };
     }
+
+    function createBonusBarBackground(value, rarity, range) {
+        const colours = BONUS_BAR_COLOURS[rarity] || BONUS_BAR_COLOURS.regular;
+        let percent = 100;
+        if (range && range[1] > range[0] && value != null) {
+            // Relative fill inside the tier (e.g. 23 in 20-26 yellow = ~50%)
+            percent = Math.min(Math.max(((Number(value) - range[0]) / (range[1] - range[0])) * 100, 0), 100);
+        } else if (value != null) {
+            // Absolute fallback for regular / unknown
+            percent = Math.min(Math.max(Number(value), 0), 100);
+        }
+        // Hard edge gradient so the fill looks like a progress bar
+        return `linear-gradient(90deg, ${colours.fill} 0%, ${colours.fill} ${Math.max(percent - 0.2, 0)}%, ${colours.base} ${Math.min(percent + 0.2, 100)}%, ${colours.base} 100%)`;
+    }
+
+    function createBonusEl(bonus, contextEl) {
+        if (FIXED_BONUSES.includes(bonus.title)) {
+            return create('div', {
+                className: 'om-bonus-bar om-bonus-fixed',
+                textContent: bonus.title,
+                style: { color: getBonusColour() }
+            });
+        }
+
+        const value = bonus.value;
+        const unit = getUnitFromDescription(bonus.description, value);
+        const text = value != null
+            ? `${value}${unit} ${bonus.title}`
+            : bonus.title;
+
+        const { rarity, range } = getBonusRarityAndRange(bonus, contextEl);
+        const bg = createBonusBarBackground(value, rarity, range);
+
+        // Keep darkMode in sync (Torn may toggle theme without a full reload)
+        checkDarkMode();
+
+        // High-contrast solid colours — no purple, no soft glow
+        // Dark: light gray on yellow/orange | Light: near-black on red
+        let textColour = '#fff';
+        if (rarity === 'yellow' || rarity === 'orange') {
+            textColour = darkMode ? '#e8e8e8' : '#111';
+        } else if (rarity === 'red') {
+            textColour = darkMode ? '#fff' : '#1a1a1a';
+        } else if (rarity === 'regular') {
+            textColour = darkMode ? '#fff' : '#111';
+        }
+
+        const bar = create('div', {
+            className: `om-bonus-bar om-bonus-${rarity}`,
+            title: text,
+            style: {
+                background: bg
+            }
+        });
+
+        const label = create('span', {
+            className: 'om-bonus-text',
+            textContent: text,
+            style: { color: textColour }
+        });
+
+        bar.appendChild(label);
+        return bar;
+    }
+
     function insertQualityBox(container, value, maxRange) {
         if (!container) return;
         const clamped = Math.min(Math.max(parseFloat(value), 0), maxRange);
@@ -331,7 +772,7 @@
         if (!container || !bonuses || bonuses.length === 0) return;
         const existing = qs('.openmarket-bonus-box', container);
         if (existing) existing.remove();
-        const text = bonuses.map(b => FIXED_BONUSES.includes(b.title) ? b.title : (b.value != null ? `${b.title}: ${b.value}${getUnitFromDescription(b.description, b.value)}` : b.title)).join(' · ');
+        const text = bonuses.map(b => FIXED_BONUSES.includes(b.title) ? b.title : (b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title)).join(' · ');
         if (!text) return;
         const span = create('span', { className: 'label-value t-overflow', textContent: text, title: text });
         const box = create('div', { className: 'openmarket-bonus-box', style: { position: 'absolute', bottom: '2px', left: '2px', right: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold', zIndex: '2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: getQualityBoxBg(), color: getBonusColour() } }, [span]);
@@ -583,16 +1024,77 @@
             const damageMatch = text.match(/Damage:\s*(\d+(?:\.\d+)?)/i); if (damageMatch) result.damage = parseFloat(damageMatch[1]);
             const accuracyMatch = text.match(/Accuracy:\s*(\d+(?:\.\d+)?)/i); if (accuracyMatch) result.accuracy = parseFloat(accuracyMatch[1]);
             const armourMatch = text.match(/Armou?r:\s*(\d+(?:\.\d+)?)/i); if (armourMatch) result.armour = parseFloat(armourMatch[1]);
+            const skipName = /^(details|amount|rarity progress|damage|accuracy|armou?r)$/i;
+            const seen = new Set();
+            const pushBonus = (title, value, description) => {
+                const t = String(title || '').trim();
+                if (!t || skipName.test(t)) return;
+                const key = t.toLowerCase();
+                if (seen.has(key)) return;
+                seen.add(key);
+                result.bonuses.push({
+                    title: t,
+                    value: value != null ? Number(value) : null,
+                    description: String(description || '').trim()
+                });
+            };
+            // Sentence-based (original)
             text.split(/\.(?=\s|$)/).forEach(part => {
                 const trimmed = part.trim();
                 if (!trimmed || /^Details:|^Amount:|^Rarity progress:|^Damage:|^Accuracy:|^Armou?r:/i.test(trimmed)) return;
                 const bonusMatch = trimmed.match(/^([^:]+):\s*(.+)$/);
                 if (bonusMatch) {
                     const valueMatch = bonusMatch[2].match(/(\d+(?:\.\d+)?)/);
-                    result.bonuses.push({ title: bonusMatch[1].trim(), value: valueMatch ? parseFloat(valueMatch[1]) : null, description: bonusMatch[2].trim() });
+                    pushBonus(bonusMatch[1], valueMatch ? valueMatch[1] : null, bonusMatch[2]);
                 }
             });
+            // Full-text sweep — catches "Impenetrable: 20% decreased..." even mid-sentence after Armour:
+            for (const m of text.matchAll(/([A-Z][a-zA-Z](?:[a-zA-Z\s\-]{0,28}[a-zA-Z])?):\s*(\d+(?:\.\d+)?)(%|)/g)) {
+                pushBonus(m[1], m[2], m[0]);
+            }
             return result;
+        },
+        extractBonusesFromIcons(row) {
+            const bonuses = [];
+            if (!row) return bonuses;
+            const NON = /^(primary|secondary|melee|temporary|defensive|item defence|item defense|defence|defense|armour|armor)$/i;
+            const seen = new Set();
+            const addFromTitle = (titleAttr, cls) => {
+                if (!titleAttr) return;
+                const c = String(cls || '').toLowerCase();
+                // Only skip pure stat value icons, not protection / resist bonuses
+                if (/\b(item-damage|item-accuracy|item-armou?r|item-defense|item-defence)\b/.test(c)) return;
+                const tmp = create('div');
+                tmp.innerHTML = titleAttr;
+                let title = (qs('b', tmp)?.textContent || '').trim();
+                if (!title) title = (tmp.textContent || '').split(/\n|\r|<br/i)[0].trim();
+                if (!title || NON.test(title) || /^item\s/i.test(title)) return;
+                const key = title.toLowerCase();
+                if (seen.has(key)) return;
+                seen.add(key);
+                if (FIXED_BONUSES.includes(title)) {
+                    bonuses.push({ title, value: null, description: '' });
+                    return;
+                }
+                const descText = (tmp.textContent || '').replace(title, '').trim();
+                const valueMatch = descText.match(/(\d+(?:\.\d+)?)/);
+                bonuses.push({
+                    title,
+                    value: valueMatch ? parseFloat(valueMatch[1]) : null,
+                    description: descText
+                });
+            };
+            row.querySelectorAll(
+                '.bonus-attachment-icons[title], span.bonus-attachment-icons[title], ' +
+                'i[class*="bonus-attachment-"][title], [data-bonus-attachment-title], ' +
+                '.iconsbonuses [title], .item-bonuses [title], .bonuses-wrap [title]'
+            ).forEach(node => {
+                addFromTitle(
+                    node.getAttribute('title') || node.getAttribute('data-bonus-attachment-title') || '',
+                    node.className
+                );
+            });
+            return bonuses;
         },
         processAll() {
             if (!isPageActive()) return;
@@ -604,25 +1106,136 @@
                 if (!itemID || !BASE_STATS_MAP[itemID]) return;
                 const viewBtn = qs('.view-info.wai-btn', hoverEl);
                 const ariaLabel = viewBtn?.getAttribute('aria-label');
+                const row = el.closest('li') || el.parentElement;
                 let stats, bonuses;
-                if (ariaLabel) { const parsed = this.parseAriaLabel(ariaLabel); stats = { damage: parsed.damage, accuracy: parsed.accuracy, armour: parsed.armour }; bonuses = parsed.bonuses; }
-                else { stats = this.extractVisibleStats(el, itemID); bonuses = []; }
+                if (ariaLabel) {
+                    const parsed = this.parseAriaLabel(ariaLabel);
+                    stats = { damage: parsed.damage, accuracy: parsed.accuracy, armour: parsed.armour };
+                    bonuses = parsed.bonuses;
+                } else {
+                    stats = this.extractVisibleStats(el, itemID);
+                    bonuses = [];
+                }
+                // Merge icon bonuses (armor specials often missing from aria-label)
+                const iconBonuses = this.extractBonusesFromIcons(row);
+                if (iconBonuses.length) {
+                    const seen = new Set((bonuses || []).map(b => (b.title || '').toLowerCase()));
+                    iconBonuses.forEach(b => {
+                        const k = (b.title || '').toLowerCase();
+                        if (!seen.has(k)) { seen.add(k); (bonuses = bonuses || []).push(b); }
+                    });
+                }
                 if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) return;
                 processItem(el, { itemID, stats, bonuses: bonuses || [], selectors: this.selectors });
                 if (CONFIG.showDisplayCaseBonuses && bonuses && bonuses.length > 0) {
                     const bonusKey = computeItemKey(itemID, stats, bonuses);
-                    if (processedBonusOverlays.get(el) !== bonusKey) { insertBonusOverlay(qs(this.selectors.imageWrapper, el), bonuses); processedBonusOverlays.set(el, bonusKey); }
+                    // Re-apply if Torn wiped our bar from the DOM
+                    if (processedBonusOverlays.get(el) === bonusKey && row?.querySelector('.om-displaycase-bonuses')) return;
+                    row?.querySelectorAll('.om-displaycase-bonuses').forEach(n => n.remove());
+                    const isDouble = bonuses.length > 1;
+                    const bonusContainer = create('div', {
+                        className: 'om-displaycase-bonuses' + (isDouble ? ' om-displaycase-double' : '')
+                    });
+                    bonuses.slice(0, 2).forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus, el)));
+                    // Replace rarity progress + hide star/rarity icon; keep x1 for grid line
+                    const rarityEl = row?.querySelector('.b-item-rarity');
+                    if (rarityEl) {
+                        const progress = rarityEl.querySelector('.progressbar-wrap');
+                        if (progress) progress.style.display = 'none';
+                        // Star / rarity icon pushes the bar down — hide it
+                        rarityEl.querySelectorAll('i').forEach(i => { i.style.display = 'none'; });
+                        rarityEl.appendChild(bonusContainer);
+                    } else {
+                        row?.appendChild(bonusContainer);
+                    }
+                    // Single: keep x1 for grid line. Double: hide x1 so two bars fit without stretching the row
+                    const amountEl = row?.querySelector('.b-item-amount');
+                    if (amountEl) {
+                        if (isDouble) amountEl.classList.add('om-displaycase-amount-hidden');
+                        else amountEl.classList.remove('om-displaycase-amount-hidden');
+                    }
+                    processedBonusOverlays.set(el, bonusKey);
+                }
+            });
+            // Page-wide sweep: icon titles sometimes aren't reached via the tile loop
+            this.sweepIconBonuses(root);
+        },
+        sweepIconBonuses(root) {
+            if (!CONFIG.showDisplayCaseBonuses) return;
+            const byLi = new Map();
+            (root || document).querySelectorAll(
+                '.bonus-attachment-icons[title], span.bonus-attachment-icons[title], .iconsbonuses [title], .item-bonuses [title]'
+            ).forEach(node => {
+                const li = node.closest('li');
+                if (!li || li.querySelector('.om-displaycase-bonuses')) return;
+                const titleAttr = node.getAttribute('title') || '';
+                if (!titleAttr) return;
+                const cls = String(node.className || '').toLowerCase();
+                if (/\b(item-damage|item-accuracy|item-armou?r|item-defense|item-defence)\b/.test(cls)) return;
+                const tmp = create('div');
+                tmp.innerHTML = titleAttr;
+                let title = (qs('b', tmp)?.textContent || '').trim();
+                if (!title) title = (tmp.textContent || '').split(/\n|\r/)[0].trim();
+                if (!title || /^(primary|secondary|melee|temporary|defensive|item defence|item defense|defence|defense|armour|armor)$/i.test(title)) return;
+                const descText = (tmp.textContent || '').replace(title, '').trim();
+                const valueMatch = descText.match(/(\d+(?:\.\d+)?)/);
+                const bonus = { title, value: valueMatch ? parseFloat(valueMatch[1]) : null, description: descText };
+                if (!byLi.has(li)) byLi.set(li, []);
+                const list = byLi.get(li);
+                if (!list.some(b => (b.title || '').toLowerCase() === title.toLowerCase())) list.push(bonus);
+            });
+            byLi.forEach((bonuses, li) => {
+                if (!bonuses.length || li.querySelector('.om-displaycase-bonuses')) return;
+                const isDouble = bonuses.length > 1;
+                const bonusContainer = create('div', {
+                    className: 'om-displaycase-bonuses' + (isDouble ? ' om-displaycase-double' : '')
+                });
+                bonuses.slice(0, 2).forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus, li)));
+                const rarityEl = li.querySelector('.b-item-rarity');
+                if (rarityEl) {
+                    const progress = rarityEl.querySelector('.progressbar-wrap');
+                    if (progress) progress.style.display = 'none';
+                    rarityEl.querySelectorAll('i').forEach(i => { i.style.display = 'none'; });
+                    rarityEl.appendChild(bonusContainer);
+                } else {
+                    li.appendChild(bonusContainer);
+                }
+                const amountEl = li.querySelector('.b-item-amount');
+                if (amountEl) {
+                    if (isDouble) amountEl.classList.add('om-displaycase-amount-hidden');
+                    else amountEl.classList.remove('om-displaycase-amount-hidden');
                 }
             });
         },
         init() {
             const self = this;
             const root = qs('#displayCaseRoot') || document.body;
-            const observer = new MutationObserver((mutations) => { if (mutations.some(m => m.type === 'childList' || (m.type === 'attributes' && (m.attributeName === 'aria-label' || m.attributeName === 'loaded')))) self.processAll(); });
-            observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'loaded', 'class'] });
+            // Watch for late-loaded bonus icons (Impenetrable etc. appear after hover/load)
+            const observer = new MutationObserver((mutations) => {
+                if (mutations.some(m =>
+                    m.type === 'childList' ||
+                    (m.type === 'attributes' && ['aria-label', 'loaded', 'class', 'title'].includes(m.attributeName))
+                )) self.processAll();
+            });
+            observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'loaded', 'class', 'title'] });
             self.observer = observer;
-            setTimeout(() => { qsa(self.selectors.tile, root).forEach((el, i) => { const hoverEl = qs('.item-hover', el); if (!hoverEl) return; const viewBtn = qs('.view-info.wai-btn', hoverEl); if (viewBtn && !viewBtn.getAttribute('aria-label')) setTimeout(() => el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true })), i * 80); }); }, 500);
-            let polls = 0; self.pollTimer = setInterval(() => { self.processAll(); polls++; if (polls >= 30) { clearInterval(self.pollTimer); self.pollTimer = null; } }, 1000);
+            // Force-load bonus data on ALL tiles (not only those missing aria-label)
+            setTimeout(() => {
+                qsa(self.selectors.tile, root).forEach((el, i) => {
+                    const hoverEl = qs('.item-hover', el);
+                    if (!hoverEl) return;
+                    setTimeout(() => {
+                        el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                        hoverEl.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                    }, i * 60);
+                });
+            }, 400);
+            let polls = 0;
+            self.pollTimer = setInterval(() => {
+                self.processAll();
+                polls++;
+                if (polls >= 40) { clearInterval(self.pollTimer); self.pollTimer = null; }
+            }, 800);
             self.processAll();
         },
         teardown() {
@@ -700,11 +1313,11 @@
                     const meta = create('span', { className: 'openmarket-inventory-meta', style: { display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px 8px', marginLeft: '8px', verticalAlign: 'middle', fontSize: '11px', lineHeight: '1.3', fontWeight: 'bold' } });
                     if (qualityOk) meta.appendChild(create('span', { className: 'openmarket-inventory-quality', textContent: `Q ${numericQuality.toFixed(1)}%`, style: { color: getQualityColour(Math.min(Math.max(numericQuality, 0), maxRange), maxRange), padding: '0 4px', borderRadius: '3px', background: getQualityBoxBg() } }));
                     if (weaponBonuses.length > 0) {
-                        const bonusContainer = create('span', { className: 'openmarket-bonuses openmarket-inventory-bonuses', title: weaponBonuses.map(b => b.value != null ? `${b.title}: ${b.value}${getUnitFromDescription(b.description, b.value)}` : b.title).join(' · '), style: { display: 'inline', color: getBonusColour() } });
-                        weaponBonuses.forEach((bonus, i) => { if (i > 0) bonusContainer.appendChild(document.createTextNode(' · ')); bonusContainer.appendChild(createBonusEl(bonus)); });
+                        const bonusContainer = create('span', { className: 'openmarket-bonuses openmarket-inventory-bonuses', title: weaponBonuses.map(b => b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title).join(' · '), style: { display: 'inline-flex', gap: '3px', alignItems: 'center' } });
+                        weaponBonuses.forEach((bonus) => { bonusContainer.appendChild(createBonusEl(bonus, el)); });
                         meta.appendChild(bonusContainer);
                     }
-                    if (modBonuses.length > 0) meta.appendChild(create('span', { textContent: 'ⓘ', title: modBonuses.map(b => b.value != null ? `${b.title}: ${b.value}${getUnitFromDescription(b.description, b.value)}` : b.title).join(' · '), style: { marginLeft: '3px', cursor: 'help', opacity: '0.75', fontSize: '11px' } }));
+                    if (modBonuses.length > 0) meta.appendChild(create('span', { textContent: 'ⓘ', title: modBonuses.map(b => b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title).join(' · '), style: { marginLeft: '3px', cursor: 'help', opacity: '0.75', fontSize: '11px' } }));
                     if (meta.childNodes.length > 0) titleEl.appendChild(meta);
                 }
             });
@@ -724,6 +1337,244 @@
         }
     };
 
+    // =========================================================================
+    // FACTION ARMOURY — quality badges + bonus progress bars
+    // =========================================================================
+    const factionArmoury = {
+        observer: null,
+        processAll() {
+            if (!isPageActive()) return;
+            const href = window.location.href;
+            if (!href.includes('factions.php') || !href.includes('armoury')) return;
+            const subMatch = href.match(/[?&#]sub=(weapons|armour)(?:[&#]|$)/);
+            if (!subMatch) return;
+            const isArmour = subMatch[1] === 'armour';
+
+            // Rename Type header → Bonus (once)
+            document.querySelectorAll('.armoury-tabs .type, #armoury-weapons .type, #armoury-armour .type').forEach(el => {
+                if (el.textContent.trim() === 'Type') el.textContent = 'Bonus';
+            });
+
+            document.querySelectorAll('.armoury-tabs .item-list > li, #mainContainer .item-list > li, #armoury-weapons .item-list > li, #armoury-armour .item-list > li').forEach(card => {
+                const imageWrap = card.querySelector('.img-wrap[data-itemid]');
+                const img = imageWrap?.querySelector('img.torn-item, img[src*="/images/items/"]');
+                if (!imageWrap || !img) return;
+                const itemID = parseInt(imageWrap.getAttribute('data-itemid') || img.src.match(/\/images\/items\/(\d+)\//)?.[1], 10);
+                if (!itemID) return;
+
+                const base = BASE_STATS_MAP[itemID];
+                if (!base || (isArmour && !base.baseArmour) || (!isArmour && base.baseArmour)) return;
+
+                // --- Quality badge (once) ---
+                if (!card.querySelector('.openmarket-quality-inline')) {
+                    const stats = { damage: 0, accuracy: 0, armour: 0 };
+                    card.querySelectorAll('.bonuses li').forEach(entry => {
+                        const icon = entry.querySelector('i');
+                        const valueEl = entry.querySelector('span');
+                        if (!icon || !valueEl) return;
+                        const indicators = getIconIndicators(icon);
+                        const value = parseFloat(valueEl.textContent);
+                        if (!Number.isFinite(value) || value <= 0) return;
+                        if (indicators.includes('damage')) stats.damage = value;
+                        else if (indicators.includes('accuracy')) stats.accuracy = value;
+                        else if (indicators.includes('armour') || indicators.includes('armor') || indicators.includes('defence') || indicators.includes('defense')) stats.armour = value;
+                    });
+
+                    if (stats.damage || stats.accuracy || stats.armour) {
+                        const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
+                        if (quality !== null) {
+                            const maxRange = isArmour ? 100 : 300;
+                            const numericQuality = parseFloat(quality);
+                            if (numericQuality >= -10 && numericQuality <= maxRange + 10) {
+                                const nameEl = card.querySelector('.name') || card.querySelector('[class*="name"], [class*="title"]');
+                                if (nameEl) {
+                                    const clamped = Math.min(Math.max(numericQuality, 0), maxRange);
+                                    const badge = create('span', {
+                                        className: 'openmarket-quality-inline',
+                                        textContent: `Q ${clamped.toFixed(1)}%`,
+                                        style: {
+                                            background: getQualityBoxBg(),
+                                            color: getQualityColour(clamped, maxRange)
+                                        }
+                                    });
+                                    const fullName = nameEl.textContent.trim();
+                                    if (fullName) nameEl.title = fullName;
+                                    // Inline badge after the name — no absolute positioning / no paddingRight
+                                    // so column widths stay aligned with the header row.
+                                    nameEl.appendChild(badge);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- Bonus bars in the Type/Bonus column ---
+                if (card.querySelector('.om-armory-bonus-cell')) return;
+
+                // Labels that are weapon type / slot text, not real RW bonuses
+                const NON_BONUS_TITLES = new Set([
+                    'primary', 'secondary', 'melee', 'temporary', 'defensive',
+                    'item defence bonus', 'item defense bonus', 'item defence', 'item defense',
+                    'defence', 'defense', 'armour', 'armor'
+                ]);
+                const isRealBonus = (title) => {
+                    if (!title) return false;
+                    const t = title.toLowerCase().trim();
+                    if (NON_BONUS_TITLES.has(t)) return false;
+                    if (t.includes('item defence') || t.includes('item defense')) return false;
+                    if (t.startsWith('item ')) return false;
+                    return true;
+                };
+
+                // Collect weapon/armor bonus icons (not damage/accuracy/armour stats)
+                const bonuses = [];
+                const bonusIcons = card.querySelectorAll(
+                    '.bonus-attachment-icons[title], i[class*="bonus-attachment-"][title], ' +
+                    '[data-bonus-attachment-title], .iconsbonuses i[title], .bonuses-wrap i[title]'
+                );
+                bonusIcons.forEach(icon => {
+                    const titleAttr = icon.getAttribute('title') || icon.getAttribute('data-bonus-attachment-title') || '';
+                    if (!titleAttr) return;
+                    // Skip pure stat icons
+                    const cls = String(icon.className || '').toLowerCase();
+                    if (cls.includes('damage') || cls.includes('accuracy') || cls.includes('armour') || cls.includes('armor') || cls.includes('defence') || cls.includes('defense')) return;
+
+                    const tmp = create('div');
+                    tmp.innerHTML = titleAttr;
+                    const title = (qs('b', tmp)?.textContent || tmp.textContent || '').trim();
+                    if (!title || !isRealBonus(title)) return;
+                    if (FIXED_BONUSES.includes(title)) {
+                        bonuses.push({ title, value: null, description: '' });
+                        return;
+                    }
+                    const descText = tmp.textContent.replace(title, '').trim();
+                    const valueMatch = descText.match(/(\d+(?:\.\d+)?)/);
+                    bonuses.push({
+                        title,
+                        value: valueMatch ? parseFloat(valueMatch[1]) : null,
+                        description: descText
+                    });
+                });
+
+                // Also try class-name based extraction (bonus-attachment-Plunder etc.)
+                if (bonuses.length === 0) {
+                    card.querySelectorAll('[class*="bonus-attachment-"]').forEach(icon => {
+                        const cls = [...icon.classList].find(c =>
+                            c.startsWith('bonus-attachment-') &&
+                            !c.includes('blank') &&
+                            !c.includes('damage') &&
+                            !c.includes('accuracy') &&
+                            !c.includes('armour') &&
+                            !c.includes('armor') &&
+                            !c.includes('defence') &&
+                            !c.includes('defense') &&
+                            !c.includes('item-')
+                        );
+                        if (!cls) return;
+                        const raw = cls.replace('bonus-attachment-', '').replace(/-/g, ' ');
+                        const title = raw.charAt(0).toUpperCase() + raw.slice(1);
+                        if (!isRealBonus(title)) return;
+                        const titleAttr = icon.getAttribute('title') || '';
+                        const valueMatch = titleAttr.match(/(\d+(?:\.\d+)?)/);
+                        bonuses.push({
+                            title,
+                            value: valueMatch ? parseFloat(valueMatch[1]) : null,
+                            description: titleAttr
+                        });
+                    });
+                }
+
+                // Find the Type column cell
+                let typeCell = card.querySelector('.type');
+                if (!typeCell) {
+                    const children = Array.from(card.children);
+                    typeCell = children.find(c => c.classList?.contains('type')) || null;
+                }
+                if (!typeCell) return;
+
+                // Always clear the original Type text ("Primary", "Melee", "Item defence…")
+                // Leave the cell empty when there is no real bonus.
+                typeCell.textContent = '';
+                typeCell.classList.add('om-armory-bonus-cell');
+                typeCell.classList.toggle('om-armory-double', bonuses.length > 1);
+
+                if (bonuses.length === 0) return;
+
+                bonuses.slice(0, 2).forEach(bonus => {
+                    const bar = createBonusEl(bonus, card);
+                    typeCell.appendChild(bar);
+                });
+            });
+        },
+        init() {
+            const root = document.querySelector('#mainContainer') || document.body;
+            this.observer = new MutationObserver(() => this.processAll());
+            this.observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-itemid', 'class', 'title'] });
+            this.processAll();
+        },
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
+            document.querySelectorAll('.openmarket-quality-inline').forEach(el => {
+                if (el.closest('.armoury-tabs .item-list > li, #armoury-weapons, #armoury-armour')) el.remove();
+            });
+            document.querySelectorAll('.om-armory-bonus-cell').forEach(el => {
+                el.classList.remove('om-armory-bonus-cell', 'om-armory-double');
+                el.textContent = '';
+            });
+        }
+    };
+
+    // =========================================================================
+    // BAZAAR ADD ITEM — inline quality badge in Torn's React item rows
+    // =========================================================================
+    const bazaarAdd = {
+        observer: null,
+        processAll() {
+            if (!isPageActive()) return;
+            document.querySelectorAll('li[data-group="child"]').forEach(row => {
+                const img = row.querySelector('img[src*="/images/items/"]');
+                const nameEl = row.querySelector('.name-wrap .t-overflow');
+                if (!img || !nameEl) return;
+                const match = img.src.match(/\/images\/items\/(\d+)\//);
+                if (!match) return;
+                const itemID = parseInt(match[1], 10);
+                if (!BASE_STATS_MAP[itemID]) return;
+                const stats = { damage: 0, accuracy: 0, armour: 0 };
+                row.querySelectorAll('.bonus-attachment-item-damage-bonus, .bonus-attachment-item-accuracy-bonus, .bonus-attachment-item-armour-bonus, .bonus-attachment-item-armor-bonus, .bonus-attachment-item-defence-bonus, .bonus-attachment-item-defense-bonus').forEach(icon => {
+                    const valueEl = icon.parentElement?.querySelector('span');
+                    const value = parseFloat(valueEl?.textContent);
+                    if (!Number.isFinite(value) || value <= 0) return;
+                    const cls = String(icon.className).toLowerCase();
+                    if (cls.includes('damage')) stats.damage = value;
+                    else if (cls.includes('accuracy')) stats.accuracy = value;
+                    else if (cls.includes('armour') || cls.includes('armor') || cls.includes('defence') || cls.includes('defense')) stats.armour = value;
+                });
+                if (!stats.damage && !stats.accuracy && !stats.armour) return;
+                const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
+                if (quality === null) return;
+                const maxRange = stats.armour > 0 ? 100 : 300;
+                const numericQuality = parseFloat(quality);
+                if (numericQuality < -10 || numericQuality > maxRange + 10) return;
+                const badgeText = `Q ${Math.min(Math.max(numericQuality, 0), maxRange).toFixed(1)}%`;
+                const existingBadge = nameEl.parentElement?.querySelector('.openmarket-quality-inline');
+                if (existingBadge && existingBadge.textContent === badgeText) return;
+                insertQualityInline(nameEl, quality, maxRange);
+            });
+        },
+        init() {
+            const root = document.querySelector('#bazaarRoot') || document.querySelector('#mainContainer') || document.body;
+            this.observer = new MutationObserver(() => this.processAll());
+            this.observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class'] });
+            this.processAll();
+        },
+        teardown() {
+            if (this.observer) { this.observer.disconnect(); this.observer = null; }
+            document.querySelectorAll('.openmarket-quality-inline').forEach(el => {
+                if (el.closest('li[data-group="child"]')) el.remove();
+            });
+        }
+    };
+
     function detectPageType(href) {
         if (href.includes('sid=ItemMarket')) {
             if (href.includes('#/addListing') || href.includes('#/viewListing')) {
@@ -732,9 +1583,10 @@
             return 'itemMarket';
         }
         if (href.includes('amarket.php')) return 'auctionHouse';
-        if (href.includes('bazaar.php')) return 'bazaar';
+        if (href.includes('bazaar.php')) { if (href.includes('#/add')) return 'bazaarAdd'; return 'bazaar'; }
         if (href.includes('displaycase.php')) return 'displayCase';
         if (href.includes('item.php')) return 'inventory';
+        if (href.includes('factions.php') && href.includes('armoury') && /[?&#]sub=(weapons|armour)/.test(href)) return 'factionArmoury';
         return null;
     }
 
@@ -749,14 +1601,16 @@
 
     function activateHandlerForCurrentUrl() {
         const type = detectPageType(window.location.href);
-        const handlers = { itemMarket, itemMarketSingle, auctionHouse, bazaar, displayCase, inventory };
+        const handlers = { itemMarket, itemMarketSingle, auctionHouse, bazaar, bazaarAdd, displayCase, inventory, factionArmoury };
         const enabledMap = {
             itemMarket: CONFIG.enableItemMarket,
             itemMarketSingle: CONFIG.enableItemMarket,
             auctionHouse: CONFIG.enableAuctionHouse,
             bazaar: CONFIG.enableBazaar,
+            bazaarAdd: CONFIG.enableBazaar,
             displayCase: CONFIG.enableDisplayCase,
-            inventory: CONFIG.enableInventory
+            inventory: CONFIG.enableInventory,
+            factionArmoury: true
         };
         if (!type || !enabledMap[type]) { teardownCurrentHandler(); currentHandler = null; return; }
         const nextHandler = handlers[type];
@@ -842,11 +1696,203 @@
         const css = `
 [class*="itemTile___"] { padding: 5px 3px 0 !important; }
 [class*="itemTile___"] [class*="title___"] { padding: 5px 0 0px !important; }
-.openmarket-bonuses div { font-size: 11px !important; }
+
+/* Market: centered fixed-size bonus bars (99.33 × 18 from element measurement) */
+[class*="itemTile___"] .openmarket-bonuses,
+[class*="item___"] .openmarket-bonuses {
+    display: flex !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    gap: 2px !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    width: 100% !important;
+    margin-top: 2px !important;
+    line-height: 1.2 !important;
+    box-sizing: border-box !important;
+}
+/* Display case: bars in rarity row, 100px centered to match item image */
+.b-item-rarity .om-displaycase-bonuses {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 1px !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    margin: 0 !important;
+    pointer-events: none !important;
+}
+.b-item-rarity .om-displaycase-bonuses .om-bonus-bar {
+    width: 100px !important;
+    min-width: 100px !important;
+    max-width: 100px !important;
+    height: 14px !important;
+    line-height: 14px !important;
+    margin: 0 auto !important;
+    font-size: 10px !important;
+    border-radius: 3px !important;
+    box-shadow: none !important;
+}
+.b-item-rarity .om-displaycase-bonuses.om-displaycase-double .om-bonus-bar {
+    height: 13px !important;
+    line-height: 13px !important;
+    font-size: 9px !important;
+}
+.b-item-rarity .om-displaycase-bonuses .om-bonus-text {
+    padding: 0 3px !important;
+}
+/* Dual-bonus: hide x1 text but keep spacer so the grid divider remains */
+.om-displaycase-amount-hidden {
+    visibility: hidden !important;
+    height: 14px !important;
+    min-height: 14px !important;
+    max-height: 14px !important;
+    overflow: hidden !important;
+    font-size: 0 !important;
+    line-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
 .openmarket-inventory-quality { white-space: nowrap; }
-.openmarket-inventory-bonuses { max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle; }
-.openmarket-inventory-bonuses div { display: inline; font-size: 11px !important; }
-.openmarket-inventory-meta { display: inline-flex; align-items: center; flex-wrap: nowrap; overflow: hidden; }
+.openmarket-inventory-bonuses {
+    max-width: 240px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: inline-flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 3px !important;
+    vertical-align: middle;
+}
+.openmarket-inventory-meta { display: inline-flex; align-items: center; flex-wrap: wrap; overflow: hidden; }
+
+/* Coloured bonus progress bars — fixed 99.33×18 on market */
+.om-bonus-bar {
+    position: relative;
+    display: block;
+    box-sizing: border-box;
+    border-radius: 4px;
+    overflow: hidden;
+    width: 99.33px !important;
+    min-width: 99.33px !important;
+    max-width: 99.33px !important;
+    height: 18px !important;
+    line-height: 18px !important;
+    font-size: 11px;
+    font-weight: 600;
+    margin: 0 auto;
+    vertical-align: middle;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+    border: 1px solid rgba(0,0,0,0.35);
+    text-align: left;
+}
+.om-bonus-text {
+    position: relative;
+    z-index: 1;
+    padding: 0 5px;
+    white-space: nowrap;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-shadow: none !important;
+    -webkit-font-smoothing: antialiased;
+    pointer-events: none;
+    user-select: none;
+}
+/* Theme-safe contrast overrides */
+body.dark-mode .om-bonus-regular .om-bonus-text,
+body.dark-mode .om-bonus-red .om-bonus-text {
+    color: #fff !important;
+}
+body.dark-mode .om-bonus-yellow .om-bonus-text,
+body.dark-mode .om-bonus-orange .om-bonus-text {
+    color: #e8e8e8 !important;
+}
+body:not(.dark-mode) .om-bonus-regular .om-bonus-text,
+body:not(.dark-mode) .om-bonus-yellow .om-bonus-text,
+body:not(.dark-mode) .om-bonus-orange .om-bonus-text {
+    color: #111 !important;
+}
+body:not(.dark-mode) .om-bonus-red .om-bonus-text {
+    color: #1a1a1a !important;
+}
+.om-bonus-fixed {
+    background: transparent !important;
+    min-width: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    line-height: inherit !important;
+    box-shadow: none;
+    border: none;
+    font-weight: normal;
+    margin: 0;
+}
+
+/* Quality badge: compact, no layout shift */
+.openmarket-quality-inline {
+    display: inline-block !important;
+    vertical-align: middle !important;
+    margin-left: 4px !important;
+    padding: 1px 4px !important;
+    border-radius: 3px !important;
+    font-size: 10px !important;
+    line-height: 1.2 !important;
+    font-weight: bold !important;
+    white-space: nowrap !important;
+    flex-shrink: 0 !important;
+}
+
+/*
+ * Faction armory — stay inside Torn's existing .type column.
+ * Do NOT force widths on .loaned / .action / .name (that collapses the row).
+ */
+.om-armory-bonus-cell {
+    position: relative !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    height: 30px !important;
+    line-height: normal !important;
+    vertical-align: middle !important;
+}
+.om-armory-bonus-cell.om-armory-double {
+    height: 36px !important;
+}
+.om-armory-bonus-cell .om-bonus-bar {
+    position: absolute !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    margin: 0 !important;
+    border: none !important;
+    border-radius: 3px !important;
+    box-shadow: none !important;
+    height: 100% !important;
+    line-height: 30px !important;
+    font-size: 10px !important;
+    padding: 0 !important;
+}
+.om-armory-bonus-cell .om-bonus-text {
+    padding: 0 2px 0 2px !important;
+    margin: 0 !important;
+    text-indent: 0 !important;
+    letter-spacing: 0 !important;
+    font-size: 10px !important;
+    text-align: left !important;
+}
+.om-armory-bonus-cell.om-armory-double .om-bonus-bar {
+    height: 50% !important;
+    line-height: 18px !important;
+    font-size: 9px !important;
+}
+.om-armory-bonus-cell.om-armory-double .om-bonus-text {
+    font-size: 9px !important;
+}
+.om-armory-bonus-cell.om-armory-double .om-bonus-bar:first-child { top: 0 !important; }
+.om-armory-bonus-cell.om-armory-double .om-bonus-bar:last-child { bottom: 0 !important; top: auto !important; }
 .openmarket-filter-hit { outline: 2px solid #00c8ff !important; outline-offset: -2px; box-shadow: 0 0 6px rgba(0,200,255,0.7) !important; border-radius: 4px; }
 
 .openmarket-filter-slider-row {
