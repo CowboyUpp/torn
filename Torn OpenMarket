@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.12.23
-// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration, native dropdown bonus sorting, and coloured bonus progress bars.
+// @version      1.12.24
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration, native dropdown bonus sorting, and colored bonus progress bars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
@@ -33,18 +33,18 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.12.23';
+    const HUB_VERSION = '1.12.24';
     const HUB_ICON = '';
 
     // =========================================================================
-    // COLOURS
+    // COLORS
     //
     // Defaults are the original hardcoded values, kept per-mode. The user picks
     // a preset from a fixed palette per role; unless they pick "Default", the
     // same preset is applied to both dark and light mode (parallel behaviour).
     // "Default" restores the mode-specific original value.
     // =========================================================================
-    const DEFAULT_COLOURS = {
+    const DEFAULT_COLORS = {
         tiers: {
             dark:  ['#e4e4e4', '#57efea', '#c286ff', '#ffd700', '#e05555'],
             light: ['#717171', '#009590', '#8e19c1', '#e37100', '#e05555']
@@ -81,11 +81,11 @@
         { value: 'transparent', label: 'Transparent',              hex: 'transparent' }
     ];
 
-    const COLOURS_STORAGE_KEY = 'openmarket-colours';
-    let COLOURS = cloneColours(DEFAULT_COLOURS);
-    let colourEpoch = 0;
+    const COLORS_STORAGE_KEY = 'openmarket-colours';
+    let COLORS = cloneColors(DEFAULT_COLORS);
+    let colorEpoch = 0;
 
-    function cloneColours(src) {
+    function cloneColors(src) {
         return {
             tiers: {
                 dark:  src.tiers.dark.slice(),
@@ -100,7 +100,7 @@
         return PALETTE.find(p => p.value === value) || null;
     }
 
-    // Resolve a stored preset name for a role into a concrete CSS colour
+    // Resolve a stored preset name for a role into a concrete CSS color
     // string. `default` falls back to the mode-specific original.
     function resolvePreset(presetValue, role, isDark) {
         if (presetValue === 'default' || !presetValue) {
@@ -115,18 +115,18 @@
 
     function roleDefault(role, isDark) {
         switch (role) {
-            case 'tier1': return isDark ? DEFAULT_COLOURS.tiers.dark[0]  : DEFAULT_COLOURS.tiers.light[0];
-            case 'tier2': return isDark ? DEFAULT_COLOURS.tiers.dark[1]  : DEFAULT_COLOURS.tiers.light[1];
-            case 'tier3': return isDark ? DEFAULT_COLOURS.tiers.dark[2]  : DEFAULT_COLOURS.tiers.light[2];
-            case 'tier4': return isDark ? DEFAULT_COLOURS.tiers.dark[3]  : DEFAULT_COLOURS.tiers.light[3];
+            case 'tier1': return isDark ? DEFAULT_COLORS.tiers.dark[0]  : DEFAULT_COLORS.tiers.light[0];
+            case 'tier2': return isDark ? DEFAULT_COLORS.tiers.dark[1]  : DEFAULT_COLORS.tiers.light[1];
+            case 'tier3': return isDark ? DEFAULT_COLORS.tiers.dark[2]  : DEFAULT_COLORS.tiers.light[2];
+            case 'tier4': return isDark ? DEFAULT_COLORS.tiers.dark[3]  : DEFAULT_COLORS.tiers.light[3];
             case 'tier5': return '#e05555';
-            case 'bonus': return isDark ? DEFAULT_COLOURS.bonus.dark     : DEFAULT_COLOURS.bonus.light;
-            case 'qbg':   return isDark ? DEFAULT_COLOURS.qualityBoxBg.dark : DEFAULT_COLOURS.qualityBoxBg.light;
+            case 'bonus': return isDark ? DEFAULT_COLORS.bonus.dark     : DEFAULT_COLORS.bonus.light;
+            case 'qbg':   return isDark ? DEFAULT_COLORS.qualityBoxBg.dark : DEFAULT_COLORS.qualityBoxBg.light;
             default: return '#000000';
         }
     }
 
-    // Role name for each colour field key, used by the swatch callback.
+    // Role name for each color field key, used by the swatch callback.
     const ROLE_FOR_FIELD = {
         'colour.tier1': 'tier1',
         'colour.tier2': 'tier2',
@@ -137,8 +137,8 @@
         'colour.qbg':   'qbg'
     };
 
-    // Swatch callback shared by every colour field. Resolves the selected
-    // preset to a CSS colour. For "Default" it uses the role's mode-specific
+    // Swatch callback shared by every color field. Resolves the selected
+    // preset to a CSS color. For "Default" it uses the role's mode-specific
     // default for the current page theme (body.dark-mode), which is what the
     // user would actually see. "Inherit" and "Transparent" fall back to a
     // neutral grey/checkerboard-ish value so the tiny swatch is still visible.
@@ -157,7 +157,7 @@
         };
     }
 
-    // Stored preset selection per role. Populated by loadColours().
+    // Stored preset selection per role. Populated by loadColors().
     let PRESETS = {
         tier1: 'default',
         tier2: 'default',
@@ -168,37 +168,37 @@
         qbg:   'default'
     };
 
-    function applyPresetsToColours() {
-        COLOURS.tiers.dark = [
+    function applyPresetsToColors() {
+        COLORS.tiers.dark = [
             resolvePreset(PRESETS.tier1, 'tier1', true),
             resolvePreset(PRESETS.tier2, 'tier2', true),
             resolvePreset(PRESETS.tier3, 'tier3', true),
             resolvePreset(PRESETS.tier4, 'tier4', true),
             resolvePreset(PRESETS.tier5, 'tier5', true)
         ];
-        COLOURS.tiers.light = [
+        COLORS.tiers.light = [
             resolvePreset(PRESETS.tier1, 'tier1', false),
             resolvePreset(PRESETS.tier2, 'tier2', false),
             resolvePreset(PRESETS.tier3, 'tier3', false),
             resolvePreset(PRESETS.tier4, 'tier4', false),
             resolvePreset(PRESETS.tier5, 'tier5', false)
         ];
-        COLOURS.bonus.dark        = resolvePreset(PRESETS.bonus, 'bonus', true);
-        COLOURS.bonus.light       = resolvePreset(PRESETS.bonus, 'bonus', false);
-        COLOURS.qualityBoxBg.dark  = resolvePreset(PRESETS.qbg, 'qbg', true);
-        COLOURS.qualityBoxBg.light = resolvePreset(PRESETS.qbg, 'qbg', false);
+        COLORS.bonus.dark        = resolvePreset(PRESETS.bonus, 'bonus', true);
+        COLORS.bonus.light       = resolvePreset(PRESETS.bonus, 'bonus', false);
+        COLORS.qualityBoxBg.dark  = resolvePreset(PRESETS.qbg, 'qbg', true);
+        COLORS.qualityBoxBg.light = resolvePreset(PRESETS.qbg, 'qbg', false);
     }
 
-    function loadColours() {
+    function loadColors() {
         try {
-            const raw = localStorage.getItem(COLOURS_STORAGE_KEY);
+            const raw = localStorage.getItem(COLORS_STORAGE_KEY);
             if (!raw) {
-                applyPresetsToColours();
+                applyPresetsToColors();
                 return;
             }
             const saved = JSON.parse(raw);
             if (!saved || typeof saved !== 'object') {
-                applyPresetsToColours();
+                applyPresetsToColors();
                 return;
             }
             // New preset-based format. If the key exists and looks like the
@@ -215,23 +215,23 @@
                 // Old format or unrecognised. Reset to Default (per user decision).
                 PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
             }
-            applyPresetsToColours();
+            applyPresetsToColors();
         } catch (_) {
-            applyPresetsToColours();
+            applyPresetsToColors();
         }
     }
 
-    function saveColours() {
+    function saveColors() {
         try {
-            localStorage.setItem(COLOURS_STORAGE_KEY, JSON.stringify(PRESETS));
+            localStorage.setItem(COLORS_STORAGE_KEY, JSON.stringify(PRESETS));
         } catch (_) {}
     }
 
-    function resetColours() {
+    function resetColors() {
         PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
-        applyPresetsToColours();
-        saveColours();
-        colourEpoch++;
+        applyPresetsToColors();
+        saveColors();
+        colorEpoch++;
         checkDarkMode();
         if (currentHandler && typeof currentHandler.processAll === 'function') {
             currentHandler.processAll();
@@ -245,7 +245,7 @@
         return PALETTE.map(p => ({ value: p.value, label: p.label }));
     }
 
-    function buildColourFields() {
+    function buildColorFields() {
         const opts = paletteOptions();
         const mk = (key, preset) => ({
             key,
@@ -268,11 +268,11 @@
         ];
     }
 
-    // Headerless colour tables that stack cleanly on PDA. The single-column
+    // Headerless color tables that stack cleanly on PDA. The single-column
     // tables cap their width so the dropdown doesn't stretch across the panel.
     // The reset section is titled "Reset Color" and sits above the config
     // toggle groups at the bottom of the panel.
-    function buildColourSections() {
+    function buildColorSections() {
         return [
             {
                 table: true,
@@ -320,10 +320,10 @@
     }
 
     function registerWithHub() {
-        loadColours();
+        loadColors();
 
-        const colourFields = buildColourFields();
-        const colourValues = {
+        const colorFields = buildColorFields();
+        const colorValues = {
             'colour.tier1': PRESETS.tier1,
             'colour.tier2': PRESETS.tier2,
             'colour.tier3': PRESETS.tier3,
@@ -341,7 +341,7 @@
             { key: 'showDisplayCaseBonuses', type: 'toggle', label: 'Display Case bonuses', default: true },
             { key: 'enableInventory', type: 'toggle', label: 'Inventory (Items)', default: true },
             { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
-        ].concat(colourFields);
+        ].concat(colorFields);
 
         const values = {
             enableItemMarket: CONFIG.enableItemMarket,
@@ -352,7 +352,7 @@
             enableInventory: CONFIG.enableInventory,
             debug: CONFIG.debug
         };
-        Object.assign(values, colourValues);
+        Object.assign(values, colorValues);
 
         const detail = {
             id: HUB_ID,
@@ -363,7 +363,7 @@
             open: () => { console.log('[OpenMarket] Running in the background on market pages.'); },
             prefs: {
                 fields,
-                sections: buildColourSections(),
+                sections: buildColorSections(),
                 values,
                 onSave: (v) => {
                     CONFIG.enableItemMarket = !!v.enableItemMarket;
@@ -381,9 +381,9 @@
                     PRESETS.tier5 = v['colour.tier5'] || 'default';
                     PRESETS.bonus = v['colour.bonus'] || 'default';
                     PRESETS.qbg   = v['colour.qbg']   || 'default';
-                    applyPresetsToColours();
-                    saveColours();
-                    colourEpoch++; // invalidate processed tiles so they repaint
+                    applyPresetsToColors();
+                    saveColors();
+                    colorEpoch++; // invalidate processed tiles so they repaint
                     checkDarkMode();
                     activateHandlerForCurrentUrl();
                 }
@@ -392,14 +392,14 @@
 
         // Wire up the reset button's onClick once the Hub instantiates fields.
         // The Hub reads field.onClick at click time, so attaching it here works.
-        colourFields.forEach(f => {
+        colorFields.forEach(f => {
             if (f.key === 'colour.reset') {
                 f.onClick = () => {
-                    resetColours();
+                    resetColors();
                     // Refresh the Hub pref values so dropdowns show "Default".
-                    colourFields.forEach(cf => {
+                    colorFields.forEach(cf => {
                         if (cf.key.startsWith('colour.') && cf.key !== 'colour.reset') {
-                            detail.prefs.values[cf.key] = PRESETS[cf.key.replace('colour.', '')];
+                            detail.prefs.values[cf.key] = PRESETS[cf.key.replace('color.', '')];
                         }
                     });
                     // Nudge the Hub to redraw the panel.
@@ -483,9 +483,8 @@
     let currentHandler = null;
     let fetchParseWarned = false;
 
-    function debugWarn(...args) { if (CONFIG.debug) console.warn('[OpenMarket]', ...args); }
     function checkDarkMode() { darkMode = document.body.classList.contains('dark-mode'); }
-    function getTierColour(percent) { const c = darkMode ? COLOURS.tiers.dark : COLOURS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
+    function getTierColor(percent) { const c = darkMode ? COLORS.tiers.dark : COLORS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
     function qs(selector, parent = document) { try { return parent.querySelector(selector); } catch (e) { return null; } }
     function qsa(selector, parent = document) { try { return Array.from(parent.querySelectorAll(selector)); } catch (e) { return null; } }
     function create(tag, attrs = {}, children = []) {
@@ -499,11 +498,11 @@
         return el;
     }
     function getIconIndicators(icon) { return [icon.className, icon.getAttribute('aria-label'), icon.getAttribute('title'), icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
-    function computeItemKey(itemID, stats, bonuses) { return `${colourEpoch}|${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
+    function computeItemKey(itemID, stats, bonuses) { return `${colorEpoch}|${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
     function isProcessed(el, key) { return processedElements.get(el) === key; }
     function markProcessed(el, key) { processedElements.set(el, key); }
-    function getQualityColour(value, maxRange) { return getTierColour(value);}
-    function getBonusColour() { return darkMode ? COLOURS.bonus.dark : COLOURS.bonus.light; }
+    function getQualityColor(value, maxRange) { return getTierColor(value);}
+    function getBonusColor() { return darkMode ? COLORS.bonus.dark : COLORS.bonus.light; }
 
     function extractStats(el, selectors) {
         let damage = 0, accuracy = 0, armour = 0;
@@ -569,7 +568,7 @@
         markProcessed(el, key);
     }
 
-    function getQualityBoxBg() { return darkMode ? COLOURS.qualityBoxBg.dark : COLOURS.qualityBoxBg.light; }
+    function getQualityBoxBg() { return darkMode ? COLORS.qualityBoxBg.dark : COLORS.qualityBoxBg.light; }
     function calcQuality(itemID, damage, accuracy, armour) {
         const base = BASE_STATS_MAP[itemID];
         if (!base) return null;
@@ -639,9 +638,9 @@
         'wither':      { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] }
     };
 
-    // Colours taken from the reference badge script (fill + empty base)
+    // Colors taken from the reference badge script (fill + empty base)
     // Regular strengthened so bars stay visible on light inventory backgrounds
-    const BONUS_BAR_COLOURS = {
+    const BONUS_BAR_COLORS = {
         red:    { fill: 'rgba(180,0,40,0.85)',   base: 'rgba(128,0,32,0.25)' },
         orange: { fill: 'rgba(191,111,0,0.85)',  base: 'rgba(191,111,0,0.25)' },
         yellow: { fill: 'rgba(191,191,0,0.85)',  base: 'rgba(191,191,0,0.25)' },
@@ -673,7 +672,7 @@
     }
 
     function createBonusBarBackground(value, rarity, range) {
-        const colours = BONUS_BAR_COLOURS[rarity] || BONUS_BAR_COLOURS.regular;
+        const colors = BONUS_BAR_COLORS[rarity] || BONUS_BAR_COLORS.regular;
         let percent = 100;
         if (range && range[1] > range[0] && value != null) {
             // Relative fill inside the tier (e.g. 23 in 20-26 yellow = ~50%)
@@ -683,7 +682,7 @@
             percent = Math.min(Math.max(Number(value), 0), 100);
         }
         // Hard edge gradient so the fill looks like a progress bar
-        return `linear-gradient(90deg, ${colours.fill} 0%, ${colours.fill} ${Math.max(percent - 0.2, 0)}%, ${colours.base} ${Math.min(percent + 0.2, 100)}%, ${colours.base} 100%)`;
+        return `linear-gradient(90deg, ${colors.fill} 0%, ${colors.fill} ${Math.max(percent - 0.2, 0)}%, ${colors.base} ${Math.min(percent + 0.2, 100)}%, ${colors.base} 100%)`;
     }
 
     function createBonusEl(bonus, contextEl) {
@@ -691,7 +690,7 @@
             return create('div', {
                 className: 'om-bonus-bar om-bonus-fixed',
                 textContent: bonus.title,
-                style: { color: getBonusColour() }
+                style: { color: getBonusColor() }
             });
         }
 
@@ -707,15 +706,15 @@
         // Keep darkMode in sync (Torn may toggle theme without a full reload)
         checkDarkMode();
 
-        // High-contrast solid colours — no purple, no soft glow
+        // High-contrast solid colors — no purple, no soft glow
         // Dark: light gray on yellow/orange | Light: near-black on red
-        let textColour = '#fff';
+        let textColor = '#fff';
         if (rarity === 'yellow' || rarity === 'orange') {
-            textColour = darkMode ? '#e8e8e8' : '#111';
+            textColor = darkMode ? '#e8e8e8' : '#111';
         } else if (rarity === 'red') {
-            textColour = darkMode ? '#fff' : '#1a1a1a';
+            textColor = darkMode ? '#fff' : '#1a1a1a';
         } else if (rarity === 'regular') {
-            textColour = darkMode ? '#fff' : '#111';
+            textColor = darkMode ? '#fff' : '#111';
         }
 
         const bar = create('div', {
@@ -729,7 +728,7 @@
         const label = create('span', {
             className: 'om-bonus-text',
             textContent: text,
-            style: { color: textColour }
+            style: { color: textColor }
         });
 
         bar.appendChild(label);
@@ -740,7 +739,7 @@
         if (!container) return;
         const clamped = Math.min(Math.max(parseFloat(value), 0), maxRange);
         const span = create('span', { className: 'label-value t-overflow', textContent: `Q ${clamped.toFixed(1)}%` });
-        const box = create('div', { className: 'openmarket-quality-box', style: { position: 'absolute', top: '2px', left: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', background: getQualityBoxBg(), color: getQualityColour(clamped, maxRange) } }, [span]);
+        const box = create('div', { className: 'openmarket-quality-box', style: { position: 'absolute', top: '2px', left: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', background: getQualityBoxBg(), color: getQualityColor(clamped, maxRange) } }, [span]);
         if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
         container.appendChild(box);
     }
@@ -763,21 +762,10 @@
                 fontWeight: 'bold',
                 whiteSpace: 'nowrap',
                 background: getQualityBoxBg(),
-                color: getQualityColour(clamped, maxRange)
+                color: getQualityColor(clamped, maxRange)
             }
         });
         titleContainer.appendChild(badge);
-    }
-    function insertBonusOverlay(container, bonuses) {
-        if (!container || !bonuses || bonuses.length === 0) return;
-        const existing = qs('.openmarket-bonus-box', container);
-        if (existing) existing.remove();
-        const text = bonuses.map(b => FIXED_BONUSES.includes(b.title) ? b.title : (b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title)).join(' · ');
-        if (!text) return;
-        const span = create('span', { className: 'label-value t-overflow', textContent: text, title: text });
-        const box = create('div', { className: 'openmarket-bonus-box', style: { position: 'absolute', bottom: '2px', left: '2px', right: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold', zIndex: '2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: getQualityBoxBg(), color: getBonusColour() } }, [span]);
-        if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
-        container.appendChild(box);
     }
     function isPageActive() { return !document.hidden && document.hasFocus(); }
     function setupActiveListeners() {
@@ -1311,7 +1299,7 @@
                 if (titleEl) {
                     const existingMeta = qs('.openmarket-inventory-meta', el); if (existingMeta) existingMeta.remove();
                     const meta = create('span', { className: 'openmarket-inventory-meta', style: { display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px 8px', marginLeft: '8px', verticalAlign: 'middle', fontSize: '11px', lineHeight: '1.3', fontWeight: 'bold' } });
-                    if (qualityOk) meta.appendChild(create('span', { className: 'openmarket-inventory-quality', textContent: `Q ${numericQuality.toFixed(1)}%`, style: { color: getQualityColour(Math.min(Math.max(numericQuality, 0), maxRange), maxRange), padding: '0 4px', borderRadius: '3px', background: getQualityBoxBg() } }));
+                    if (qualityOk) meta.appendChild(create('span', { className: 'openmarket-inventory-quality', textContent: `Q ${numericQuality.toFixed(1)}%`, style: { color: getQualityColor(Math.min(Math.max(numericQuality, 0), maxRange), maxRange), padding: '0 4px', borderRadius: '3px', background: getQualityBoxBg() } }));
                     if (weaponBonuses.length > 0) {
                         const bonusContainer = create('span', { className: 'openmarket-bonuses openmarket-inventory-bonuses', title: weaponBonuses.map(b => b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title).join(' · '), style: { display: 'inline-flex', gap: '3px', alignItems: 'center' } });
                         weaponBonuses.forEach((bonus) => { bonusContainer.appendChild(createBonusEl(bonus, el)); });
@@ -1394,7 +1382,7 @@
                                         textContent: `Q ${clamped.toFixed(1)}%`,
                                         style: {
                                             background: getQualityBoxBg(),
-                                            color: getQualityColour(clamped, maxRange)
+                                            color: getQualityColor(clamped, maxRange)
                                         }
                                     });
                                     const fullName = nameEl.textContent.trim();
@@ -1778,7 +1766,7 @@
 }
 .openmarket-inventory-meta { display: inline-flex; align-items: center; flex-wrap: wrap; overflow: hidden; }
 
-/* Coloured bonus progress bars — fixed 99.33×18 on market */
+/* Colored bonus progress bars — fixed 99.33×18 on market */
 .om-bonus-bar {
     position: relative;
     display: block;
