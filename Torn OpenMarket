@@ -1711,8 +1711,16 @@
     line-height: 1.2 !important;
     box-sizing: border-box !important;
 }
+/* Display case: lift native damage/accuracy pills slightly to make room visually */
+.b-item-wrap .bonus-attachment:has(i.bonus-attachment-item-damage-bonus),
+.b-item-wrap .bonus-attachment:has(i.bonus-attachment-item-accuracy-bonus) {
+    position: relative !important;
+    top: -3px !important;
+}
 /* Display case: bars in rarity row, 100px centered to match item image */
 .b-item-rarity .om-displaycase-bonuses {
+    position: relative !important;
+    top: -3px !important;
     display: flex !important;
     flex-direction: column !important;
     gap: 1px !important;
