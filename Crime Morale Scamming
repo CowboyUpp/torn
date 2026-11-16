@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.46
+// @version      1.4.47
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.47: Add player Scamming skill detection where game data exposes it, manual fallback, and abandon-click diagnostics.
 // CHANGELOG 1.4.46: Show acquired, used and remaining addresses in each completed wave's history.
 // CHANGELOG 1.4.45: Rename the wave panel to Scam Tracker, add acquired/used/remaining metrics and a full reset button.
 // CHANGELOG 1.4.44: Baseline existing target cards at wave launch so old targets are not attributed to a new wave.
@@ -748,6 +749,8 @@
     };
 
     let saved = getValue(STORAGE_KEY, {}) || {};
+    let playerSkill = saved.playerSkill && typeof saved.playerSkill === 'object'
+      ? saved.playerSkill : { level: null, source: null, detectedAt: null };
     let gameDataState = saved.gameData && typeof saved.gameData === 'object'
       ? saved.gameData : { targets: {}, spams: {}, farmsSignature: null };
     let history = Array.isArray(saved.waves) ? saved.waves : [];
@@ -796,7 +799,7 @@
 
     function saveTrackerState() {
       history = history.slice(0, MAX_HISTORY);
-      setValue(STORAGE_KEY, { waves: history, active: activeWave, debug: debugLog.slice(-150), gameData: gameDataState });
+      setValue(STORAGE_KEY, { waves: history, active: activeWave, debug: debugLog.slice(-150), gameData: gameDataState, playerSkill });
     }
 
     function debugEvent(type, details) {
@@ -891,8 +894,39 @@
       return summary;
     }
 
+    function detectPlayerScammingSkill(data) {
+      if (!data || typeof data !== 'object') return null;
+      const visited = new Set();
+      const queue = [{ value: data, path: '' }];
+      while (queue.length) {
+        const item = queue.shift();
+        if (!item.value || typeof item.value !== 'object' || visited.has(item.value)) continue;
+        visited.add(item.value);
+        for (const [key, value] of Object.entries(item.value)) {
+          const path = item.path ? item.path + '.' + key : key;
+          const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const isSkillKey = normalized === 'scammingskill' || normalized === 'skillscamming' ||
+            (normalized === 'skill' && /scamming/i.test(item.path));
+          if (isSkillKey) {
+            const candidate = Number(value && typeof value === 'object'
+              ? (value.level ?? value.value ?? value.current) : value);
+            if (Number.isInteger(candidate) && candidate >= 0 && candidate <= 100) return { level: candidate, path };
+          }
+          if (value && typeof value === 'object') queue.push({ value, path });
+        }
+      }
+      return null;
+    }
+
     function captureCrimeData(crimeType, data) {
       if (String(crimeType) !== '12' || !data || typeof data !== 'object') return;
+      const detectedSkill = detectPlayerScammingSkill(data);
+      if (detectedSkill && (playerSkill.source !== 'manual' || playerSkill.level == null)) {
+        if (playerSkill.level !== detectedSkill.level || playerSkill.source !== 'game-data') {
+          playerSkill = { level: detectedSkill.level, source: 'game-data', detectedAt: new Date().toISOString(), path: detectedSkill.path };
+          debugEvent('player-skill-detected', playerSkill);
+        }
+      }
       const scamming = data.scamming && typeof data.scamming === 'object' ? data.scamming : {};
       const targets = scamming.targets && typeof scamming.targets === 'object' ? scamming.targets : {};
       const spams = data.spams && typeof data.spams === 'object' ? data.spams : {};
@@ -1201,6 +1235,10 @@
         ? '<div class="cm-sw-debug"><div class="cm-sw-debug-actions"><button type="button" data-cm-debug="snapshot">Capture DOM</button><button type="button" data-cm-debug="copy">Copy log</button><button type="button" data-cm-debug="clear">Clear</button></div><div class="cm-sw-debug-log">' +
           (debugLog.length ? debugLog.slice().reverse().map(entry => '<div class="cm-sw-debug-entry"><b>' + escapeHtml(entry.type) + '</b><small>' + escapeHtml(entry.time) + '</small><pre>' + escapeHtml(JSON.stringify(entry.details || {})) + '</pre></div>').join('') : '<div class="cm-sw-empty">No debug events yet.</div>') +
           '</div></div>' : '';
+      const skillText = playerSkill.level == null
+        ? 'Not detected'
+        : 'Level ' + playerSkill.level + (playerSkill.level >= 100 ? ' · Alpha Mail unlocked' : '');
+      const skillSource = playerSkill.source === 'manual' ? 'manual' : (playerSkill.source === 'game-data' ? 'automatic' : 'awaiting game data');
       const html = '<div class="cm-sw-topline"><div class="cm-sw-title">Scam Tracker</div><div class="cm-sw-top-actions"><button type="button" class="cm-sw-reset" title="Clear all saved tracker data">Reset</button><button type="button" class="cm-sw-debug-toggle">' + (debugOpen ? 'Hide Debug' : 'Debug') + '</button><button type="button" class="cm-sw-close" aria-label="Close">×</button></div></div>' +
         '<div class="cm-sw-status"><span class="cm-sw-dot ' + (wave ? 'is-live' : '') + '"></span>' + currentStatus +
         '<span class="cm-sw-status-right">' + (wave ? 'OBSERVING' : 'READY') + '</span></div>' +
@@ -1212,6 +1250,7 @@
         '<div><small>USED</small><b>' + (wave ? used.toLocaleString() : '—') + '</b></div>' +
         '<div><small>REMAINING</small><b>' + (wave ? Math.max(0, wave.targetCount - used).toLocaleString() : '—') + '</b></div>' +
         '</div>' +
+        '<div class="cm-sw-skill"><span><small>SCAMMING SKILL</small><b>' + escapeHtml(skillText) + '</b><small class="cm-sw-skill-source">' + escapeHtml(skillSource) + '</small></span><button type="button" class="cm-sw-set-skill">Set manually</button></div>' +
         '<div class="cm-sw-addresses"><span>ADDRESS STOCK</span><strong>' +
         (wave && wave.startAddresses !== null ? wave.startAddresses.toLocaleString() : '—') +
         '</strong><span class="cm-sw-arrow">→</span><strong>' +
@@ -1252,11 +1291,31 @@
         panel.id = 'cm-sw-panel';
         panel.setAttribute('aria-label', 'Spam Wave Tracker');
         panel.addEventListener('click', event => {
+          if (event.target.closest('.cm-sw-set-skill')) {
+            const current = playerSkill.level == null ? '' : String(playerSkill.level);
+            const answer = window.prompt('Enter your Scamming skill level (0–100). Leave blank to clear the manual value:', current);
+            if (answer === null) return;
+            if (!answer.trim()) {
+              playerSkill = { level: null, source: null, detectedAt: null };
+            } else {
+              const level = Number(answer.trim());
+              if (!Number.isInteger(level) || level < 0 || level > 100) {
+                window.alert('Please enter a whole number from 0 to 100.');
+                return;
+              }
+              playerSkill = { level, source: 'manual', detectedAt: new Date().toISOString() };
+            }
+            saveTrackerState();
+            debugEvent('player-skill-manual', playerSkill);
+            renderPanel();
+            return;
+          }
           if (event.target.closest('.cm-sw-reset')) {
             if (!window.confirm('Reset Scam Tracker? This clears all saved waves, active tracking data and debug history.')) return;
             history = [];
             activeWave = null;
             gameDataState = { targets: {}, spams: {}, farmsSignature: null, targetBaselineCaptured: false, spamBaselineCaptured: false };
+            playerSkill = { level: null, source: null, detectedAt: null };
             debugLog = [];
             knownTargetEmails.clear();
             lastLoggedAddressCount = null;
@@ -1327,6 +1386,12 @@
         '.cm-sw-clock{font-size:27px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:1px;color:var(--default-blue-color,#2878bd)}',
         '.cm-sw-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:13px 0;border-bottom:1px solid #e0e3e7}',
         '.cm-sw-metrics b{display:block;font-size:20px;margin-top:3px;font-variant-numeric:tabular-nums}',
+        '.cm-sw-skill{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 0;border-bottom:1px solid #e0e3e7}',
+        '.cm-sw-skill span{display:flex;flex-direction:column;gap:2px}',
+        '.cm-sw-skill small{font-size:9px;letter-spacing:.6px;color:#737b84}',
+        '.cm-sw-skill b{font-size:13px}',
+        '.cm-sw-skill-source{font-size:8px!important;text-transform:uppercase}',
+        '.cm-sw-set-skill{border:1px solid #cfd5dc;border-radius:4px;background:#f5f6f7;padding:5px 8px;font:inherit;font-size:10px;cursor:pointer;color:#333}',
         '.cm-sw-addresses{display:flex;align-items:center;gap:8px;padding:11px 0;border-bottom:1px solid #e0e3e7;font-size:12px}',
         '.cm-sw-addresses>span:first-child{margin-right:auto;font-size:9px;letter-spacing:.8px;opacity:.65;font-weight:700}',
         '.cm-sw-addresses strong{font-variant-numeric:tabular-nums}',
@@ -1361,6 +1426,18 @@
     function boot() {
       installStyle();
       ensureUi();
+      document.addEventListener('click', event => {
+        const button = event.target && event.target.closest ? event.target.closest('button') : null;
+        if (!button || !/abandon/i.test(String(button.innerText || button.textContent || '').trim())) return;
+        const card = button.closest(TARGET_SELECTOR);
+        if (!card) return;
+        const email = readTargetEmail(card);
+        if (email) debugEvent('abandon-click-observed', {
+          email,
+          buttonText: String(button.innerText || button.textContent || '').trim(),
+          note: 'Click intent only; awaiting authoritative final outcome from game data.'
+        });
+      }, true);
       observer = new MutationObserver(records => {
         if (!records.some(isRelevantMutation)) return;
         ensureUi();
@@ -1454,7 +1531,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.46',
+      version: '1.4.47',
       order: 20,
       open: handleOpen,
       close: handleClose,
