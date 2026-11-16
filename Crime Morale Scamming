@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.50
+// @version      1.4.51
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.51: Retry skill detection independently of wave state and observe skill-label DOM updates.
 // CHANGELOG 1.4.50: Read player Scamming skill directly from the crime page's accessible skill label.
 // CHANGELOG 1.4.49: Detect wave state directly from Torn's awaitingResponses DOM marker.
 // CHANGELOG 1.4.48: Count confirmed abandoned targets as used; track per-target outcomes independently of address-stock changes.
@@ -1493,12 +1494,12 @@
     }
 
     function isRelevantMutation(record) {
-      const selector = WAITING_SELECTOR + ', ' + EMAIL_COUNT_SELECTOR + ', ' + TARGET_SELECTOR + ', .crimes-app-header, .scamming-root';
+      const selector = WAITING_SELECTOR + ', ' + EMAIL_COUNT_SELECTOR + ', ' + TARGET_SELECTOR + ', [aria-label^="Crime skill:"], .crimes-app-header, .scamming-root';
       const relevantNode = node => {
         if (!node) return false;
         const el = node.nodeType === 1 ? node : node.parentElement;
         if (!el || el.closest('#cm-sw-panel, #cm-sw-toggle')) return false;
-        return (el.matches && el.matches(selector)) || (el.closest && !!el.closest(TARGET_SELECTOR + ', ' + WAITING_SELECTOR + ', [class*="emailAddresses"], .crimes-app-header')) ||
+        return (el.matches && el.matches(selector)) || (el.closest && !!el.closest(TARGET_SELECTOR + ', ' + WAITING_SELECTOR + ', [class*="emailAddresses"], [aria-label^="Crime skill:"], .crimes-app-header')) ||
           (el.querySelector && !!el.querySelector(selector));
       };
       if (relevantNode(record.target)) return true;
@@ -1532,13 +1533,20 @@
         sync();
         reconcilePendingAbandons();
       });
-      if (document.body) observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+      if (document.body) observer.observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['aria-label']
+      });
       sync();
       clockTimer = setInterval(() => {
-        if (activeWave) {
-          ensureUi();
-          renderPanel();
-        }
+        // Torn may render or update the skill label after the initial page boot.
+        // Poll independently of wave state so the skill is detected in standby too.
+        syncPlayerScammingSkillFromPage();
+        if (activeWave) ensureUi();
+        if (panelOpen) renderPanel();
       }, 1000);
     }
 
@@ -1620,7 +1628,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.50',
+      version: '1.4.51',
       order: 20,
       open: handleOpen,
       close: handleClose,
