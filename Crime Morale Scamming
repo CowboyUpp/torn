@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.52
+// @version      1.4.53
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.53: Recover a missing wave-start address baseline when Torn renders the counter late.
 // CHANGELOG 1.4.51: Retry skill detection independently of wave state and observe skill-label DOM updates.
 // CHANGELOG 1.4.52: Fix escaped skill-level regex so Crime skill values such as 100 are detected.
 // CHANGELOG 1.4.50: Read player Scamming skill directly from the crime page's accessible skill label.
@@ -1213,7 +1214,20 @@
     function updateAddressUsage() {
       if (!activeWave) return;
       const current = readAddressCount();
-      if (current !== null && activeWave.startAddresses !== null) {
+      if (current !== null && activeWave.startAddresses == null) {
+        // The wave can be detected before Torn renders the address counter.
+        // Recover a usable baseline on the first later read instead of leaving
+        // the wave permanently stuck at "— → —".
+        activeWave.startAddresses = current;
+        activeWave.endAddresses = current;
+        activeWave.outcomes = 0;
+        lastLoggedAddressCount = current;
+        debugEvent('address-baseline-recovered', {
+          current,
+          trackerId: activeWave.id,
+          note: 'Counter was unavailable when the wave started; baseline recovered on the first successful read.'
+        });
+      } else if (current !== null && activeWave.startAddresses !== null) {
         activeWave.endAddresses = current;
         activeWave.outcomes = Math.max(0, activeWave.startAddresses - current);
         if (current !== lastLoggedAddressCount) {
@@ -1629,7 +1643,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.52',
+      version: '1.4.53',
       order: 20,
       open: handleOpen,
       close: handleClose,
