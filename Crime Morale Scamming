@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.51
+// @version      1.4.52
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -14,6 +14,7 @@
 // @license      MIT
 // ==/UserScript==
 // CHANGELOG 1.4.51: Retry skill detection independently of wave state and observe skill-label DOM updates.
+// CHANGELOG 1.4.52: Fix escaped skill-level regex so Crime skill values such as 100 are detected.
 // CHANGELOG 1.4.50: Read player Scamming skill directly from the crime page's accessible skill label.
 // CHANGELOG 1.4.49: Detect wave state directly from Torn's awaitingResponses DOM marker.
 // CHANGELOG 1.4.48: Count confirmed abandoned targets as used; track per-target outcomes independently of address-stock changes.
@@ -926,7 +927,7 @@
     function detectPlayerScammingSkillFromPage() {
       const el = document.querySelector('[aria-label^="Crime skill:"]');
       if (!el) return null;
-      const match = String(el.getAttribute('aria-label') || '').match(/^Crime skill:\\s*(\\d{1,3})$/i);
+      const match = String(el.getAttribute('aria-label') || '').match(/^Crime skill:\s*(\d{1,3})$/i);
       if (!match) return null;
       const level = Number(match[1]);
       return Number.isInteger(level) && level >= 0 && level <= 100 ? level : null;
@@ -1628,7 +1629,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.51',
+      version: '1.4.52',
       order: 20,
       open: handleOpen,
       close: handleClose,
