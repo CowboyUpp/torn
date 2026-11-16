@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.49
+// @version      1.4.50
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.50: Read player Scamming skill directly from the crime page's accessible skill label.
 // CHANGELOG 1.4.49: Detect wave state directly from Torn's awaitingResponses DOM marker.
 // CHANGELOG 1.4.48: Count confirmed abandoned targets as used; track per-target outcomes independently of address-stock changes.
 // CHANGELOG 1.4.47: Add player Scamming skill detection where game data exposes it, manual fallback, and abandon-click diagnostics.
@@ -921,6 +922,33 @@
       return null;
     }
 
+    function detectPlayerScammingSkillFromPage() {
+      const el = document.querySelector('[aria-label^="Crime skill:"]');
+      if (!el) return null;
+      const match = String(el.getAttribute('aria-label') || '').match(/^Crime skill:\\s*(\\d{1,3})$/i);
+      if (!match) return null;
+      const level = Number(match[1]);
+      return Number.isInteger(level) && level >= 0 && level <= 100 ? level : null;
+    }
+
+    function syncPlayerScammingSkillFromPage() {
+      // The crime header exposes the player's actual Scamming skill in its
+      // accessible label. Prefer this live value over API guesses, but retain
+      // an explicitly entered manual value.
+      if (playerSkill.source === 'manual') return;
+      const level = detectPlayerScammingSkillFromPage();
+      if (level === null) return;
+      if (playerSkill.level !== level || playerSkill.source !== 'page-dom') {
+        playerSkill = {
+          level,
+          source: 'page-dom',
+          detectedAt: new Date().toISOString(),
+          path: '[aria-label^="Crime skill:"]'
+        };
+        saveTrackerState();
+      }
+    }
+
     function captureCrimeData(crimeType, data) {
       if (String(crimeType) !== '12' || !data || typeof data !== 'object') return;
       const detectedSkill = detectPlayerScammingSkill(data);
@@ -1227,6 +1255,7 @@
 
     function sync() {
       if (!isEnabled) return;
+      syncPlayerScammingSkillFromPage();
       const waiting = isWaiting();
       if (waiting !== lastWaitingState) {
         lastWaitingState = waiting;
@@ -1293,7 +1322,7 @@
       const skillText = playerSkill.level == null
         ? 'Not detected'
         : 'Level ' + playerSkill.level + (playerSkill.level >= 100 ? ' · Alpha Mail unlocked' : '');
-      const skillSource = playerSkill.source === 'manual' ? 'manual' : (playerSkill.source === 'game-data' ? 'automatic' : 'awaiting game data');
+      const skillSource = playerSkill.source === 'manual' ? 'manual' : ((playerSkill.source === 'game-data' || playerSkill.source === 'page-dom') ? 'automatic' : 'awaiting game data');
       const html = '<div class="cm-sw-topline"><div class="cm-sw-title">Scam Tracker</div><div class="cm-sw-top-actions"><button type="button" class="cm-sw-reset" title="Clear all saved tracker data">Reset</button><button type="button" class="cm-sw-debug-toggle">' + (debugOpen ? 'Hide Debug' : 'Debug') + '</button><button type="button" class="cm-sw-close" aria-label="Close">×</button></div></div>' +
         '<div class="cm-sw-status"><span class="cm-sw-dot ' + (wave ? 'is-live' : '') + '"></span>' + currentStatus +
         '<span class="cm-sw-status-right">' + (wave ? 'OBSERVING' : 'READY') + '</span></div>' +
@@ -1591,7 +1620,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.49',
+      version: '1.4.50',
       order: 20,
       open: handleOpen,
       close: handleClose,
