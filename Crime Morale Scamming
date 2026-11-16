@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.48
+// @version      1.4.49
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.49: Detect wave state directly from Torn's awaitingResponses DOM marker.
 // CHANGELOG 1.4.48: Count confirmed abandoned targets as used; track per-target outcomes independently of address-stock changes.
 // CHANGELOG 1.4.47: Add player Scamming skill detection where game data exposes it, manual fallback, and abandon-click diagnostics.
 // CHANGELOG 1.4.46: Show acquired, used and remaining addresses in each completed wave's history.
@@ -778,8 +779,9 @@
     }
 
     function isWaiting() {
-      return Array.from(document.querySelectorAll(WAITING_SELECTOR))
-        .some(el => /awaiting\s+responses/i.test(el.textContent || ''));
+      // Torn's awaiting-responses marker is the authoritative wave-state signal.
+      // Check the class marker itself; its text may be changed or omitted by UI updates.
+      return document.querySelector(WAITING_SELECTOR) !== null;
     }
 
     function formatDuration(ms) {
@@ -1589,7 +1591,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.47',
+      version: '1.4.49',
       order: 20,
       open: handleOpen,
       close: handleClose,
