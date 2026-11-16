@@ -1,0 +1,1267 @@
+{
+  "exportedAt": "2026-11-16T10:11:57.128Z",
+  "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+  "events": [
+    {
+      "time": "2026-11-16T07:13:47.176Z",
+      "type": "tracker-reset",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "resetAt": "2026-11-16T07:13:47.176Z"
+      }
+    },
+    {
+      "time": "2026-11-16T07:13:47.658Z",
+      "type": "target-data-baseline",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "count": 0,
+        "targets": []
+      }
+    },
+    {
+      "time": "2026-11-16T07:13:47.663Z",
+      "type": "spam-data-baseline",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "levels": []
+      }
+    },
+    {
+      "time": "2026-11-16T07:13:47.678Z",
+      "type": "collection-data-baseline",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "source": "farms",
+        "classification": "unclassified-game-data",
+        "empty": true,
+        "summary": {
+          "keys": [],
+          "count": 0,
+          "entries": {}
+        },
+        "data": {},
+        "truncated": false
+      }
+    },
+    {
+      "time": "2026-11-16T07:14:02.279Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": 356601,
+        "activeTrackerId": null
+      }
+    },
+    {
+      "time": "2026-11-16T07:14:06.971Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": true,
+        "addressCount": 356601,
+        "activeTrackerId": null
+      }
+    },
+    {
+      "time": "2026-11-16T07:14:06.982Z",
+      "type": "wave-started",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "trackerId": 1794813246975,
+        "startAddresses": 356601,
+        "baselineTargetCount": 0,
+        "baselineEmails": [],
+        "waitingHtml": "<div class=\"awaitingResponses___NYgYZ\">Awaiting responses</div>"
+      }
+    },
+    {
+      "time": "2026-11-16T07:14:07.016Z",
+      "type": "address-count",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "current": 356601,
+        "start": 356601,
+        "outcomes": 0
+      }
+    },
+    {
+      "time": "2026-11-16T07:14:11.964Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T07:30:15.244Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": null,
+        "level": null,
+        "targetCount": 0
+      }
+    },
+    {
+      "time": "2026-11-16T07:30:17.087Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T07:41:37.838Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": null,
+        "level": null,
+        "targetCount": 0
+      }
+    },
+    {
+      "time": "2026-11-16T07:41:39.648Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:00:08.161Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/burglary",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": null,
+        "level": null,
+        "targetCount": 0
+      }
+    },
+    {
+      "time": "2026-11-16T08:00:10.533Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/burglary",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:15:17.285Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": null,
+        "level": null,
+        "targetCount": 0
+      }
+    },
+    {
+      "time": "2026-11-16T08:15:19.000Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:15:48.683Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": true,
+        "addressCount": 356601,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:15:48.698Z",
+      "type": "target-detected",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "email": "wells263@blackmail.trn",
+        "method": "Romance",
+        "level": 80,
+        "targetText": "?\nwells263@blackmail.trn\nRomance\nRomance scam, wells263, @blackmail.trn\nREAD",
+        "targetHtml": "<div class=\"crime-option crimeOption___EmXio\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"unknown___LCNS0\">?</div></div></div><div class=\"crimeOptionSection___FL3HG mainSection___ounKe\"><div class=\"emailAndMethod___OWbVR\"><div class=\"circleBackdrop___pxjZb small___G461i tabletAvatar___vcKlo\"></div><span aria-hidden=\"true\" class=\"email___ga8BY\">wells263@blackmail.trn</span><span aria-hidden=\"true\" class=\"scamMethod___je1mR\">Romance</span><span class=\"srOnly___SZ79j\">Romance scam, wells263, @blackmail.trn</span></div><div class=\"persuasionBarSlot___C7h7z\"></div></div><div class=\"sectionDelimiter___O1uPS showEvenOnTablet___ADiei\"></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 desktopResponseTypeSection___Z5drt\"><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div></div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG commitButtonSection___SuslO commitButtonSection___TOC2j\" style=\"width: 96px;\"><button type=\"button\" class=\"torn-btn grey commit-button commitButton___S1ay3\" aria-disabled=\"false\" aria-label=\"Read, 0 nerve\" data-is-tooltip-opened=\"false\"><div class=\"childrenWrapper___qtt1Z\"><span class=\"title___nOk1n noNerveCost___MXsq8\">Read</span><div class=\"uniqueStars____P3AY\"></div></div></button></div><div class=\"sectionDelimiter___O1uPS\"></div></div></div>"
+      }
+    },
+    {
+      "time": "2026-11-16T08:15:48.704Z",
+      "type": "address-count",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "current": 356601,
+        "start": 356601,
+        "outcomes": 0
+      }
+    },
+    {
+      "time": "2026-11-16T08:16:44.331Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:32:50.963Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T08:32:52.949Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:35:13.271Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": true,
+        "addressCount": 356601,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:35:13.277Z",
+      "type": "address-count",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "current": 356601,
+        "start": 356601,
+        "outcomes": 0
+      }
+    },
+    {
+      "time": "2026-11-16T08:36:05.985Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T08:36:08.419Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:40:18.717Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T08:40:20.240Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:41:21.661Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T08:41:22.696Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:42:18.233Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T08:42:19.996Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T08:50:43.625Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T08:50:44.642Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T09:01:21.163Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T09:01:23.206Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T09:17:07.079Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T09:17:08.729Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T09:30:50.498Z",
+      "type": "tracker-restored",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "trackerId": 1794813246975,
+        "startedAt": "2026-11-16T07:14:06.975Z",
+        "method": "Romance",
+        "level": 80,
+        "targetCount": 1
+      }
+    },
+    {
+      "time": "2026-11-16T09:30:51.576Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": 1794813246975
+      }
+    },
+    {
+      "time": "2026-11-16T09:36:48.714Z",
+      "type": "target-detected",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "email": "c_miller59@msg.trn",
+        "method": "Romance",
+        "level": 80,
+        "targetText": "?\nc_miller59@msg.trn\nRomance\nRomance scam, c_miller59, @msg.trn\nREAD",
+        "targetHtml": "<div class=\"crime-option crimeOption___EmXio\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"unknown___LCNS0\">?</div></div></div><div class=\"crimeOptionSection___FL3HG mainSection___ounKe\"><div class=\"emailAndMethod___OWbVR\"><div class=\"circleBackdrop___pxjZb small___G461i tabletAvatar___vcKlo\"></div><span aria-hidden=\"true\" class=\"email___ga8BY\">c_miller59@msg.trn</span><span aria-hidden=\"true\" class=\"scamMethod___je1mR\">Romance</span><span class=\"srOnly___SZ79j\">Romance scam, c_miller59, @msg.trn</span></div><div class=\"persuasionBarSlot___C7h7z\"></div></div><div class=\"sectionDelimiter___O1uPS showEvenOnTablet___ADiei\"></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 desktopResponseTypeSection___Z5drt\"><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div></div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG commitButtonSection___SuslO commitButtonSection___TOC2j\" style=\"width: 96px;\"><button type=\"button\" class=\"torn-btn grey commit-button commitButton___S1ay3\" aria-disabled=\"false\" aria-label=\"Read, 0 nerve\" data-is-tooltip-opened=\"false\"><div class=\"childrenWrapper___qtt1Z\"><span class=\"title___nOk1n noNerveCost___MXsq8\">Read</span><div class=\"uniqueStars____P3AY\"></div></div></button></div><div class=\"sectionDelimiter___O1uPS\"></div></div></div>"
+      }
+    },
+    {
+      "time": "2026-11-16T09:36:48.721Z",
+      "type": "address-count",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "current": 356601,
+        "start": 356601,
+        "outcomes": 0
+      }
+    },
+    {
+      "time": "2026-11-16T09:36:48.725Z",
+      "type": "wave-finished",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "trackerId": 1794813246975,
+        "method": "Romance",
+        "level": 80,
+        "outcomes": 0,
+        "targetCount": 2,
+        "durationMs": 8561749
+      }
+    },
+    {
+      "time": "2026-11-16T09:38:51.426Z",
+      "type": "manual-dom-snapshot",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": 356601,
+        "elements": [
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B",
+            "text": "Farm Email Addresses\n356,601 email addresses\n356,601\n \nEmail Addresses\nFARM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"19.42\" viewBox=\"0 0 20 19.42\" style=\"transform: scale(1.65); left: 10px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient6658604575512792\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path id=\"iconmonstr-email-12-2\" d=\"M10.03,19.41C3.52,19.41,0,15.35,0,10.1,0,4.5,3.97,0,11.06,0c5.18,0,8.94,3.37,8.94,8,0,7.26-8.61,9.18-8.18,5.03-.68,1.23-1.98,1.98-3.38,1.96-2.1,0-3.4-1.53-3.4-4.01,0-3.7,2.43-6.83,5.32-6.83,1.22-.07,2.34.69,2.73,1.85l.39-1.36h1.95c-.2.69-1.93,7.11-1.93,7.11-.54,2.22,1.12,2.26,2.6,1.08,2.77-2.15,2.92-7.77-.83-10.12C11.25.31,2.1,1.8,2.1,9.96c0,4.68,3.29,7.82,8.19,7.82,2.14.05,4.25-.51,6.08-1.62l.98,1.41c-2.23,1.26-4.76,1.9-7.32,1.84h0ZM8.08,7.49c-.6,1.14-.94,2.4-.98,3.69,0,3.01,2.93,3.03,4.38.2.6-1.17.93-2.46.98-3.77,0-2.43-2.91-2.86-4.37-.11h0Z\" fill=\"url(#atSymbolIconGradient6658604575512792)\"></path></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___s4aoL\">Farm Email Addresses</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG emailAdressesSection___oWKMb\"><span class=\"srOnly___SZ79j\">356,601 email addresses</span><div class=\"emailAddresses___EPFj9\" aria-hidden=\"true\"><span class=\"count___yQIlI\" data-is-tooltip-opened=\"false\"><span>356,601</span><div class=\"change___mKOZe\"></div><div class=\"change___mKOZe\"></div></span><span class=\"space___TPR0f\""
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09",
+            "text": "Launch a Spam Wave\nLevel\nRomance scam\nSPAM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"18\" viewBox=\"0 0 24 18\" style=\"transform: scale(1.05); left: 8px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient7885954342259992\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><g fill=\"url(#atSymbolIconGradient7885954342259992)\"><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path></g></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___dC_5o\">Launch a Spam Wave</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG\"><style>\n.dropdownMainWrapper_7343535518770687 { width: 215px !important; }\n.dropdownContentWrapper_7343535518770687 { width: 215px !important; }\n </style"
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedTop___JIF1K target___dfIjO new____xQDT",
+            "text": "?\nc_miller59@msg.trn\nRomance\nRomance scam, c_miller59, @msg.trn\nREAD",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedTop___JIF1K target___dfIjO new____xQDT\"><div class=\"crime-option crimeOption___EmXio cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"unknown___LCNS0\">?</div></div></div><div class=\"crimeOptionSection___FL3HG mainSection___ounKe\"><div class=\"emailAndMethod___OWbVR\"><div class=\"circleBackdrop___pxjZb small___G461i tabletAvatar___vcKlo\"></div><span aria-hidden=\"true\" class=\"email___ga8BY\">c_miller59@msg.trn</span><span aria-hidden=\"true\" class=\"scamMethod___je1mR\">Romance</span><span class=\"srOnly___SZ79j\">Romance scam, c_miller59, @msg.trn</span></div><div class=\"persuasionBarSlot___C7h7z\"></div></div><div class=\"sectionDelimiter___O1uPS showEvenOnTablet___ADiei\"></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 desktopResponseTypeSection___Z5drt\"><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div></div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG commitButtonSection___SuslO commitButtonSection___TOC2j\" style=\"width: 96px;\"><button type=\"button\" class=\"torn-btn grey commit-button commitButton___S1ay3\" aria-disabled=\"false\" aria-label=\"Read, 0 nerve\" data-is-tooltip-opened=\"false\"><div class=\"childrenWrapper___qtt1Z\"><span class=\"title___nOk1n noNerveCost___MXsq8\">Read</span><div class=\"uniqueStars____P3AY\"></div></div></button></div><div class=\"sectionDelimiter___O1uPS\"></div></div></div></div>"
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO new____xQDT",
+            "text": "?\nwells263@blackmail.trn\nRomance\nRomance scam, wells263, @blackmail.trn\nREAD",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO new____xQDT\"><div class=\"crime-option crimeOption___EmXio cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"unknown___LCNS0\">?</div></div></div><div class=\"crimeOptionSection___FL3HG mainSection___ounKe\"><div class=\"emailAndMethod___OWbVR\"><div class=\"circleBackdrop___pxjZb small___G461i tabletAvatar___vcKlo\"></div><span aria-hidden=\"true\" class=\"email___ga8BY\">wells263@blackmail.trn</span><span aria-hidden=\"true\" class=\"scamMethod___je1mR\">Romance</span><span class=\"srOnly___SZ79j\">Romance scam, wells263, @blackmail.trn</span></div><div class=\"persuasionBarSlot___C7h7z\"></div></div><div class=\"sectionDelimiter___O1uPS showEvenOnTablet___ADiei\"></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 desktopResponseTypeSection___Z5drt\"><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div><div class=\"circleBackdrop___pxjZb\"></div></div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG commitButtonSection___SuslO commitButtonSection___TOC2j\" style=\"width: 96px;\"><button type=\"button\" class=\"torn-btn grey commit-button commitButton___S1ay3\" aria-disabled=\"false\" aria-label=\"Read, 0 nerve\" data-is-tooltip-opened=\"false\"><div class=\"childrenWrapper___qtt1Z\"><span class=\"title___nOk1n noNerveCost___MXsq8\">Read</span><div class=\"uniqueStars____P3AY\"></div></div></button></div><div class=\"sectionDelimiter___O1uPS\"></div></div></div></div>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelDelivery scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Delivery scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelFamily scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Family scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelPrize scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Prize scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelCharity scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Charity scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelTech support scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Tech support scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelVacation scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group2___mWYFk\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row15___hC5OB\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Vacation scam</span></div>"
+          }
+        ]
+      }
+    },
+    {
+      "time": "2026-11-16T09:42:51.912Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": null
+      }
+    },
+    {
+      "time": "2026-11-16T09:51:06.196Z",
+      "type": "manual-dom-snapshot",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": 356601,
+        "elements": [
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B",
+            "text": "Farm Email Addresses\n356,601 email addresses\n356,601\n \nEmail Addresses\nFARM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"19.42\" viewBox=\"0 0 20 19.42\" style=\"transform: scale(1.65); left: 10px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient5764232826552638\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path id=\"iconmonstr-email-12-2\" d=\"M10.03,19.41C3.52,19.41,0,15.35,0,10.1,0,4.5,3.97,0,11.06,0c5.18,0,8.94,3.37,8.94,8,0,7.26-8.61,9.18-8.18,5.03-.68,1.23-1.98,1.98-3.38,1.96-2.1,0-3.4-1.53-3.4-4.01,0-3.7,2.43-6.83,5.32-6.83,1.22-.07,2.34.69,2.73,1.85l.39-1.36h1.95c-.2.69-1.93,7.11-1.93,7.11-.54,2.22,1.12,2.26,2.6,1.08,2.77-2.15,2.92-7.77-.83-10.12C11.25.31,2.1,1.8,2.1,9.96c0,4.68,3.29,7.82,8.19,7.82,2.14.05,4.25-.51,6.08-1.62l.98,1.41c-2.23,1.26-4.76,1.9-7.32,1.84h0ZM8.08,7.49c-.6,1.14-.94,2.4-.98,3.69,0,3.01,2.93,3.03,4.38.2.6-1.17.93-2.46.98-3.77,0-2.43-2.91-2.86-4.37-.11h0Z\" fill=\"url(#atSymbolIconGradient5764232826552638)\"></path></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___s4aoL\">Farm Email Addresses</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG emailAdressesSection___oWKMb\"><span class=\"srOnly___SZ79j\">356,601 email addresses</span><div class=\"emailAddresses___EPFj9\" aria-hidden=\"true\"><span class=\"count___yQIlI\" data-is-tooltip-opened=\"false\"><span>356,601</span><div class=\"change___mKOZe\"></div><div class=\"change___mKOZe\"></div></span><span class=\"space___TPR0f\""
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09",
+            "text": "Launch a Spam Wave\nLevel\nRomance scam\nSPAM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"18\" viewBox=\"0 0 24 18\" style=\"transform: scale(1.05); left: 8px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient6497823658947931\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><g fill=\"url(#atSymbolIconGradient6497823658947931)\"><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path></g></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___dC_5o\">Launch a Spam Wave</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG\"><style>\n.dropdownMainWrapper_0945394943947363 { width: 215px !important; }\n.dropdownContentWrapper_0945394943947363 { width: 215px !important; }\n </style"
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedTop___JIF1K target___dfIjO",
+            "text": "71h\nExp: 142\nAccel (0/1 + Fast Fwd)\nLv80\n'\n1\n'\n2\n'\n3\n'\n4\n'\nRESPOND\n3",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedTop___JIF1K target___dfIjO\"><div class=\"abandonConfirmation___nppFN abandon-confirmation hidden___mAHJK\"><div>Are you sure you want to abandon this target?</div><div class=\"buttons___W0rEi\"><button class=\"button___GB_b3\" type=\"button\" aria-label=\"Yes, abandon\">Yes</button><button class=\"button___GB_b3\" type=\"button\" aria-label=\"No, do not abandon\">No</button></div></div><div class=\"crime-option crimeOption___EmXio cm-sc-seen\" style=\"transform: translateX(0px);\" data-cm-action=\"accelerate\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><button type=\"button\" class=\"avatarButton___rkwpM\" aria-label=\"Young Adult Male abandon\" data-is-tooltip-opened=\"false\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"circleBackdrop___pxjZb\"></div><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"29.4\" height=\"37.99\" viewBox=\"0 0 29.4 37.99\" class=\"avatarIcon___QUuHu\"><linearGradient id=\"avatarGradient7631645008798872\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path d=\"M27.04,26.46c-1.5-1.32-7.72-2.59-8.3-3.85,2.04-.98,3.43-3.2,4.34-5.8.91-.08,2.31-1.05,2.56-4.76.35-5.21-4.67-12.06-10.98-12.06S3.65,6.95,3.65,11.55c0,3.53,1.7,4.62,2.49,4.94.51,2.64,2.2,4.9,4.59,6.13-.6,1.26-6.77,2.41-8.27,3.87-.4.39-1.45,2.65-2.46,5.08,3.65,3.94,8.86,6.42,14.65,6.42s11.09-2.52,14.75-6.52c-.95-2.4-1.93-4.62-2.36-5ZM7.24,16.09c.19-.29-.3-1.39-.47-1.34-.17.05-.14.63-.12.7-.89-.16-1.49-1.01-1.33-1.91.02-.09.04-.18.07-.26.66.04,1.29.24,1.85.58.13.09.31.08.42-.04,1.24-1.41,2.07-3.13,2.4-4.97l1.1,2.59c.07.16.25.24.41.18,2.37-.78,4.41-2.31,5.83-4.36.63,1.65,1.32,5.84,4.29,6.5.22.03.45.02.67-.03.6-.36,1.31-.5,2-.39.17,1-."
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO",
+            "text": "70h\nExp: 0\nAbandon\nLv80\n'\n1\n'\n2\n'\n3\n'\n4\n'\nRESPOND\n3",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO\"><div class=\"abandonConfirmation___nppFN abandon-confirmation hidden___mAHJK\"><div>Are you sure you want to abandon this target?</div><div class=\"buttons___W0rEi\"><button class=\"button___GB_b3\" type=\"button\" aria-label=\"Yes, abandon\">Yes</button><button class=\"button___GB_b3\" type=\"button\" aria-label=\"No, do not abandon\">No</button></div></div><div class=\"crime-option crimeOption___EmXio cm-sc-seen\" style=\"transform: translateX(0px);\" data-cm-action=\"abandon\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><button type=\"button\" class=\"avatarButton___rkwpM\" aria-label=\"Professional Male abandon\" data-is-tooltip-opened=\"false\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"circleBackdrop___pxjZb\"></div><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"35.59\" height=\"38\" viewBox=\"0 0 35.59 38\" class=\"avatarIcon___QUuHu\"><linearGradient id=\"avatarGradient29126740593202516\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path d=\"M14.1,37.65l-3.04-13.47c.66-.26,1.3-.51,1.88-.73h0s.07-.04.11-.06c.32.29.66.56,1.01.8,0,.04.02.08.04.12l2.08,3.46-1.77,9.94c1.09.18,2.21.3,3.35.3.98,0,1.94-.09,2.89-.23l-1.62-10.02,2.09-3.6s.04-.1.05-.15c.3-.21.58-.44.85-.69.04.03.09.05.14.07.88.31,1.77.64,2.66.96l-3.68,13.35c6.32-1.08,11.63-5.12,14.44-10.65-2.15-1.09-8.74-3.49-11.97-4.65,1.22-1.54,2.13-3.31,2.68-5.2.62-.71.98-1.62,1-2.56.06-.77-.2-1.53-.71-2.11,0-.25,1.67-4.53.37-7.58C25.21.83,22.01,0,20.22,0c-1.81.01-3.58.57-5.07,1.6-.76-.47-1.65-.69-2.54-.63-1.56,0-3.23,1.1-4.42,3.74-1.64,3.63,0,6.85.42,8.02-.45.49-.69,1.14-.67,1.8.02,1,.41,1.96,1.11,2.69.49,"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelDelivery scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Delivery scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelFamily scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Family scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelPrize scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Prize scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelCharity scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Charity scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelTech support scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Tech support scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelVacation scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group2___mWYFk\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row15___hC5OB\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Vacation scam</span></div>"
+          }
+        ]
+      }
+    },
+    {
+      "time": "2026-11-16T10:05:05.753Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": null
+      }
+    },
+    {
+      "time": "2026-11-16T10:05:37.943Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": null
+      }
+    },
+    {
+      "time": "2026-11-16T10:07:00.605Z",
+      "type": "manual-dom-snapshot",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": 356601,
+        "elements": [
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B",
+            "text": "Farm Email Addresses\n356,601 email addresses\n356,601\n \nEmail Addresses\nFARM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"19.42\" viewBox=\"0 0 20 19.42\" style=\"transform: scale(1.65); left: 10px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient28406361055710827\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path id=\"iconmonstr-email-12-2\" d=\"M10.03,19.41C3.52,19.41,0,15.35,0,10.1,0,4.5,3.97,0,11.06,0c5.18,0,8.94,3.37,8.94,8,0,7.26-8.61,9.18-8.18,5.03-.68,1.23-1.98,1.98-3.38,1.96-2.1,0-3.4-1.53-3.4-4.01,0-3.7,2.43-6.83,5.32-6.83,1.22-.07,2.34.69,2.73,1.85l.39-1.36h1.95c-.2.69-1.93,7.11-1.93,7.11-.54,2.22,1.12,2.26,2.6,1.08,2.77-2.15,2.92-7.77-.83-10.12C11.25.31,2.1,1.8,2.1,9.96c0,4.68,3.29,7.82,8.19,7.82,2.14.05,4.25-.51,6.08-1.62l.98,1.41c-2.23,1.26-4.76,1.9-7.32,1.84h0ZM8.08,7.49c-.6,1.14-.94,2.4-.98,3.69,0,3.01,2.93,3.03,4.38.2.6-1.17.93-2.46.98-3.77,0-2.43-2.91-2.86-4.37-.11h0Z\" fill=\"url(#atSymbolIconGradient28406361055710827)\"></path></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___s4aoL\">Farm Email Addresses</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG emailAdressesSection___oWKMb\"><span class=\"srOnly___SZ79j\">356,601 email addresses</span><div class=\"emailAddresses___EPFj9\" aria-hidden=\"true\"><span class=\"count___yQIlI\" data-is-tooltip-opened=\"false\"><span>356,601</span><div class=\"change___mKOZe\"></div><div class=\"change___mKOZe\"></div></span><span class=\"space___TPR0"
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09",
+            "text": "Launch a Spam Wave\nLevel\nRomance scam\nSPAM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"18\" viewBox=\"0 0 24 18\" style=\"transform: scale(1.05); left: 8px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient31869709037918903\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><g fill=\"url(#atSymbolIconGradient31869709037918903)\"><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path></g></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___dC_5o\">Launch a Spam Wave</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG\"><style>\n.dropdownMainWrapper_1314684647433627 { width: 215px !important; }\n.dropdownContentWrapper_1314684647433627 { width: 215px !important; }\n </sty"
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedTop___JIF1K roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO",
+            "text": "70h\nExp: 142\nAccel (0/1 + Fast Fwd)\nLv80\n'\n1\n'\n2\n'\n3\n'\n4\n'\nRESPOND\n3",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedTop___JIF1K roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO\"><div class=\"abandonConfirmation___nppFN abandon-confirmation hidden___mAHJK\"><div>Are you sure you want to abandon this target?</div><div class=\"buttons___W0rEi\"><button class=\"button___GB_b3\" type=\"button\" aria-label=\"Yes, abandon\">Yes</button><button class=\"button___GB_b3\" type=\"button\" aria-label=\"No, do not abandon\">No</button></div></div><div class=\"crime-option crimeOption___EmXio cm-sc-seen\" style=\"transform: translateX(0px);\" data-cm-action=\"accelerate\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><button type=\"button\" class=\"avatarButton___rkwpM\" aria-label=\"Young Adult Male abandon\" data-is-tooltip-opened=\"false\" i-data=\"i_202_422_40_40\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"circleBackdrop___pxjZb\"></div><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"29.4\" height=\"37.99\" viewBox=\"0 0 29.4 37.99\" class=\"avatarIcon___QUuHu\"><linearGradient id=\"avatarGradient8645136982258198\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path d=\"M27.04,26.46c-1.5-1.32-7.72-2.59-8.3-3.85,2.04-.98,3.43-3.2,4.34-5.8.91-.08,2.31-1.05,2.56-4.76.35-5.21-4.67-12.06-10.98-12.06S3.65,6.95,3.65,11.55c0,3.53,1.7,4.62,2.49,4.94.51,2.64,2.2,4.9,4.59,6.13-.6,1.26-6.77,2.41-8.27,3.87-.4.39-1.45,2.65-2.46,5.08,3.65,3.94,8.86,6.42,14.65,6.42s11.09-2.52,14.75-6.52c-.95-2.4-1.93-4.62-2.36-5ZM7.24,16.09c.19-.29-.3-1.39-.47-1.34-.17.05-.14.63-.12.7-.89-.16-1.49-1.01-1.33-1.91.02-.09.04-.18.07-.26.66.04,1.29.24,1.85.58.13.09.31.08.42-.04,1.24-1.41,2.07-3.13,2.4-4.97l1.1,2.59c.07.16.25.24.41.18,2.37-.78,4.41-2.31,5.83-4.36.63,1"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelDelivery scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Delivery scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelFamily scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Family scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelPrize scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Prize scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelCharity scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Charity scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelTech support scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Tech support scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelVacation scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group2___mWYFk\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row15___hC5OB\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Vacation scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelTax scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group2___mWYFk\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row15___hC5OB\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Tax scam</span></div>"
+          }
+        ]
+      }
+    },
+    {
+      "time": "2026-11-16T10:07:19.987Z",
+      "type": "waiting-state",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": null,
+        "activeTrackerId": null
+      }
+    },
+    {
+      "time": "2026-11-16T10:07:49.584Z",
+      "type": "manual-dom-snapshot",
+      "url": "https://www.torn.com/page.php?sid=crimes#/scamming",
+      "details": {
+        "waiting": false,
+        "addressCount": 356601,
+        "elements": [
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B",
+            "text": "Farm Email Addresses\n356,601 email addresses\n356,601\n \nEmail Addresses\nFARM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"19.42\" viewBox=\"0 0 20 19.42\" style=\"transform: scale(1.65); left: 10px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient5995670122222145\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path id=\"iconmonstr-email-12-2\" d=\"M10.03,19.41C3.52,19.41,0,15.35,0,10.1,0,4.5,3.97,0,11.06,0c5.18,0,8.94,3.37,8.94,8,0,7.26-8.61,9.18-8.18,5.03-.68,1.23-1.98,1.98-3.38,1.96-2.1,0-3.4-1.53-3.4-4.01,0-3.7,2.43-6.83,5.32-6.83,1.22-.07,2.34.69,2.73,1.85l.39-1.36h1.95c-.2.69-1.93,7.11-1.93,7.11-.54,2.22,1.12,2.26,2.6,1.08,2.77-2.15,2.92-7.77-.83-10.12C11.25.31,2.1,1.8,2.1,9.96c0,4.68,3.29,7.82,8.19,7.82,2.14.05,4.25-.51,6.08-1.62l.98,1.41c-2.23,1.26-4.76,1.9-7.32,1.84h0ZM8.08,7.49c-.6,1.14-.94,2.4-.98,3.69,0,3.01,2.93,3.03,4.38.2.6-1.17.93-2.46.98-3.77,0-2.43-2.91-2.86-4.37-.11h0Z\" fill=\"url(#atSymbolIconGradient5995670122222145)\"></path></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___s4aoL\">Farm Email Addresses</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG emailAdressesSection___oWKMb\"><span class=\"srOnly___SZ79j\">356,601 email addresses</span><div class=\"emailAddresses___EPFj9\" aria-hidden=\"true\"><span class=\"count___yQIlI\" data-is-tooltip-opened=\"false\"><span>356,601</span><div class=\"change___mKOZe\"></div><div class=\"change___mKOZe\"></div></span><span class=\"space___TPR0f\""
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09",
+            "text": "Launch a Spam Wave\nLevel\nRomance scam\nSPAM\n8",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedBottomUnlessOutcomeExpanded___RVn09\"><div class=\"crime-option crimeOption___EmXio hasOverflowingContent___KP9hx cm-sc-seen\" style=\"transform: translateX(0px);\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><div class=\"circleBackdrop___pxjZb\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"18\" viewBox=\"0 0 24 18\" style=\"transform: scale(1.05); left: 8px; top: 10px; position: relative;\"><linearGradient id=\"atSymbolIconGradient02654333595696312\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><g fill=\"url(#atSymbolIconGradient02654333595696312)\"><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path><path d=\"M12,9.71L.01,0h23.97l-11.99,9.71ZM6.57,7.89L0,2.56v12.5l6.57-7.17h0ZM17.42,7.89l6.58,7.17V2.56l-6.58,5.33ZM15.87,9.15l-3.87,3.14-3.87-3.13L.02,18h23.96l-8.11-8.85Z\"></path></g></svg></div></div><div class=\"crimeOptionSection___FL3HG flexGrow___AYYE7 title___dC_5o\">Launch a Spam Wave</div><div class=\"sectionDelimiter___O1uPS\"></div><div class=\"crimeOptionSection___FL3HG\"><style>\n.dropdownMainWrapper_0651773921040647 { width: 215px !important; }\n.dropdownContentWrapper_0651773921040647 { width: 215px !important; }\n </sty"
+          },
+          {
+            "selector": "[class*=\"crimeOptionWrapper\"]",
+            "tag": "DIV",
+            "className": "crimeOptionWrapper___Av99B roundedTop___JIF1K roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO",
+            "text": "70h\nExp: 142\nAccel (0/1 + Fast Fwd)\nLv80\n'\n1\n'\n2\n'\n3\n'\n4\n'\nRESPOND\n3",
+            "html": "<div class=\"crimeOptionWrapper___Av99B roundedTop___JIF1K roundedBottomUnlessOutcomeExpanded___RVn09 target___dfIjO\"><div class=\"abandonConfirmation___nppFN abandon-confirmation hidden___mAHJK\"><div>Are you sure you want to abandon this target?</div><div class=\"buttons___W0rEi\"><button class=\"button___GB_b3\" type=\"button\" aria-label=\"Yes, abandon\">Yes</button><button class=\"button___GB_b3\" type=\"button\" aria-label=\"No, do not abandon\">No</button></div></div><div class=\"crime-option crimeOption___EmXio cm-sc-seen\" style=\"transform: translateX(0px);\" data-cm-action=\"accelerate\"><div class=\"sections___IVEqp crime-option-sections\"><div class=\"desktopCrimeImage___G5cU3\"><button type=\"button\" class=\"avatarButton___rkwpM\" aria-label=\"Young Adult Male abandon\" data-is-tooltip-opened=\"false\"><div class=\"targetPortrait___FZF4V\" data-is-tooltip-opened=\"false\"><div class=\"circleBackdrop___pxjZb\"></div><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"29.4\" height=\"37.99\" viewBox=\"0 0 29.4 37.99\" class=\"avatarIcon___QUuHu\"><linearGradient id=\"avatarGradient6479852178355598\" x1=\"0\" x2=\"0\" y1=\"0\" y2=\"1\" class=\"default___pyjqg\"><stop offset=\"0%\"></stop><stop offset=\"100%\"></stop></linearGradient><path d=\"M27.04,26.46c-1.5-1.32-7.72-2.59-8.3-3.85,2.04-.98,3.43-3.2,4.34-5.8.91-.08,2.31-1.05,2.56-4.76.35-5.21-4.67-12.06-10.98-12.06S3.65,6.95,3.65,11.55c0,3.53,1.7,4.62,2.49,4.94.51,2.64,2.2,4.9,4.59,6.13-.6,1.26-6.77,2.41-8.27,3.87-.4.39-1.45,2.65-2.46,5.08,3.65,3.94,8.86,6.42,14.65,6.42s11.09-2.52,14.75-6.52c-.95-2.4-1.93-4.62-2.36-5ZM7.24,16.09c.19-.29-.3-1.39-.47-1.34-.17.05-.14.63-.12.7-.89-.16-1.49-1.01-1.33-1.91.02-.09.04-.18.07-.26.66.04,1.29.24,1.85.58.13.09.31.08.42-.04,1.24-1.41,2.07-3.13,2.4-4.97l1.1,2.59c.07.16.25.24.41.18,2.37-.78,4.41-2.31,5.83-4.36.63,1.65,1.32,5.84,4.29,6.5.22"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"levelLabel\"]",
+            "tag": "SPAN",
+            "className": "levelLabel____hKCY",
+            "text": "Level",
+            "html": "<span class=\"levelLabel____hKCY\">Level</span>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "svg",
+            "className": "[object SVGAnimatedString]",
+            "text": "",
+            "html": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18.004\" height=\"18\" viewBox=\"0 0 18.004 18\" class=\"spam___mp2QI\"><path d=\"M17.789,6H10.333L5.06,11.258v7.467L10.333,24h7.457l5.275-5.275V11.258ZM14.984,18.92H13.32V17.253h1.664Zm.065-6.65-.427,4.409h-.94l-.433-4.409V10.233h1.8Z\" transform=\"translate(-5.06 -6)\" fill=\"#db876c\"></path></svg>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelDelivery scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Delivery scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelFamily scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Family scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelPrize scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group0___TXZrb\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row0___HmXyk\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Prize scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelCharity scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Charity scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelTech support scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group1___spde1\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row18___qhdsu\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Tech support scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelVacation scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group2___mWYFk\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row15___hC5OB\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Vacation scam</span></div>"
+          },
+          {
+            "selector": "[class*=\"spam\"]",
+            "tag": "DIV",
+            "className": "optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option",
+            "text": "LevelTax scam",
+            "html": "<div class=\"optionWithLevelRequirement___CojuV cm-sc-seen cm-sc-spam-option\"><div class=\"level___MUCxF\"><span class=\"levelLabel____hKCY\">Level</span><div class=\"levelStar___Fbp12 group2___mWYFk\"><div class=\"starGraphic___gFxtT\"></div><div class=\"number___zBYGr row15___hC5OB\"></div></div></div><div class=\"separator___MFwb_\"></div><span class=\"name___oViBs\">Tax scam</span></div>"
+          }
+        ]
+      }
+    }
+  ]
+}
