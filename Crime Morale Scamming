@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.47
+// @version      1.4.48
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.48: Count confirmed abandoned targets as used; track per-target outcomes independently of address-stock changes.
 // CHANGELOG 1.4.47: Add player Scamming skill detection where game data exposes it, manual fallback, and abandon-click diagnostics.
 // CHANGELOG 1.4.46: Show acquired, used and remaining addresses in each completed wave's history.
 // CHANGELOG 1.4.45: Rename the wave panel to Scam Tracker, add acquired/used/remaining metrics and a full reset button.
@@ -958,6 +959,7 @@
           }
           changed = true;
           if (current.confirmedOutcome) {
+            recordTargetOutcome(String(current.email || '').trim().toLowerCase(), current.confirmedOutcome === 'abandon' || current.confirmedOutcome === 'abandoned' ? 'abandoned' : current.confirmedOutcome === 'success' ? 'success' : 'fail', 'game-data');
             debugEvent('target-result-confirmed', {
               targetId: id, email: current.email,
               outcome: current.confirmedOutcome, field: current.confirmedOutcomeField
@@ -974,6 +976,7 @@
         }
         if (current.confirmedOutcome &&
             current.confirmedOutcome !== previous.confirmedOutcome) {
+          recordTargetOutcome(String(current.email || '').trim().toLowerCase(), current.confirmedOutcome === 'abandon' || current.confirmedOutcome === 'abandoned' ? 'abandoned' : current.confirmedOutcome === 'success' ? 'success' : 'fail', 'game-data');
           debugEvent('target-result-confirmed', {
             targetId: id, email: current.email,
             outcome: current.confirmedOutcome, field: current.confirmedOutcomeField
@@ -1053,6 +1056,49 @@
       saveTrackerState();
     }
 
+    function ensureWaveOutcomeState(wave) {
+      if (!wave) return;
+      if (!wave.targetOutcomes || typeof wave.targetOutcomes !== 'object') wave.targetOutcomes = {};
+      if (!Array.isArray(wave.pendingAbandons)) wave.pendingAbandons = [];
+    }
+
+    function recordTargetOutcome(email, outcome, source) {
+      if (!activeWave || !email || !/^(success|fail|abandoned)$/.test(outcome)) return;
+      ensureWaveOutcomeState(activeWave);
+      if (!activeWave.targetEmails.includes(email)) return;
+      const previous = activeWave.targetOutcomes[email];
+      if (previous === outcome) return;
+      activeWave.targetOutcomes[email] = outcome;
+      activeWave.pendingAbandons = activeWave.pendingAbandons.filter(item => item.email !== email);
+      debugEvent('target-lifecycle-outcome', { email, outcome, previous: previous || null, source });
+      saveTrackerState();
+    }
+
+    function getWaveUsed(wave) {
+      if (!wave) return 0;
+      ensureWaveOutcomeState(wave);
+      return Object.values(wave.targetOutcomes).filter(outcome => /^(success|fail|abandoned)$/.test(outcome)).length;
+    }
+
+    function reconcilePendingAbandons() {
+      if (!activeWave || !document.querySelector('.scamming-root')) return;
+      ensureWaveOutcomeState(activeWave);
+      if (!activeWave.pendingAbandons.length) return;
+      const visibleEmails = new Set(Array.from(document.querySelectorAll(TARGET_SELECTOR)).map(readTargetEmail).filter(Boolean));
+      const now = Date.now();
+      const remaining = [];
+      for (const pending of activeWave.pendingAbandons) {
+        if (visibleEmails.has(pending.email)) {
+          if (now - pending.clickedAt < 30000) remaining.push(pending);
+          else debugEvent('abandon-not-confirmed', { email: pending.email, reason: 'Target remained visible after abandon click.' });
+        } else {
+          recordTargetOutcome(pending.email, 'abandoned', 'abandon-click-followed-by-target-removal');
+        }
+      }
+      activeWave.pendingAbandons = remaining;
+      saveTrackerState();
+    }
+
     function readTargetEmail(target) {
       const emailEl = target.querySelector('[class*="email___"], [class*="email_"]');
       return emailEl ? String(emailEl.textContent || '').trim().toLowerCase() : '';
@@ -1102,7 +1148,9 @@
         lastTargetAt: null,
         method: null,
         level: null,
-        targetEmails: []
+        targetEmails: [],
+        targetOutcomes: {},
+        pendingAbandons: []
       };
       debugEvent('wave-started', { trackerId: activeWave.id, startAddresses: activeWave.startAddresses, baselineTargetCount: baselineEmails.length, baselineEmails, waitingHtml: document.querySelector(WAITING_SELECTOR)?.outerHTML?.slice(0, 1800) || null });
       renderPanel();
@@ -1152,7 +1200,8 @@
       activeWave.durationMs = activeWave.finishedAt - activeWave.startedAt;
       activeWave.firstResponseMs = activeWave.firstTargetAt
         ? activeWave.firstTargetAt - activeWave.startedAt : null;
-      debugEvent('wave-finished', { trackerId: activeWave.id, method: activeWave.method, level: activeWave.level, outcomes: activeWave.outcomes, targetCount: activeWave.targetCount, durationMs: activeWave.durationMs });
+      const usedTargets = getWaveUsed(activeWave);
+      debugEvent('wave-finished', { trackerId: activeWave.id, method: activeWave.method, level: activeWave.level, addressStockUsed: activeWave.outcomes, usedTargets, targetCount: activeWave.targetCount, durationMs: activeWave.durationMs });
       activeWave.method = activeWave.method || 'Unknown';
       history.unshift({
         id: activeWave.id,
@@ -1161,7 +1210,9 @@
         durationMs: activeWave.durationMs,
         startAddresses: activeWave.startAddresses,
         endAddresses: activeWave.endAddresses,
-        outcomes: activeWave.outcomes,
+        outcomes: usedTargets,
+        addressStockUsed: activeWave.outcomes,
+        targetOutcomes: activeWave.targetOutcomes,
         targetCount: activeWave.targetCount,
         firstResponseMs: activeWave.firstResponseMs,
         method: activeWave.method,
@@ -1203,7 +1254,10 @@
       } else if (!activeWave) {
         rememberExistingTargets();
       }
-      if (activeWave) saveTrackerState();
+      if (activeWave) {
+        reconcilePendingAbandons();
+        saveTrackerState();
+      }
       renderPanel();
     }
 
@@ -1212,8 +1266,7 @@
       if (!panel || !panelOpen) return;
       const wave = activeWave;
       const elapsed = wave ? Date.now() - wave.startedAt : 0;
-      const used = wave && wave.startAddresses !== null && wave.endAddresses !== null
-        ? Math.max(0, wave.startAddresses - wave.endAddresses) : (wave ? wave.outcomes : 0);
+      const used = wave ? getWaveUsed(wave) : 0;
       const currentStatus = wave ? 'WAVE ACTIVE' : 'STANDBY';
       const method = wave ? (wave.method || 'Detecting…') : 'No active wave';
       const level = wave && wave.level ? 'Level ' + wave.level : '';
@@ -1427,21 +1480,26 @@
       installStyle();
       ensureUi();
       document.addEventListener('click', event => {
-        const button = event.target && event.target.closest ? event.target.closest('button') : null;
-        if (!button || !/abandon/i.test(String(button.innerText || button.textContent || '').trim())) return;
+        const button = event.target && event.target.closest ? event.target.closest('button, [role="button"]') : null;
+        if (!button) return;
+        const buttonLabel = [button.innerText, button.textContent, button.getAttribute('aria-label'), button.getAttribute('title'), button.getAttribute('data-cm-action')].filter(Boolean).join(' ').trim();
+        if (!/abandon/i.test(buttonLabel)) return;
         const card = button.closest(TARGET_SELECTOR);
-        if (!card) return;
+        if (!card || !activeWave) return;
         const email = readTargetEmail(card);
-        if (email) debugEvent('abandon-click-observed', {
-          email,
-          buttonText: String(button.innerText || button.textContent || '').trim(),
-          note: 'Click intent only; awaiting authoritative final outcome from game data.'
-        });
+        if (!email || !activeWave.targetEmails.includes(email)) return;
+        ensureWaveOutcomeState(activeWave);
+        if (activeWave.targetOutcomes[email] === 'abandoned') return;
+        activeWave.pendingAbandons = activeWave.pendingAbandons.filter(item => item.email !== email);
+        activeWave.pendingAbandons.push({ email, clickedAt: Date.now() });
+        debugEvent('abandon-click-observed', { email, buttonLabel: buttonLabel.slice(0, 160), buttonHtml: button.outerHTML.slice(0, 900), note: 'Counts as abandoned only after the target card disappears.' });
+        setTimeout(reconcilePendingAbandons, 1600);
       }, true);
       observer = new MutationObserver(records => {
         if (!records.some(isRelevantMutation)) return;
         ensureUi();
         sync();
+        reconcilePendingAbandons();
       });
       if (document.body) observer.observe(document.body, { subtree: true, childList: true, characterData: true });
       sync();
