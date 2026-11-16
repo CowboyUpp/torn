@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.45
+// @version      1.4.46
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.46: Show acquired, used and remaining addresses in each completed wave's history.
 // CHANGELOG 1.4.45: Rename the wave panel to Scam Tracker, add acquired/used/remaining metrics and a full reset button.
 // CHANGELOG 1.4.44: Baseline existing target cards at wave launch so old targets are not attributed to a new wave.
 // CHANGELOG 1.4.41: Do not close an active wave when navigating away from the Scamming page.
@@ -1190,8 +1191,10 @@
         return '<div class="cm-sw-history-row">' +
           '<div class="cm-sw-history-main"><strong>' + escapeHtml(item.method || 'Unknown') +
           (item.level ? ' ' + escapeHtml(item.level) : '') + '</strong><small>' + escapeHtml(stamp) + '</small></div>' +
-          '<div class="cm-sw-history-stats"><b>' + Number(item.outcomes || 0) + '</b><small>addresses used</small></div>' +
-          '<div class="cm-sw-history-stats"><b>' + formatDuration(item.durationMs || 0) + '</b><small>duration</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + Number(item.targetCount || 0) + '</b><small>acquired</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + Number(item.outcomes || 0) + '</b><small>used</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + Math.max(0, Number(item.targetCount || 0) - Number(item.outcomes || 0)) + '</b><small>remaining</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + formatDuration(item.durationMs || 0) + '</b><small>duration</small></div>'+
           '</div>';
       }).join('');
       const debugHtml = debugOpen
@@ -1329,7 +1332,7 @@
         '.cm-sw-addresses strong{font-variant-numeric:tabular-nums}',
         '.cm-sw-arrow{opacity:.5}',
         '.cm-sw-section-title{display:flex;justify-content:space-between;margin:14px 0 7px;font-size:9px;letter-spacing:1px;font-weight:800;color:#626a73}',
-        '.cm-sw-history-row{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid #e6e8eb}',
+        '.cm-sw-history-row{display:grid;grid-template-columns:minmax(100px,1fr) repeat(4,auto);gap:10px;align-items:center;padding:9px 0;border-top:1px solid #e6e8eb}',
         '.cm-sw-history-main strong,.cm-sw-history-main small,.cm-sw-history-stats b,.cm-sw-history-stats small{display:block}',
         '.cm-sw-history-main small,.cm-sw-history-stats small{font-size:9px;color:#737b84;margin-top:2px}',
         '.cm-sw-history-stats{text-align:right}.cm-sw-history-stats b{font-size:13px;font-variant-numeric:tabular-nums}',
@@ -1451,7 +1454,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.45',
+      version: '1.4.46',
       order: 20,
       open: handleOpen,
       close: handleClose,
