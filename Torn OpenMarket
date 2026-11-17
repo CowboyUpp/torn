@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.12.24
-// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration, native dropdown bonus sorting, and colored bonus progress bars.
+// @version      1.12.27
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration, native dropdown bonus sorting, and coloured bonus progress bars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
@@ -31,20 +31,181 @@
         debug: false
     };
 
+    const CONFIG_STORAGE_KEY = 'openmarket-config';
+    const CONFIG_KEYS = [
+        'enableItemMarket',
+        'enableAuctionHouse',
+        'enableBazaar',
+        'enableDisplayCase',
+        'showDisplayCaseBonuses',
+        'enableInventory',
+        'debug'
+    ];
+
+    function loadConfig() {
+        try {
+            const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
+            if (!raw) return;
+            const saved = JSON.parse(raw);
+            if (!saved || typeof saved !== 'object') return;
+            CONFIG_KEYS.forEach(key => {
+                if (typeof saved[key] === 'boolean') CONFIG[key] = saved[key];
+            });
+        } catch (_) { /* ignore corrupt storage */ }
+    }
+
+    function saveConfig() {
+        try {
+            const out = {};
+            CONFIG_KEYS.forEach(key => { out[key] = !!CONFIG[key]; });
+            localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(out));
+        } catch (_) { /* quota / private mode */ }
+    }
+
+    // Restore toggles before Hub registration so the panel shows saved state
+    loadConfig();
+
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.12.24';
+    const HUB_VERSION = '1.12.27';
     const HUB_ICON = '';
 
+    function injectHubPrefsCss() {
+        if (typeof document === 'undefined') return;
+        if (document.getElementById('om-hub-prefs-css')) return;
+        const s = document.createElement('style');
+        s.id = 'om-hub-prefs-css';
+        // Tighten Script Hub's pref controls so OpenMarket's panel feels closer to Torn UI
+        s.textContent = `
+            .tsh-prefs-detail-body { gap: 8px !important; }
+            .tsh-prefs-detail-body .tsh-pref-section { gap: 4px !important; margin: 0 !important; }
+            .tsh-prefs-detail-body .tsh-pref-section-title {
+                font-size: 11px !important;
+                font-weight: 700 !important;
+                margin: 0 0 2px !important;
+                padding: 0 !important;
+                opacity: 0.9;
+                letter-spacing: 0.02em;
+            }
+            .tsh-prefs-detail-body .tsh-pref-row {
+                display: flex !important;
+                flex-wrap: wrap !important;
+                gap: 6px 8px !important;
+                align-items: flex-end !important;
+            }
+            .tsh-prefs-detail-body .tsh-pref-field { gap: 1px !important; }
+            .tsh-prefs-detail-body .tsh-pref-label {
+                font-size: 11px !important;
+                font-weight: 600 !important;
+                opacity: 0.9;
+            }
+            .tsh-prefs-detail-body .tsh-pref-btn {
+                padding: 3px 9px !important;
+                min-height: 22px !important;
+                height: auto !important;
+                font-size: 11px !important;
+                font-weight: 600 !important;
+                border-radius: 2px !important;
+                line-height: 1.2 !important;
+            }
+            .tsh-prefs-detail-body .tsh-pref-toggle {
+                min-height: 22px !important;
+                padding: 2px 8px !important;
+                font-size: 11px !important;
+                border-radius: 2px !important;
+            }
+            .tsh-prefs-detail-body .tsh-pref-select,
+            .tsh-prefs-detail-body .tsh-pref-input {
+                min-height: 24px !important;
+                font-size: 11px !important;
+                border-radius: 2px !important;
+            }
+            .tsh-prefs-detail-body .tsh-pref-btn-row { gap: 6px !important; }
+            .tsh-prefs-detail-body .tsh-table .tsh-pref-btn {
+                min-height: 22px !important;
+                padding: 2px 6px !important;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(s);
+    }
+
+    // In-panel debug log (users can copy from Hub settings without opening the console)
+    const DEBUG_LOG_MAX = 250;
+    const DEBUG_LOG = [];
+
+    function debugLog(...args) {
+        if (!CONFIG.debug) return;
+        const line = args.map(a => {
+            if (a == null) return String(a);
+            if (typeof a === 'string') return a;
+            try { return JSON.stringify(a); } catch (_) { return String(a); }
+        }).join(' ');
+        const stamp = new Date().toISOString().slice(11, 19); // HH:MM:SS
+        DEBUG_LOG.push(`[${stamp}] ${line}`);
+        if (DEBUG_LOG.length > DEBUG_LOG_MAX) DEBUG_LOG.splice(0, DEBUG_LOG.length - DEBUG_LOG_MAX);
+        try { console.log('[OpenMarket]', ...args); } catch (_) {}
+    }
+
+    function clearDebugLog() {
+        DEBUG_LOG.length = 0;
+    }
+
+    function buildDebugReport() {
+        const lines = [
+            `OpenMarket ${HUB_VERSION} debug report`,
+            `Time: ${new Date().toISOString()}`,
+            `URL: ${typeof location !== 'undefined' ? location.href : '(unknown)'}`,
+            `Config: ${JSON.stringify({
+                enableItemMarket: CONFIG.enableItemMarket,
+                enableAuctionHouse: CONFIG.enableAuctionHouse,
+                enableBazaar: CONFIG.enableBazaar,
+                enableDisplayCase: CONFIG.enableDisplayCase,
+                showDisplayCaseBonuses: CONFIG.showDisplayCaseBonuses,
+                enableInventory: CONFIG.enableInventory,
+                debug: CONFIG.debug
+            })}`,
+            `Handler: ${currentHandler && currentHandler.name ? currentHandler.name : (currentHandler ? 'active' : 'none')}`,
+            `Dark mode: ${typeof document !== 'undefined' && document.body ? document.body.classList.contains('dark-mode') : '(n/a)'}`,
+            `Log lines: ${DEBUG_LOG.length}`,
+            '--- log ---',
+            ...(DEBUG_LOG.length ? DEBUG_LOG.slice() : ['(empty — enable Debug logging, use the page, then copy again)'])
+        ];
+        return lines.join('\n');
+    }
+
+    async function copyDebugReport() {
+        const text = buildDebugReport();
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (_) { /* fall through */ }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (_) {
+            return false;
+        }
+    }
+
     // =========================================================================
-    // COLORS
+    // COLOURS
     //
     // Defaults are the original hardcoded values, kept per-mode. The user picks
     // a preset from a fixed palette per role; unless they pick "Default", the
     // same preset is applied to both dark and light mode (parallel behaviour).
     // "Default" restores the mode-specific original value.
     // =========================================================================
-    const DEFAULT_COLORS = {
+    const DEFAULT_COLOURS = {
         tiers: {
             dark:  ['#e4e4e4', '#57efea', '#c286ff', '#ffd700', '#e05555'],
             light: ['#717171', '#009590', '#8e19c1', '#e37100', '#e05555']
@@ -81,11 +242,11 @@
         { value: 'transparent', label: 'Transparent',              hex: 'transparent' }
     ];
 
-    const COLORS_STORAGE_KEY = 'openmarket-colours';
-    let COLORS = cloneColors(DEFAULT_COLORS);
-    let colorEpoch = 0;
+    const COLOURS_STORAGE_KEY = 'openmarket-colours';
+    let COLOURS = cloneColours(DEFAULT_COLOURS);
+    let colourEpoch = 0;
 
-    function cloneColors(src) {
+    function cloneColours(src) {
         return {
             tiers: {
                 dark:  src.tiers.dark.slice(),
@@ -100,7 +261,7 @@
         return PALETTE.find(p => p.value === value) || null;
     }
 
-    // Resolve a stored preset name for a role into a concrete CSS color
+    // Resolve a stored preset name for a role into a concrete CSS colour
     // string. `default` falls back to the mode-specific original.
     function resolvePreset(presetValue, role, isDark) {
         if (presetValue === 'default' || !presetValue) {
@@ -115,18 +276,18 @@
 
     function roleDefault(role, isDark) {
         switch (role) {
-            case 'tier1': return isDark ? DEFAULT_COLORS.tiers.dark[0]  : DEFAULT_COLORS.tiers.light[0];
-            case 'tier2': return isDark ? DEFAULT_COLORS.tiers.dark[1]  : DEFAULT_COLORS.tiers.light[1];
-            case 'tier3': return isDark ? DEFAULT_COLORS.tiers.dark[2]  : DEFAULT_COLORS.tiers.light[2];
-            case 'tier4': return isDark ? DEFAULT_COLORS.tiers.dark[3]  : DEFAULT_COLORS.tiers.light[3];
+            case 'tier1': return isDark ? DEFAULT_COLOURS.tiers.dark[0]  : DEFAULT_COLOURS.tiers.light[0];
+            case 'tier2': return isDark ? DEFAULT_COLOURS.tiers.dark[1]  : DEFAULT_COLOURS.tiers.light[1];
+            case 'tier3': return isDark ? DEFAULT_COLOURS.tiers.dark[2]  : DEFAULT_COLOURS.tiers.light[2];
+            case 'tier4': return isDark ? DEFAULT_COLOURS.tiers.dark[3]  : DEFAULT_COLOURS.tiers.light[3];
             case 'tier5': return '#e05555';
-            case 'bonus': return isDark ? DEFAULT_COLORS.bonus.dark     : DEFAULT_COLORS.bonus.light;
-            case 'qbg':   return isDark ? DEFAULT_COLORS.qualityBoxBg.dark : DEFAULT_COLORS.qualityBoxBg.light;
+            case 'bonus': return isDark ? DEFAULT_COLOURS.bonus.dark     : DEFAULT_COLOURS.bonus.light;
+            case 'qbg':   return isDark ? DEFAULT_COLOURS.qualityBoxBg.dark : DEFAULT_COLOURS.qualityBoxBg.light;
             default: return '#000000';
         }
     }
 
-    // Role name for each color field key, used by the swatch callback.
+    // Role name for each colour field key, used by the swatch callback.
     const ROLE_FOR_FIELD = {
         'colour.tier1': 'tier1',
         'colour.tier2': 'tier2',
@@ -137,8 +298,8 @@
         'colour.qbg':   'qbg'
     };
 
-    // Swatch callback shared by every color field. Resolves the selected
-    // preset to a CSS color. For "Default" it uses the role's mode-specific
+    // Swatch callback shared by every colour field. Resolves the selected
+    // preset to a CSS colour. For "Default" it uses the role's mode-specific
     // default for the current page theme (body.dark-mode), which is what the
     // user would actually see. "Inherit" and "Transparent" fall back to a
     // neutral grey/checkerboard-ish value so the tiny swatch is still visible.
@@ -157,7 +318,7 @@
         };
     }
 
-    // Stored preset selection per role. Populated by loadColors().
+    // Stored preset selection per role. Populated by loadColours().
     let PRESETS = {
         tier1: 'default',
         tier2: 'default',
@@ -168,37 +329,37 @@
         qbg:   'default'
     };
 
-    function applyPresetsToColors() {
-        COLORS.tiers.dark = [
+    function applyPresetsToColours() {
+        COLOURS.tiers.dark = [
             resolvePreset(PRESETS.tier1, 'tier1', true),
             resolvePreset(PRESETS.tier2, 'tier2', true),
             resolvePreset(PRESETS.tier3, 'tier3', true),
             resolvePreset(PRESETS.tier4, 'tier4', true),
             resolvePreset(PRESETS.tier5, 'tier5', true)
         ];
-        COLORS.tiers.light = [
+        COLOURS.tiers.light = [
             resolvePreset(PRESETS.tier1, 'tier1', false),
             resolvePreset(PRESETS.tier2, 'tier2', false),
             resolvePreset(PRESETS.tier3, 'tier3', false),
             resolvePreset(PRESETS.tier4, 'tier4', false),
             resolvePreset(PRESETS.tier5, 'tier5', false)
         ];
-        COLORS.bonus.dark        = resolvePreset(PRESETS.bonus, 'bonus', true);
-        COLORS.bonus.light       = resolvePreset(PRESETS.bonus, 'bonus', false);
-        COLORS.qualityBoxBg.dark  = resolvePreset(PRESETS.qbg, 'qbg', true);
-        COLORS.qualityBoxBg.light = resolvePreset(PRESETS.qbg, 'qbg', false);
+        COLOURS.bonus.dark        = resolvePreset(PRESETS.bonus, 'bonus', true);
+        COLOURS.bonus.light       = resolvePreset(PRESETS.bonus, 'bonus', false);
+        COLOURS.qualityBoxBg.dark  = resolvePreset(PRESETS.qbg, 'qbg', true);
+        COLOURS.qualityBoxBg.light = resolvePreset(PRESETS.qbg, 'qbg', false);
     }
 
-    function loadColors() {
+    function loadColours() {
         try {
-            const raw = localStorage.getItem(COLORS_STORAGE_KEY);
+            const raw = localStorage.getItem(COLOURS_STORAGE_KEY);
             if (!raw) {
-                applyPresetsToColors();
+                applyPresetsToColours();
                 return;
             }
             const saved = JSON.parse(raw);
             if (!saved || typeof saved !== 'object') {
-                applyPresetsToColors();
+                applyPresetsToColours();
                 return;
             }
             // New preset-based format. If the key exists and looks like the
@@ -215,23 +376,23 @@
                 // Old format or unrecognised. Reset to Default (per user decision).
                 PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
             }
-            applyPresetsToColors();
+            applyPresetsToColours();
         } catch (_) {
-            applyPresetsToColors();
+            applyPresetsToColours();
         }
     }
 
-    function saveColors() {
+    function saveColours() {
         try {
-            localStorage.setItem(COLORS_STORAGE_KEY, JSON.stringify(PRESETS));
+            localStorage.setItem(COLOURS_STORAGE_KEY, JSON.stringify(PRESETS));
         } catch (_) {}
     }
 
-    function resetColors() {
+    function resetColours() {
         PRESETS = { tier1: 'default', tier2: 'default', tier3: 'default', tier4: 'default', tier5: 'default', bonus: 'default', qbg: 'default' };
-        applyPresetsToColors();
-        saveColors();
-        colorEpoch++;
+        applyPresetsToColours();
+        saveColours();
+        colourEpoch++;
         checkDarkMode();
         if (currentHandler && typeof currentHandler.processAll === 'function') {
             currentHandler.processAll();
@@ -245,7 +406,7 @@
         return PALETTE.map(p => ({ value: p.value, label: p.label }));
     }
 
-    function buildColorFields() {
+    function buildColourFields() {
         const opts = paletteOptions();
         const mk = (key, preset) => ({
             key,
@@ -264,66 +425,67 @@
             mk('colour.tier5', PRESETS.tier5),
             mk('colour.bonus', PRESETS.bonus),
             mk('colour.qbg',   PRESETS.qbg),
-            { key: 'colour.reset', type: 'button', label: 'OK', icon: 'OK' }
+            // Hub shows field.icon as the button caption when set — never use icon for text buttons
+            { key: 'colour.reset', type: 'button', label: 'Reset colours' }
         ];
     }
 
-    // Headerless color tables that stack cleanly on PDA. The single-column
-    // tables cap their width so the dropdown doesn't stretch across the panel.
-    // The reset section is titled "Reset Color" and sits above the config
-    // toggle groups at the bottom of the panel.
-    function buildColorSections() {
+    // Sectioned Hub layout: titled groups, then compact colour tables.
+    // Fields not listed here still render in Hub's legacy type groups.
+    function buildPrefsSections() {
         return [
+            {
+                title: 'Pages',
+                keys: [
+                    'enableItemMarket',
+                    'enableAuctionHouse',
+                    'enableBazaar',
+                    'enableDisplayCase',
+                    'showDisplayCaseBonuses',
+                    'enableInventory'
+                ]
+            },
+            {
+                title: 'Debug',
+                keys: ['debug', 'debug.copy', 'debug.clear']
+            },
             {
                 table: true,
                 columns: ['Tier 1 (0\u201325%)', 'Tier 2 (26\u201350%)'],
                 widths: 'repeat(2, minmax(0, 1fr))',
-                rows: [[
-                    'colour.tier1', 'colour.tier2'
-                ]]
+                rows: [['colour.tier1', 'colour.tier2']]
             },
             {
                 table: true,
                 columns: ['Tier 3 (51\u201375%)', 'Tier 4 (76\u2013100%)'],
                 widths: 'repeat(2, minmax(0, 1fr))',
-                rows: [[
-                    'colour.tier3', 'colour.tier4'
-                ]]
+                rows: [['colour.tier3', 'colour.tier4']]
             },
             {
                 table: true,
-                columns: ['Tier 5 (100%+)'],
-                widths: 'minmax(0, 220px)',
-                rows: [['colour.tier5']]
+                columns: ['Tier 5 (100%+)', 'Bonus text'],
+                widths: 'repeat(2, minmax(0, 1fr))',
+                rows: [['colour.tier5', 'colour.bonus']]
             },
             {
                 table: true,
-                columns: ['Bonus text'],
+                columns: ['Q badge background'],
                 widths: 'minmax(0, 220px)',
-                rows: [[
-                    'colour.bonus'
-                ]]
+                rows: [['colour.qbg']]
             },
             {
-                table: true,
-                columns: ['Q badge bg'],
-                widths: 'minmax(0, 220px)',
-                rows: [[
-                    'colour.qbg'
-                ]]
-            },
-            {
-                title: 'Reset Color',
+                title: 'Colours',
                 keys: ['colour.reset']
             }
         ];
     }
 
     function registerWithHub() {
-        loadColors();
+        loadColours();
+        injectHubPrefsCss();
 
-        const colorFields = buildColorFields();
-        const colorValues = {
+        const colourFields = buildColourFields();
+        const colourValues = {
             'colour.tier1': PRESETS.tier1,
             'colour.tier2': PRESETS.tier2,
             'colour.tier3': PRESETS.tier3,
@@ -333,15 +495,45 @@
             'colour.qbg':   PRESETS.qbg
         };
 
+        const debugCopyBtn = {
+            key: 'debug.copy',
+            type: 'button',
+            label: 'Copy report',
+            hint: 'Copy a debug report to the clipboard to send to the author'
+        };
+        const debugClearBtn = {
+            key: 'debug.clear',
+            type: 'button',
+            label: 'Clear log',
+            hint: 'Clear the in-memory debug log'
+        };
+        debugCopyBtn.onClick = async () => {
+            debugLog('Copy requested');
+            debugLog('URL', typeof location !== 'undefined' ? location.href : '');
+            const ok = await copyDebugReport();
+            debugLog(ok ? 'Debug report copied to clipboard' : 'Copy failed');
+            try {
+                alert(ok
+                    ? 'Debug report copied. Paste it into a message to the script author.'
+                    : 'Could not copy automatically. Enable Debug logging, use the page, then try again.');
+            } catch (_) {}
+        };
+        debugClearBtn.onClick = () => {
+            clearDebugLog();
+            try { alert('Debug log cleared.'); } catch (_) {}
+        };
+
         const fields = [
             { key: 'enableItemMarket', type: 'toggle', label: 'Item Market', default: true },
             { key: 'enableAuctionHouse', type: 'toggle', label: 'Auction House', default: true },
             { key: 'enableBazaar', type: 'toggle', label: 'Bazaar', default: true },
             { key: 'enableDisplayCase', type: 'toggle', label: 'Display Case', default: true },
             { key: 'showDisplayCaseBonuses', type: 'toggle', label: 'Display Case bonuses', default: true },
-            { key: 'enableInventory', type: 'toggle', label: 'Inventory (Items)', default: true },
-            { key: 'debug', type: 'toggle', label: 'Debug logging', default: false }
-        ].concat(colorFields);
+            { key: 'enableInventory', type: 'toggle', label: 'Inventory', default: true },
+            { key: 'debug', type: 'toggle', label: 'Debug logging', default: false, hint: 'Collect diagnostics for Copy report' },
+            debugCopyBtn,
+            debugClearBtn
+        ].concat(colourFields);
 
         const values = {
             enableItemMarket: CONFIG.enableItemMarket,
@@ -352,7 +544,7 @@
             enableInventory: CONFIG.enableInventory,
             debug: CONFIG.debug
         };
-        Object.assign(values, colorValues);
+        Object.assign(values, colourValues);
 
         const detail = {
             id: HUB_ID,
@@ -363,7 +555,7 @@
             open: () => { console.log('[OpenMarket] Running in the background on market pages.'); },
             prefs: {
                 fields,
-                sections: buildColorSections(),
+                sections: buildPrefsSections(),
                 values,
                 onSave: (v) => {
                     CONFIG.enableItemMarket = !!v.enableItemMarket;
@@ -373,6 +565,9 @@
                     CONFIG.showDisplayCaseBonuses = !!v.showDisplayCaseBonuses;
                     CONFIG.enableInventory = !!v.enableInventory;
                     CONFIG.debug = !!v.debug;
+                    saveConfig();
+                    if (CONFIG.debug) debugLog('Debug logging enabled');
+                    else clearDebugLog();
 
                     PRESETS.tier1 = v['colour.tier1'] || 'default';
                     PRESETS.tier2 = v['colour.tier2'] || 'default';
@@ -381,9 +576,9 @@
                     PRESETS.tier5 = v['colour.tier5'] || 'default';
                     PRESETS.bonus = v['colour.bonus'] || 'default';
                     PRESETS.qbg   = v['colour.qbg']   || 'default';
-                    applyPresetsToColors();
-                    saveColors();
-                    colorEpoch++; // invalidate processed tiles so they repaint
+                    applyPresetsToColours();
+                    saveColours();
+                    colourEpoch++; // invalidate processed tiles so they repaint
                     checkDarkMode();
                     activateHandlerForCurrentUrl();
                 }
@@ -392,14 +587,14 @@
 
         // Wire up the reset button's onClick once the Hub instantiates fields.
         // The Hub reads field.onClick at click time, so attaching it here works.
-        colorFields.forEach(f => {
+        colourFields.forEach(f => {
             if (f.key === 'colour.reset') {
                 f.onClick = () => {
-                    resetColors();
+                    resetColours();
                     // Refresh the Hub pref values so dropdowns show "Default".
-                    colorFields.forEach(cf => {
+                    colourFields.forEach(cf => {
                         if (cf.key.startsWith('colour.') && cf.key !== 'colour.reset') {
-                            detail.prefs.values[cf.key] = PRESETS[cf.key.replace('color.', '')];
+                            detail.prefs.values[cf.key] = PRESETS[cf.key.replace('colour.', '')];
                         }
                     });
                     // Nudge the Hub to redraw the panel.
@@ -483,8 +678,9 @@
     let currentHandler = null;
     let fetchParseWarned = false;
 
+    function debugWarn(...args) { debugLog(...args); }
     function checkDarkMode() { darkMode = document.body.classList.contains('dark-mode'); }
-    function getTierColor(percent) { const c = darkMode ? COLORS.tiers.dark : COLORS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
+    function getTierColour(percent) { const c = darkMode ? COLOURS.tiers.dark : COLOURS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
     function qs(selector, parent = document) { try { return parent.querySelector(selector); } catch (e) { return null; } }
     function qsa(selector, parent = document) { try { return Array.from(parent.querySelectorAll(selector)); } catch (e) { return null; } }
     function create(tag, attrs = {}, children = []) {
@@ -498,11 +694,11 @@
         return el;
     }
     function getIconIndicators(icon) { return [icon.className, icon.getAttribute('aria-label'), icon.getAttribute('title'), icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
-    function computeItemKey(itemID, stats, bonuses) { return `${colorEpoch}|${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
+    function computeItemKey(itemID, stats, bonuses) { return `${colourEpoch}|${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
     function isProcessed(el, key) { return processedElements.get(el) === key; }
     function markProcessed(el, key) { processedElements.set(el, key); }
-    function getQualityColor(value, maxRange) { return getTierColor(value);}
-    function getBonusColor() { return darkMode ? COLORS.bonus.dark : COLORS.bonus.light; }
+    function getQualityColour(value, maxRange) { return getTierColour(value);}
+    function getBonusColour() { return darkMode ? COLOURS.bonus.dark : COLOURS.bonus.light; }
 
     function extractStats(el, selectors) {
         let damage = 0, accuracy = 0, armour = 0;
@@ -568,7 +764,7 @@
         markProcessed(el, key);
     }
 
-    function getQualityBoxBg() { return darkMode ? COLORS.qualityBoxBg.dark : COLORS.qualityBoxBg.light; }
+    function getQualityBoxBg() { return darkMode ? COLOURS.qualityBoxBg.dark : COLOURS.qualityBoxBg.light; }
     function calcQuality(itemID, damage, accuracy, armour) {
         const base = BASE_STATS_MAP[itemID];
         if (!base) return null;
@@ -638,9 +834,9 @@
         'wither':      { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] }
     };
 
-    // Colors taken from the reference badge script (fill + empty base)
+    // Colours taken from the reference badge script (fill + empty base)
     // Regular strengthened so bars stay visible on light inventory backgrounds
-    const BONUS_BAR_COLORS = {
+    const BONUS_BAR_COLOURS = {
         red:    { fill: 'rgba(180,0,40,0.85)',   base: 'rgba(128,0,32,0.25)' },
         orange: { fill: 'rgba(191,111,0,0.85)',  base: 'rgba(191,111,0,0.25)' },
         yellow: { fill: 'rgba(191,191,0,0.85)',  base: 'rgba(191,191,0,0.25)' },
@@ -672,7 +868,7 @@
     }
 
     function createBonusBarBackground(value, rarity, range) {
-        const colors = BONUS_BAR_COLORS[rarity] || BONUS_BAR_COLORS.regular;
+        const colours = BONUS_BAR_COLOURS[rarity] || BONUS_BAR_COLOURS.regular;
         let percent = 100;
         if (range && range[1] > range[0] && value != null) {
             // Relative fill inside the tier (e.g. 23 in 20-26 yellow = ~50%)
@@ -682,7 +878,7 @@
             percent = Math.min(Math.max(Number(value), 0), 100);
         }
         // Hard edge gradient so the fill looks like a progress bar
-        return `linear-gradient(90deg, ${colors.fill} 0%, ${colors.fill} ${Math.max(percent - 0.2, 0)}%, ${colors.base} ${Math.min(percent + 0.2, 100)}%, ${colors.base} 100%)`;
+        return `linear-gradient(90deg, ${colours.fill} 0%, ${colours.fill} ${Math.max(percent - 0.2, 0)}%, ${colours.base} ${Math.min(percent + 0.2, 100)}%, ${colours.base} 100%)`;
     }
 
     function createBonusEl(bonus, contextEl) {
@@ -690,7 +886,7 @@
             return create('div', {
                 className: 'om-bonus-bar om-bonus-fixed',
                 textContent: bonus.title,
-                style: { color: getBonusColor() }
+                style: { color: getBonusColour() }
             });
         }
 
@@ -706,15 +902,15 @@
         // Keep darkMode in sync (Torn may toggle theme without a full reload)
         checkDarkMode();
 
-        // High-contrast solid colors — no purple, no soft glow
+        // High-contrast solid colours — no purple, no soft glow
         // Dark: light gray on yellow/orange | Light: near-black on red
-        let textColor = '#fff';
+        let textColour = '#fff';
         if (rarity === 'yellow' || rarity === 'orange') {
-            textColor = darkMode ? '#e8e8e8' : '#111';
+            textColour = darkMode ? '#e8e8e8' : '#111';
         } else if (rarity === 'red') {
-            textColor = darkMode ? '#fff' : '#1a1a1a';
+            textColour = darkMode ? '#fff' : '#1a1a1a';
         } else if (rarity === 'regular') {
-            textColor = darkMode ? '#fff' : '#111';
+            textColour = darkMode ? '#fff' : '#111';
         }
 
         const bar = create('div', {
@@ -728,7 +924,7 @@
         const label = create('span', {
             className: 'om-bonus-text',
             textContent: text,
-            style: { color: textColor }
+            style: { color: textColour }
         });
 
         bar.appendChild(label);
@@ -739,7 +935,7 @@
         if (!container) return;
         const clamped = Math.min(Math.max(parseFloat(value), 0), maxRange);
         const span = create('span', { className: 'label-value t-overflow', textContent: `Q ${clamped.toFixed(1)}%` });
-        const box = create('div', { className: 'openmarket-quality-box', style: { position: 'absolute', top: '2px', left: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', background: getQualityBoxBg(), color: getQualityColor(clamped, maxRange) } }, [span]);
+        const box = create('div', { className: 'openmarket-quality-box', style: { position: 'absolute', top: '2px', left: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', background: getQualityBoxBg(), color: getQualityColour(clamped, maxRange) } }, [span]);
         if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
         container.appendChild(box);
     }
@@ -762,10 +958,21 @@
                 fontWeight: 'bold',
                 whiteSpace: 'nowrap',
                 background: getQualityBoxBg(),
-                color: getQualityColor(clamped, maxRange)
+                color: getQualityColour(clamped, maxRange)
             }
         });
         titleContainer.appendChild(badge);
+    }
+    function insertBonusOverlay(container, bonuses) {
+        if (!container || !bonuses || bonuses.length === 0) return;
+        const existing = qs('.openmarket-bonus-box', container);
+        if (existing) existing.remove();
+        const text = bonuses.map(b => FIXED_BONUSES.includes(b.title) ? b.title : (b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title)).join(' · ');
+        if (!text) return;
+        const span = create('span', { className: 'label-value t-overflow', textContent: text, title: text });
+        const box = create('div', { className: 'openmarket-bonus-box', style: { position: 'absolute', bottom: '2px', left: '2px', right: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold', zIndex: '2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: getQualityBoxBg(), color: getBonusColour() } }, [span]);
+        if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
+        container.appendChild(box);
     }
     function isPageActive() { return !document.hidden && document.hasFocus(); }
     function setupActiveListeners() {
@@ -797,7 +1004,7 @@
             if (!isPageActive()) return;
 
             if (this.cache.length === 0) {
-                if (CONFIG.debug) console.log('[OpenMarket] Fetch cache empty, falling back to DOM reading for Item Market.');
+                debugLog('Fetch cache empty, falling back to DOM reading for Item Market.');
                 qsa(this.selectors.tile).forEach(el => {
                     const img = el.querySelector('img');
                     if (!img) return;
@@ -1299,7 +1506,7 @@
                 if (titleEl) {
                     const existingMeta = qs('.openmarket-inventory-meta', el); if (existingMeta) existingMeta.remove();
                     const meta = create('span', { className: 'openmarket-inventory-meta', style: { display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px 8px', marginLeft: '8px', verticalAlign: 'middle', fontSize: '11px', lineHeight: '1.3', fontWeight: 'bold' } });
-                    if (qualityOk) meta.appendChild(create('span', { className: 'openmarket-inventory-quality', textContent: `Q ${numericQuality.toFixed(1)}%`, style: { color: getQualityColor(Math.min(Math.max(numericQuality, 0), maxRange), maxRange), padding: '0 4px', borderRadius: '3px', background: getQualityBoxBg() } }));
+                    if (qualityOk) meta.appendChild(create('span', { className: 'openmarket-inventory-quality', textContent: `Q ${numericQuality.toFixed(1)}%`, style: { color: getQualityColour(Math.min(Math.max(numericQuality, 0), maxRange), maxRange), padding: '0 4px', borderRadius: '3px', background: getQualityBoxBg() } }));
                     if (weaponBonuses.length > 0) {
                         const bonusContainer = create('span', { className: 'openmarket-bonuses openmarket-inventory-bonuses', title: weaponBonuses.map(b => b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title).join(' · '), style: { display: 'inline-flex', gap: '3px', alignItems: 'center' } });
                         weaponBonuses.forEach((bonus) => { bonusContainer.appendChild(createBonusEl(bonus, el)); });
@@ -1382,7 +1589,7 @@
                                         textContent: `Q ${clamped.toFixed(1)}%`,
                                         style: {
                                             background: getQualityBoxBg(),
-                                            color: getQualityColor(clamped, maxRange)
+                                            color: getQualityColour(clamped, maxRange)
                                         }
                                     });
                                     const fullName = nameEl.textContent.trim();
@@ -1653,7 +1860,7 @@
                     if (newItems.length > 0) { itemMarket.pushCache(newItems); if (isPageActive()) itemMarket.processAll(); }
                 }).catch(err => {
                     if (!fetchParseWarned) {
-                        console.warn('[OpenMarket] Fetch blocked. Falling back to DOM reading.');
+                        debugLog('Fetch blocked. Falling back to DOM reading.');
                         fetchParseWarned = true;
                     }
                 });
@@ -1699,16 +1906,8 @@
     line-height: 1.2 !important;
     box-sizing: border-box !important;
 }
-/* Display case: lift native damage/accuracy pills slightly to make room visually */
-.b-item-wrap .bonus-attachment:has(i.bonus-attachment-item-damage-bonus),
-.b-item-wrap .bonus-attachment:has(i.bonus-attachment-item-accuracy-bonus) {
-    position: relative !important;
-    top: -3px !important;
-}
 /* Display case: bars in rarity row, 100px centered to match item image */
 .b-item-rarity .om-displaycase-bonuses {
-    position: relative !important;
-    top: -3px !important;
     display: flex !important;
     flex-direction: column !important;
     gap: 1px !important;
@@ -1729,12 +1928,9 @@
     border-radius: 3px !important;
     box-shadow: none !important;
 }
-.b-item-rarity .om-displaycase-bonuses.om-displaycase-double {
-    gap: 0 !important;
-}
 .b-item-rarity .om-displaycase-bonuses.om-displaycase-double .om-bonus-bar {
-    height: 11px !important;
-    line-height: 11px !important;
+    height: 13px !important;
+    line-height: 13px !important;
     font-size: 9px !important;
 }
 .b-item-rarity .om-displaycase-bonuses .om-bonus-text {
@@ -1766,7 +1962,7 @@
 }
 .openmarket-inventory-meta { display: inline-flex; align-items: center; flex-wrap: wrap; overflow: hidden; }
 
-/* Colored bonus progress bars — fixed 99.33×18 on market */
+/* Coloured bonus progress bars — fixed 99.33×18 on market */
 .om-bonus-bar {
     position: relative;
     display: block;
