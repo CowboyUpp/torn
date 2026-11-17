@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.53
+// @version      1.4.54
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.54: Detect spam dropdowns rendered outside the Scamming root and refresh their elapsed timers when opened.
 // CHANGELOG 1.4.53: Recover a missing wave-start address baseline when Torn renders the counter late.
 // CHANGELOG 1.4.51: Retry skill detection independently of wave state and observe skill-label DOM updates.
 // CHANGELOG 1.4.52: Fix escaped skill-level regex so Crime skill values such as 100 are detected.
@@ -460,6 +461,17 @@
       this.crimeOptions = null;
       this.farmIcons = null;
       this.spamOptions = null;
+      this.spamObserver = new MutationObserver((mutations) => {
+        if (!isEnabled) return;
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            if (!(node instanceof HTMLElement)) continue;
+            const selector = '[class*="optionWithLevelRequirement"]';
+            const options = node.matches(selector) ? [node] : node.querySelectorAll(selector);
+            for (const option of options) this._refreshSpam(option);
+          }
+        }
+      });
 
       this.observer = new MutationObserver((mutations) => {
         if (!isEnabled) return;
@@ -487,7 +499,8 @@
       if (this.crimeOptions || !isEnabled) return;
       this.crimeOptions = document.body.getElementsByClassName('crime-option');
       this.farmIcons = document.body.getElementsByClassName('scraperPhisher___lS7va');
-      this.spamOptions = document.body.getElementsByClassName('optionWithLevelRequirement___CojuV');
+      this.spamOptions = document.body.querySelectorAll('[class*="optionWithLevelRequirement"]');
+      this.spamObserver.observe(document.body, { subtree: true, childList: true });
 
       setTimeout(() => {
         if (!isEnabled) return;
@@ -499,6 +512,7 @@
     stop() {
       this.crimeOptions = null;
       this.observer.disconnect();
+      this.spamObserver.disconnect();
     }
 
     onNewData() {
@@ -507,7 +521,7 @@
       this._ensureSettingsBar();
       for (const element of this.crimeOptions) { element.classList.add('cm-sc-seen'); this._refreshCrimeOption(element); }
       for (const element of this.farmIcons) { element.classList.add('cm-sc-seen'); this._refreshFarm(element); }
-      for (const element of this.spamOptions) { element.classList.add('cm-sc-seen'); this._refreshSpam(element); }
+      for (const element of document.querySelectorAll('[class*="optionWithLevelRequirement"]')) { this._refreshSpam(element); }
     }
 
     _ensureSettingsBar() {
