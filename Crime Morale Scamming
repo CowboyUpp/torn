@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.60
+// @version      1.4.61
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.61: Count consumed address stock as used targets even when Torn has not exposed an explicit target outcome.
 // CHANGELOG 1.4.60: Track per-target action steps, game-state progress and nerve spent in Scam Tracker.
 // CHANGELOG 1.4.59: Fix over-escaped method-ID matcher so Torn dropdown IDs such as option-Romance-scam-309 resolve correctly.
 // CHANGELOG 1.4.58: Find spam method IDs through varying dropdown wrapper structures and anchor elapsed labels to the option.
@@ -1179,7 +1180,16 @@
     function getWaveUsed(wave) {
       if (!wave) return 0;
       ensureWaveOutcomeState(wave);
-      return Object.values(wave.targetOutcomes).filter(outcome => /^(success|fail|abandoned)$/.test(outcome)).length;
+      // "Used" in the wave summary means addresses consumed, not only targets
+      // whose success/fail/abandon outcome was explicitly classified.
+      // Torn's address counter is the authoritative wave-level usage signal.
+      const classified = Object.values(wave.targetOutcomes)
+        .filter(outcome => /^(success|fail|abandoned)$/.test(outcome)).length;
+      const addressUsed = Math.max(0, Number(wave.outcomes || 0));
+      return Math.min(
+        Math.max(Number(wave.targetCount || 0), classified, addressUsed),
+        Math.max(classified, addressUsed)
+      );
     }
 
     function reconcilePendingAbandons() {
@@ -1757,7 +1767,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.60',
+      version: '1.4.61',
       order: 20,
       open: handleOpen,
       close: handleClose,
