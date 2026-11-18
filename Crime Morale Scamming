@@ -1422,7 +1422,7 @@
             const stepHtml = steps.map(step =>
               '<div class="cm-sw-step"><span>#' + Number(step.number || 0) + ' · ' + escapeHtml(step.action || 'Response') +
               '</span><span>R' + escapeHtml(step.round == null ? '—' : step.round) + ' · Pip ' +
-              escapeHtml(step.pip == null ? '—' : step.pip) + ' · ' + Number(step.nerve || 0) + ' N</span></div>'
+              escapeHtml(step.pip == null ? '—' : step.pip) + ' · ' + (step.nerve == null ? '? N' : Number(step.nerve) + ' N') + '</span></div>'
             ).join('');
             return '<div class="cm-sw-target"><div class="cm-sw-target-head"><strong>' + escapeHtml(email) +
               '</strong><small>' + escapeHtml(outcome) + ' · ' +
@@ -1442,6 +1442,7 @@
           '<div class="cm-sw-history-stats"><b>' + Number(item.targetCount || 0) + '</b><small>acquired</small></div>' +
           '<div class="cm-sw-history-stats"><b>' + Number(item.outcomes || 0) + '</b><small>used</small></div>' +
           '<div class="cm-sw-history-stats"><b>' + Math.max(0, Number(item.targetCount || 0) - Number(item.outcomes || 0)) + '</b><small>remaining</small></div>' +
+          '<div class="cm-sw-history-stats"><b>' + Number(item.nerveSpent || 0) + '</b><small>nerve</small></div>' +
           '<div class="cm-sw-history-stats"><b>' + formatDuration(item.durationMs || 0) + '</b><small>duration</small></div>'+
           '</div>';
       }).join('');
@@ -1622,7 +1623,7 @@
         '.cm-sw-addresses strong{font-variant-numeric:tabular-nums}',
         '.cm-sw-arrow{opacity:.5}',
         '.cm-sw-section-title{display:flex;justify-content:space-between;margin:14px 0 7px;font-size:9px;letter-spacing:1px;font-weight:800;color:#626a73}',
-        '.cm-sw-history-row{display:grid;grid-template-columns:minmax(100px,1fr) repeat(4,auto);gap:10px;align-items:center;padding:9px 0;border-top:1px solid #e6e8eb}',
+        '.cm-sw-history-row{display:grid;grid-template-columns:minmax(100px,1fr) repeat(5,auto);gap:10px;align-items:center;padding:9px 0;border-top:1px solid #e6e8eb}',
         '.cm-sw-target-activity{max-height:240px;overflow:auto;border-bottom:1px solid #e0e3e7}',
         '.cm-sw-target{padding:8px 0;border-top:1px solid #e6e8eb}',
         '.cm-sw-target-head{display:flex;justify-content:space-between;gap:8px;font-size:10px;overflow-wrap:anywhere}',
