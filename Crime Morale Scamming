@@ -1667,7 +1667,7 @@
         const label = buttonLabel.slice(0, 100) || String(control.className || 'Scamming action').slice(0, 100);
         ensureWaveOutcomeState(activeWave);
         if (!/abandon/i.test(label)) {
-          const nerveMatch = label.match(/(\\d+)\\s*nerve\\b/i);
+          const nerveMatch = label.match(/(\d+)\s*nerve\b/i);
           const nerve = nerveMatch ? Number(nerveMatch[1]) : null;
           const steps = activeWave.targetSteps[email] || (activeWave.targetSteps[email] = []);
           const step = {
