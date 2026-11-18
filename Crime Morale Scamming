@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.59
+// @version      1.4.60
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.60: Track per-target action steps, game-state progress and nerve spent in Scam Tracker.
 // CHANGELOG 1.4.59: Fix over-escaped method-ID matcher so Torn dropdown IDs such as option-Romance-scam-309 resolve correctly.
 // CHANGELOG 1.4.58: Find spam method IDs through varying dropdown wrapper structures and anchor elapsed labels to the option.
 // CHANGELOG 1.4.57: Remove Scam Tracker button background, border and hover tooltip; leave only the compact mail icon.
@@ -1756,7 +1757,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.55',
+      version: '1.4.60',
       order: 20,
       open: handleOpen,
       close: handleClose,
