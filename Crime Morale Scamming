@@ -903,7 +903,8 @@
         driftBitmap: target.driftBitmap ?? null,
         algos: Array.isArray(target.algos) ? target.algos.slice() : null,
         suggestedAction: target.solution && target.solution.action || null,
-        unsynced: target.unsynced ?? null
+        unsynced: target.unsynced ?? null,
+        outcomeSignals: Object.fromEntries(Object.entries(target).filter(([key]) => /(outcome|result|status|success|fail|complete|abandon)/i.test(key)).slice(0, 20))
       };
       const resultKeys = ['finalOutcome', 'outcome', 'result', 'status', 'scamResult', 'resolution'];
       for (const key of resultKeys) {
