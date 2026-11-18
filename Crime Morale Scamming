@@ -671,9 +671,14 @@
     _refreshSpam(element) {
       if (!isEnabled) return;
       const $spamOption = $(element);
-      if ($spamOption.closest('.dropdownList').length === 0) return;
-      const label = $spamOption.contents().filter((_, x) => x.nodeType === Node.TEXT_NODE).text();
-      const spam = Object.entries(this.store.data.spams).find(([id]) => label.toLowerCase().includes(this.store.SPAM_ID_MAP[id]))?.[1];
+      // Match Toby's original approach: identify the spam type from the parent
+      // list item's ID, rather than depending on a dropdown-container class.
+      const $li = $spamOption.closest('li');
+      if (!$li.length) return;
+      const idMatch = String($li.attr('id') || '').match(/-(\\d+)$/);
+      const spamId = idMatch?.[1];
+      if (!spamId || !this.store.SPAM_ID_MAP[spamId]) return;
+      const spam = this.store.data.spams[spamId];
       $spamOption.addClass('cm-sc-spam-option');
       $spamOption.find('.cm-sc-spam-elapsed').remove();
       if (!spam || !spam.since || spam.depreciation) return;
