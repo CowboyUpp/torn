@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.55
+// @version      1.4.56
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.56: Replace the Scam Tracker text button with a compact mail icon and require a double-click to toggle the panel.
 // CHANGELOG 1.4.55: Restore spam elapsed timers using the original parent-list-item ID mapping, without a dropdown-container dependency.
 // CHANGELOG 1.4.54: Detect spam dropdowns rendered outside the Scamming root and refresh their elapsed timers when opened.
 // CHANGELOG 1.4.53: Recover a missing wave-start address baseline when Torn renders the counter late.
@@ -1397,8 +1398,17 @@
         button.id = 'cm-sw-toggle';
         button.type = 'button';
         button.className = 'torn-btn';
-        button.textContent = 'Scam Tracker';
+        button.title = 'Scam Tracker (double-click)';
+        button.setAttribute('aria-label', 'Scam Tracker (double-click to toggle)');
+        button.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2 3.25h12v9.5H2z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/><path d="m2.4 3.65 5.6 4.4 5.6-4.4" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        let lastTrackerClick = 0;
         button.addEventListener('click', () => {
+          const now = Date.now();
+          if (now - lastTrackerClick > 1000) {
+            lastTrackerClick = now;
+            return;
+          }
+          lastTrackerClick = 0;
           panelOpen = !panelOpen;
           const panel = document.getElementById('cm-sw-panel');
           if (panel) panel.classList.toggle('is-open', panelOpen);
@@ -1471,7 +1481,8 @@
       const style = document.createElement('style');
       style.id = 'cm-sw-style';
       style.textContent = [
-        '#cm-sw-toggle{margin-left:10px!important;font-size:12px!important;line-height:1.4!important;white-space:nowrap!important}',
+        '#cm-sw-toggle{margin-left:8px!important;width:26px!important;height:26px!important;min-width:26px!important;padding:3px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;line-height:1!important;vertical-align:middle!important}',
+        '#cm-sw-toggle svg{display:block;width:15px;height:15px;pointer-events:none}',
         '#cm-sw-toggle.cm-sw-live{border-color:var(--default-blue-color,#4b91d1)!important}',
         '#cm-sw-panel{display:none;position:fixed;z-index:99999;right:18px;bottom:22px;width:360px;max-width:calc(100vw - 28px);max-height:calc(100vh - 44px);overflow:auto;box-sizing:border-box;padding:16px;border:1px solid #d7dce2;border-radius:10px;background:#fff!important;color:#333!important;box-shadow:0 10px 35px #0003;font:inherit;line-height:1.4;color-scheme:light}',
         '#cm-sw-panel *{box-sizing:border-box;color:inherit;font-family:inherit}',
