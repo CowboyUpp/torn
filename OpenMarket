@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenMarket
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.13.20
-// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Settings panel copied back from the original 1.12.28 version verbatim (Hub CSS + table layout + empty field labels), adapted only for American color spelling, continuous tier labels, Tier 2 live dark-mode + preset normalisation, and no diagnostic / alert popups.
+// @version      1.12.41
+// @description  Add quality and bonus percentages to the item market, auction house, bazaars, display case, and inventory. Now with Script Hub integration, native dropdown bonus sorting, and colored bonus progress bars.
 // @author       snickelfritz / cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/amarket.php*
@@ -28,7 +28,6 @@
         enableDisplayCase: true,
         showDisplayCaseBonuses: true,
         enableInventory: true,
-        enableFactionArmoury: true,
         debug: false
     };
 
@@ -40,7 +39,6 @@
         'enableDisplayCase',
         'showDisplayCaseBonuses',
         'enableInventory',
-        'enableFactionArmoury',
         'debug'
     ];
 
@@ -69,21 +67,10 @@
 
     const HUB_ID = 'torn-openmarket';
     const HUB_NAME = 'OpenMarket';
-    const HUB_VERSION = '1.13.20';
+    const HUB_VERSION = '1.12.41';
+    let hubRegistered = false;
     const HUB_ICON = '';
 
-    // 1.13.17 REVERT: OpenMarket does NOT restyle ScriptHub. No CSS, no
-    // observer, no tagging, no inline styles on Hub elements.
-    // 1.13.0-1.13.16 injected OM_TORN_CSS + a MutationObserver that tagged
-    // ANY element with 'hub' / 'prefs' in its class/id as .om-torn-panel
-    // and forced background #ececec, padding, 28px buttons, dark section
-    // titles etc. onto it — including the ScriptHub side-menu button
-    // itself, so it changed size and broke its click. It also restyled
-    // the settings panel away from Hub's native UI.
-    // Reverted: Hub renders exactly as its own author made it. The side-menu
-    // button keeps Torn's natural menu-item size, and clicking it opens
-    // Hub's own panel, not anything OpenMarket adds.
-    // This function only cleans up leftovers from 1.13.0-1.13.16 on upgrade.
     function injectHubPrefsCss() {
         if (typeof document === 'undefined') return;
         if (document.getElementById('om-hub-prefs-css')) return;
@@ -176,8 +163,6 @@
                 enableDisplayCase: CONFIG.enableDisplayCase,
                 showDisplayCaseBonuses: CONFIG.showDisplayCaseBonuses,
                 enableInventory: CONFIG.enableInventory,
-                enableFactionArmoury: CONFIG.enableFactionArmoury,
-            enableFactionArmoury: CONFIG.enableFactionArmoury,
                 debug: CONFIG.debug
             })}`,
             `Handler: ${currentHandler && currentHandler.name ? currentHandler.name : (currentHandler ? 'active' : 'none')}`,
@@ -277,27 +262,6 @@
         return PALETTE.find(p => p.value === value) || null;
     }
 
-    // 1.13.18: Hub v4.5.10 can hand back a label ("Teal", "Default") instead of
-    // the stored value ("teal", "default"). Old code stored it verbatim, so
-    // paletteEntry() missed, resolvePreset() fell back to Default, and the
-    // panel showed one colour while the market showed another — most visibly
-    // Tier 2. Normalise everything to a stored value.
-    function normalizePreset(raw) {
-        if (typeof raw !== 'string') return 'default';
-        const s = raw.trim();
-        if (!s) return 'default';
-        const lower = s.toLowerCase();
-        if (paletteEntry(lower)) return lower;
-        // Label -> value (e.g. "Light grey" -> "lightgrey", "Sky blue" -> "skyblue")
-        const byLabel = PALETTE.find(p => p.label.toLowerCase() === lower);
-        if (byLabel) return byLabel.value;
-        // Hex -> value (e.g. pasted "#009590" is Tier 2 light Default, but a
-        // palette hex like "#3fc0b0" is Teal)
-        const byHex = PALETTE.find(p => (p.hex || '').toLowerCase() === lower);
-        if (byHex) return byHex.value;
-        return 'default';
-    }
-
     // Resolve a stored preset name for a role into a concrete CSS color
     // string. `default` falls back to the mode-specific original.
     function resolvePreset(presetValue, role, isDark) {
@@ -389,7 +353,18 @@
 
     function loadColors() {
         try {
-            const raw = localStorage.getItem(COLORS_STORAGE_KEY);
+            // Prefer American key; migrate legacy British key if present
+            let raw = localStorage.getItem(COLORS_STORAGE_KEY);
+            if (!raw) {
+                const legacy = localStorage.getItem('openmarket-colours');
+                if (legacy) {
+                    raw = legacy;
+                    try {
+                        localStorage.setItem(COLORS_STORAGE_KEY, legacy);
+                        localStorage.removeItem('openmarket-colours');
+                    } catch (_) {}
+                }
+            }
             if (!raw) {
                 applyPresetsToColors();
                 return;
@@ -404,8 +379,8 @@
             const roles = ['tier1', 'tier2', 'tier3', 'tier4', 'tier5', 'bonus', 'qbg'];
             let anyAdopted = false;
             roles.forEach(role => {
-                if (typeof saved[role] === 'string') {
-                    PRESETS[role] = normalizePreset(saved[role]);
+                if (typeof saved[role] === 'string' && paletteEntry(saved[role])) {
+                    PRESETS[role] = saved[role];
                     anyAdopted = true;
                 }
             });
@@ -443,11 +418,6 @@
         return PALETTE.map(p => ({ value: p.value, label: p.label }));
     }
 
-    // COPIED FROM ORIGINAL 1.12.28 VERBATIM (adapted only for color spelling).
-    // Original used label: '' — the table column header is the label.
-    // My 1.13.18 change to real labels is what squeezed the dropdowns:
-    // Hub renders label + select side-by-side, so "Default" clipped to "De".
-    // With label '' the select gets the full column width.
     function buildColorFields() {
         const opts = paletteOptions();
         const mk = (key, preset) => ({
@@ -472,14 +442,7 @@
         ];
     }
 
-    // COPIED FROM ORIGINAL 1.12.28 VERBATIM (adapted only for color spelling
-    // and continuous tier labels). My 1.13.18 plain sections and 1.13.19
-    // one-field-per-card both made it worse in Hub v4.5.10 — Hub renders
-    // plain sections as a flex-wrap grid, so 8 fields still squeezed to
-    // "De" / "Copy repor". The original table layout is what Hub was
-    // designed for: 2 dropdowns per row, column header is the label.
-    // Continuous labels kept from 1.13.18 (Tier 2 fix): 25-50, 50-75,
-    // 75-100, so float Q like 50.7% is unambiguously Tier 3.
+    // Sectioned Hub layout: titled groups, then compact color tables.
     // Fields not listed here still render in Hub's legacy type groups.
     function buildPrefsSections() {
         return [
@@ -491,8 +454,7 @@
                     'enableBazaar',
                     'enableDisplayCase',
                     'showDisplayCaseBonuses',
-                    'enableInventory',
-                    'enableFactionArmoury'
+                    'enableInventory'
                 ]
             },
             {
@@ -501,13 +463,13 @@
             },
             {
                 table: true,
-                columns: ['Tier 1 (0-25%)', 'Tier 2 (25-50%)'],
+                columns: ['Tier 1 (0\u201325%)', 'Tier 2 (26\u201350%)'],
                 widths: 'repeat(2, minmax(0, 1fr))',
                 rows: [['color.tier1', 'color.tier2']]
             },
             {
                 table: true,
-                columns: ['Tier 3 (50-75%)', 'Tier 4 (75-100%)'],
+                columns: ['Tier 3 (51\u201375%)', 'Tier 4 (76\u2013100%)'],
                 widths: 'repeat(2, minmax(0, 1fr))',
                 rows: [['color.tier3', 'color.tier4']]
             },
@@ -531,8 +493,8 @@
     }
 
     function registerWithHub() {
-        if (registerWithHub._registered) return;
-        registerWithHub._registered = true;
+        if (hubRegistered) return;
+        hubRegistered = true;
         loadColors();
         injectHubPrefsCss();
 
@@ -553,26 +515,26 @@
             label: 'Copy report',
             hint: 'Copy a debug report to the clipboard to send to the author'
         };
-
         const debugClearBtn = {
             key: 'debug.clear',
             type: 'button',
             label: 'Clear log',
             hint: 'Clear the in-memory debug log'
         };
-
-        // 1.13.19: no alert() popups. Copy / Clear log silently to the
-        // debug log — the user asked to remove diagnostic popups.
         debugCopyBtn.onClick = async () => {
             debugLog('Copy requested');
             debugLog('URL', typeof location !== 'undefined' ? location.href : '');
             const ok = await copyDebugReport();
-            debugLog(ok ? 'Debug report copied to clipboard' : 'Copy failed — enable Debug logging, use the page, then try again.');
+            debugLog(ok ? 'Debug report copied to clipboard' : 'Copy failed');
+            try {
+                alert(ok
+                    ? 'Debug report copied. Paste it into a message to the script author.'
+                    : 'Could not copy automatically. Enable Debug logging, use the page, then try again.');
+            } catch (_) {}
         };
-
         debugClearBtn.onClick = () => {
             clearDebugLog();
-            debugLog('Debug log cleared.');
+            try { alert('Debug log cleared.'); } catch (_) {}
         };
 
         const fields = [
@@ -582,7 +544,6 @@
             { key: 'enableDisplayCase', type: 'toggle', label: 'Display Case', default: true },
             { key: 'showDisplayCaseBonuses', type: 'toggle', label: 'Display Case bonuses', default: true },
             { key: 'enableInventory', type: 'toggle', label: 'Inventory', default: true },
-            { key: 'enableFactionArmoury', type: 'toggle', label: 'Faction Armoury', default: true },
             { key: 'debug', type: 'toggle', label: 'Debug logging', default: false, hint: 'Collect diagnostics for Copy report' },
             debugCopyBtn,
             debugClearBtn
@@ -597,7 +558,6 @@
             enableInventory: CONFIG.enableInventory,
             debug: CONFIG.debug
         };
-
         Object.assign(values, colorValues);
 
         const detail = {
@@ -618,21 +578,18 @@
                     CONFIG.enableDisplayCase = !!v.enableDisplayCase;
                     CONFIG.showDisplayCaseBonuses = !!v.showDisplayCaseBonuses;
                     CONFIG.enableInventory = !!v.enableInventory;
-                    CONFIG.enableFactionArmoury = !!v.enableFactionArmoury;
                     CONFIG.debug = !!v.debug;
-
                     saveConfig();
                     if (CONFIG.debug) debugLog('Debug logging enabled');
                     else clearDebugLog();
 
-                    PRESETS.tier1 = normalizePreset(v['color.tier1']);
-                    PRESETS.tier2 = normalizePreset(v['color.tier2']);
-                    PRESETS.tier3 = normalizePreset(v['color.tier3']);
-                    PRESETS.tier4 = normalizePreset(v['color.tier4']);
-                    PRESETS.tier5 = normalizePreset(v['color.tier5']);
-                    PRESETS.bonus = normalizePreset(v['color.bonus']);
-                    PRESETS.qbg   = normalizePreset(v['color.qbg']);
-
+                    PRESETS.tier1 = v['color.tier1'] || 'default';
+                    PRESETS.tier2 = v['color.tier2'] || 'default';
+                    PRESETS.tier3 = v['color.tier3'] || 'default';
+                    PRESETS.tier4 = v['color.tier4'] || 'default';
+                    PRESETS.tier5 = v['color.tier5'] || 'default';
+                    PRESETS.bonus = v['color.bonus'] || 'default';
+                    PRESETS.qbg   = v['color.qbg']   || 'default';
                     applyPresetsToColors();
                     saveColors();
                     colorEpoch++; // invalidate processed tiles so they repaint
@@ -718,29 +675,12 @@
         }
     };
 
-    const BASE_DAMAGE_VALUES = { 1: 17, 2: 16, 3: 20, 4: 11, 5: 21, 6: 25, 7: 28, 8: 34, 9: 40, 10: 61, 11: 58, 12: 28, 13: 29, 14: 32, 15: 36, 16: 44, 17: 48,
-18: 52, 19: 55, 20: 59, 21: 64, 22: 41, 23: 39, 24: 45, 25: 48, 26: 56, 27: 55, 28: 59, 29: 61, 30: 64, 31: 67, 63: 72, 76: 52, 98: 59, 99: 33, 100: 64, 108:
-65, 109: 77, 110: 27, 111: 39, 146: 65, 147: 22, 170: 60, 173: 24, 174: 50, 175: 1, 177: 61, 189: 42, 217: 57, 218: 35, 219: 63, 223: 69, 224: 23, 225: 56, 227:
- 38, 228: 50, 230: 18, 231: 60, 232: 62, 233: 61, 234: 31, 235: 22, 236: 35, 237: 62, 238: 29, 240: 78, 241: 50, 243: 30, 244: 15, 245: 13, 247: 52, 248: 62,
-249: 46, 250: 50, 251: 53, 252: 49, 253: 27, 254: 47, 255: 67, 289: 70, 290: 70, 291: 70, 292: 70, 346: 40, 359: 16, 360: 53, 382: 75, 387: 67, 388: 74, 391:
-57, 393: 14, 395: 61, 397: 71, 398: 69, 399: 68, 400: 63, 401: 26, 402: 51, 438: 18, 439: 19, 440: 1, 483: 42, 484: 46, 485: 40, 486: 38, 487: 39, 488: 37, 489:
- 35, 490: 46, 539: 36, 545: 79, 546: 76, 547: 78, 548: 77, 549: 80, 599: 60, 600: 61, 604: 43, 605: 45, 612: 65, 613: 47, 614: 60, 615: 64, 632: 48, 790: 5,
-792: 17, 805: 18, 830: 95, 831: 54, 832: 21, 837: 66, 838: 63, 839: 60, 844: 15, 845: 58, 846: 56, 850: 58, 871: 5, 874: 68, 1053: 41, 1055: 35, 1056: 40, 1152:
- 76, 1153: 74, 1154: 73, 1155: 70, 1156: 68, 1157: 69, 1158: 62, 1159: 51, 1173: 37, 1231: 29, 1255: 54, 1257: 1, 1296: 27, 1552: 54 };
-    const BASE_ACCURACY_VALUES = { 1: 55, 2: 57, 3: 52, 4: 62, 5: 45, 6: 55, 7: 60, 8: 52, 9: 58, 10: 23, 11: 52, 12: 53, 13: 52, 14: 56, 15: 54, 16: 58, 17:
-51, 18: 49, 19: 38, 20: 36, 21: 30, 22: 63, 23: 65, 24: 51, 25: 51, 26: 52, 27: 47, 28: 55, 29: 47, 30: 45, 31: 41, 63: 28, 76: 24, 98: 24, 99: 57, 100: 24,
-108: 43, 109: 39, 110: 52, 111: 51, 146: 49, 147: 15, 170: 24, 173: 55, 174: 56, 175: 54, 177: 53, 189: 54, 217: 49, 218: 63, 219: 55, 223: 52, 224: 52, 225:
-62, 227: 48, 228: 48, 230: 22, 231: 46, 232: 50, 233: 55, 234: 52, 235: 59, 236: 55, 237: 56, 238: 52, 240: 25, 241: 57, 243: 57, 244: 39, 245: 55, 247: 55,
-248: 53, 249: 47, 250: 53, 251: 51, 252: 62, 253: 41, 254: 52, 255: 39, 289: 54, 290: 54, 291: 54, 292: 54, 346: 63, 359: 50, 360: 57, 382: 62, 387: 63, 388:
-45, 391: 65, 393: 54, 395: 60, 397: 28, 398: 50, 399: 57, 400: 35, 401: 33, 402: 60, 438: 42, 439: 43, 440: 63, 483: 52, 484: 41, 485: 54, 486: 45, 487: 43,
-488: 41, 489: 48, 490: 24, 539: 55, 545: 38, 546: 47, 547: 46, 548: 45, 549: 36, 599: 48, 600: 41, 604: 45, 605: 48, 612: 52, 613: 63, 614: 62, 615: 52, 632:
-48, 790: 29, 792: 57, 805: 55, 830: 45, 831: 53, 832: 54, 837: 36, 838: 60, 839: 45, 844: 45, 845: 53, 846: 52, 850: 50, 871: 59, 874: 57, 1053: 65, 1055: 49,
-1056: 47, 1152: 42, 1153: 44, 1154: 40, 1155: 45, 1156: 36, 1157: 49, 1158: 39, 1159: 56, 1173: 67, 1231: 59, 1255: 52, 1257: 59, 1296: 58, 1552: 48 };
-    const BASE_ARMOUR_VALUES = { 32: 20, 33: 32, 34: 34, 49: 31, 50: 36, 176: 23, 178: 30, 332: 38, 333: 40, 334: 42, 348: 10, 538: 25, 640: 32, 641: 34, 642:
-30, 643: 30, 644: 34, 645: 30, 646: 24, 647: 20, 648: 20, 649: 20, 650: 20, 651: 38, 652: 38, 653: 38, 654: 38, 655: 35, 656: 45, 657: 45, 658: 45, 659: 45,
-660: 44, 661: 44, 662: 44, 663: 44, 664: 44, 665: 46, 666: 46, 667: 46, 668: 46, 669: 46, 670: 49, 671: 49, 672: 49, 673: 49, 674: 49, 675: 40, 676: 52, 677:
-52, 678: 52, 679: 52, 680: 55, 681: 55, 682: 55, 683: 55, 684: 55, 848: 32, 1164: 38, 1165: 50, 1166: 50, 1167: 50, 1168: 50, 1174: 39, 1307: 53, 1308: 53,
-1309: 53, 1310: 53, 1311: 53, 1355: 48, 1356: 48, 1357: 48, 1358: 48, 1359: 48 };
+    // =============================================================================
+// === DATA: base item stats (edit here when Torn rebalances items) ===========
+// =============================================================================
+    const BASE_DAMAGE_VALUES = { 1: 17, 2: 16, 3: 20, 4: 11, 5: 21, 6: 25, 7: 28, 8: 34, 9: 40, 10: 61, 11: 58, 12: 28, 13: 29, 14: 32, 15: 36, 16: 44, 17: 48, 18: 52, 19: 55, 20: 59, 21: 64, 22: 41, 23: 39, 24: 45, 25: 48, 26: 56, 27: 55, 28: 59, 29: 61, 30: 64, 31: 67, 63: 72, 76: 52, 98: 59, 99: 33, 100: 64, 108: 65, 109: 77, 110: 27, 111: 39, 146: 65, 147: 22, 170: 60, 173: 24, 174: 50, 175: 1, 177: 61, 189: 42, 217: 57, 218: 35, 219: 63, 223: 69, 224: 23, 225: 56, 227: 38, 228: 50, 230: 18, 231: 60, 232: 62, 233: 61, 234: 31, 235: 22, 236: 35, 237: 62, 238: 29, 240: 78, 241: 50, 243: 30, 244: 15, 245: 13, 247: 52, 248: 62, 249: 46, 250: 50, 251: 53, 252: 49, 253: 27, 254: 47, 255: 67, 289: 70, 290: 70, 291: 70, 292: 70, 346: 40, 359: 16, 360: 53, 382: 75, 387: 67, 388: 74, 391: 57, 393: 14, 395: 61, 397: 71, 398: 69, 399: 68, 400: 63, 401: 26, 402: 51, 438: 18, 439: 19, 440: 1, 483: 42, 484: 46, 485: 40, 486: 38, 487: 39, 488: 37, 489: 35, 490: 46, 539: 36, 545: 79, 546: 76, 547: 78, 548: 77, 549: 80, 599: 60, 600: 61, 604: 43, 605: 45, 612: 65, 613: 47, 614: 60, 615: 64, 632: 48, 790: 5, 792: 17, 805: 18, 830: 95, 831: 54, 832: 21, 837: 66, 838: 63, 839: 60, 844: 15, 845: 58, 846: 56, 850: 58, 871: 5, 874: 68, 1053: 41, 1055: 35, 1056: 40, 1152: 76, 1153: 74, 1154: 73, 1155: 70, 1156: 68, 1157: 69, 1158: 62, 1159: 51, 1173: 37, 1231: 29, 1255: 54, 1257: 1, 1296: 27, 1552: 54 };
+    const BASE_ACCURACY_VALUES = { 1: 55, 2: 57, 3: 52, 4: 62, 5: 45, 6: 55, 7: 60, 8: 52, 9: 58, 10: 23, 11: 52, 12: 53, 13: 52, 14: 56, 15: 54, 16: 58, 17: 51, 18: 49, 19: 38, 20: 36, 21: 30, 22: 63, 23: 65, 24: 51, 25: 51, 26: 52, 27: 47, 28: 55, 29: 47, 30: 45, 31: 41, 63: 28, 76: 24, 98: 24, 99: 57, 100: 24, 108: 43, 109: 39, 110: 52, 111: 51, 146: 49, 147: 15, 170: 24, 173: 55, 174: 56, 175: 54, 177: 53, 189: 54, 217: 49, 218: 63, 219: 55, 223: 52, 224: 52, 225: 62, 227: 48, 228: 48, 230: 22, 231: 46, 232: 50, 233: 55, 234: 52, 235: 59, 236: 55, 237: 56, 238: 52, 240: 25, 241: 57, 243: 57, 244: 39, 245: 55, 247: 55, 248: 53, 249: 47, 250: 53, 251: 51, 252: 62, 253: 41, 254: 52, 255: 39, 289: 54, 290: 54, 291: 54, 292: 54, 346: 63, 359: 50, 360: 57, 382: 62, 387: 63, 388: 45, 391: 65, 393: 54, 395: 60, 397: 28, 398: 50, 399: 57, 400: 35, 401: 33, 402: 60, 438: 42, 439: 43, 440: 63, 483: 52, 484: 41, 485: 54, 486: 45, 487: 43, 488: 41, 489: 48, 490: 24, 539: 55, 545: 38, 546: 47, 547: 46, 548: 45, 549: 36, 599: 48, 600: 41, 604: 45, 605: 48, 612: 52, 613: 63, 614: 62, 615: 52, 632: 48, 790: 29, 792: 57, 805: 55, 830: 45, 831: 53, 832: 54, 837: 36, 838: 60, 839: 45, 844: 45, 845: 53, 846: 52, 850: 50, 871: 59, 874: 57, 1053: 65, 1055: 49, 1056: 47, 1152: 42, 1153: 44, 1154: 40, 1155: 45, 1156: 36, 1157: 49, 1158: 39, 1159: 56, 1173: 67, 1231: 59, 1255: 52, 1257: 59, 1296: 58, 1552: 48 };
+    const BASE_ARMOUR_VALUES = { 32: 20, 33: 32, 34: 34, 49: 31, 50: 36, 176: 23, 178: 30, 332: 38, 333: 40, 334: 42, 348: 10, 538: 25, 640: 32, 641: 34, 642: 30, 643: 30, 644: 34, 645: 30, 646: 24, 647: 20, 648: 20, 649: 20, 650: 20, 651: 38, 652: 38, 653: 38, 654: 38, 655: 35, 656: 45, 657: 45, 658: 45, 659: 45, 660: 44, 661: 44, 662: 44, 663: 44, 664: 44, 665: 46, 666: 46, 667: 46, 668: 46, 669: 46, 670: 49, 671: 49, 672: 49, 673: 49, 674: 49, 675: 40, 676: 52, 677: 52, 678: 52, 679: 52, 680: 55, 681: 55, 682: 55, 683: 55, 684: 55, 848: 32, 1164: 38, 1165: 50, 1166: 50, 1167: 50, 1168: 50, 1174: 39, 1307: 53, 1308: 53, 1309: 53, 1310: 53, 1311: 53, 1355: 48, 1356: 48, 1357: 48, 1358: 48, 1359: 48 };
 
     const BASE_STATS_MAP = Object.keys({ ...BASE_DAMAGE_VALUES, ...BASE_ACCURACY_VALUES, ...BASE_ARMOUR_VALUES }).reduce((map, id) => {
         map[id] = { baseDamage: BASE_DAMAGE_VALUES[id] ?? 0, baseAccuracy: BASE_ACCURACY_VALUES[id] ?? 0, baseArmour: BASE_ARMOUR_VALUES[id] ?? 0 };
@@ -749,24 +689,37 @@
 
     const FIXED_BONUSES = ['Smash', 'Sleep', 'Storage'];
     const NUMBER_REGEX = /(\d+(?:\.\d+)?)/;
-    function extractBonusValue(text) { const s = String(text || ''); const pct = s.match(/(\d+(?:\.\d+)?)\s*%/); if (pct) return parseFloat(pct[1]); const m = s.match(NUMBER_REGEX); return m ? parseFloat(m[1]) : null; }
-    function parseBonusTitleAttr(titleAttr) { try { return new DOMParser().parseFromString(String(titleAttr || ''), 'text/html').body; } catch (e) { const d = document.createElement('div'); d.textContent = String(titleAttr || ''); return d; } }
     const processedElements = new WeakMap();
     const processedBonusOverlays = new WeakMap();
     let darkMode = false;
     let currentHandler = null;
+
+    // Prefer the bonus strength number, not "after 3 hits" style counters.
+    // 1) first N% that is not a tiny counter  2) last N%  3) number after by/of/chance  4) last plain number
+    function parseBonusValue(descText) {
+        const text = String(descText || '');
+        if (!text) return null;
+        const pctMatches = [...text.matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map(m => parseFloat(m[1]));
+        if (pctMatches.length) {
+            // Prefer a percentage that looks like a bonus strength (typically >= 2)
+            const strong = pctMatches.filter(n => n >= 2);
+            if (strong.length) return strong[0]; // first meaningful %
+            return pctMatches[pctMatches.length - 1];
+        }
+        const keyed = text.match(/(?:by|of|chance[:\s]+)\s*(\d+(?:\.\d+)?)/i);
+        if (keyed) return parseFloat(keyed[1]);
+        const all = [...text.matchAll(/(\d+(?:\.\d+)?)/g)].map(m => parseFloat(m[1]));
+        if (!all.length) return null;
+        return all[all.length - 1];
+    }
     let fetchParseWarned = false;
 
     function debugWarn(...args) { debugLog(...args); }
     function checkDarkMode() { darkMode = document.body.classList.contains('dark-mode'); }
-    // 1.13.18: read dark-mode live on every call. Old code used a cached
-    // `darkMode` set only when the handler activated / on save, so if Torn
-    // dark-mode was toggled after load, Tier 2 showed dark cyan #57efea
-    // while the panel swatch showed light teal #009590 (or vice versa).
-    function isDarkModeLive() { try { return !!(typeof document !== 'undefined' && document.body && document.body.classList.contains('dark-mode')); } catch (_) { return darkMode; } }
-    function getTierColor(percent) { const c = isDarkModeLive() ? COLORS.tiers.dark : COLORS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
+    function getTierColor(percent) { const c = darkMode ? COLORS.tiers.dark : COLORS.tiers.light; if (percent <= 25) return c[0]; if (percent <= 50) return c[1]; if (percent <= 75) return c[2]; if (percent <= 100) return c[3]; return c[4]; }
     function qs(selector, parent = document) { try { return parent.querySelector(selector); } catch (e) { return null; } }
-    function qsa(selector, parent = document) { try { return Array.from(parent.querySelectorAll(selector)); } catch (e) { return []; } }
+    // Always return an array so callers can safely .forEach without try/catch
+    function qsa(selector, parent = document) { try { return Array.from((parent || document).querySelectorAll(selector)); } catch (e) { return []; } }
     function create(tag, attrs = {}, children = []) {
         const el = document.createElement(tag);
         Object.entries(attrs).forEach(([key, value]) => {
@@ -777,14 +730,12 @@
         children.forEach(child => { if (typeof child === 'string') el.appendChild(document.createTextNode(child)); else if (child) el.appendChild(child); });
         return el;
     }
-    function getClassString(el) { if (!el) return ''; if (typeof el.className === 'string') return el.className; if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal; return (el.getAttribute && el.getAttribute('class')) || ''; }
-    function getIconIndicators(icon) { return [getClassString(icon), icon.getAttribute('aria-label'), icon.getAttribute('title'),
-icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
+    function getIconIndicators(icon) { return [icon.className, icon.getAttribute('aria-label'), icon.getAttribute('title'), icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
     function computeItemKey(itemID, stats, bonuses) { return `${colorEpoch}|${itemID}|${stats.damage}|${stats.accuracy}|${stats.armour}|${(bonuses || []).map(b => `${b.title}:${b.value}`).join(',')}`; }
     function isProcessed(el, key) { return processedElements.get(el) === key; }
     function markProcessed(el, key) { processedElements.set(el, key); }
     function getQualityColor(value, maxRange) { return getTierColor(value);}
-    function getBonusColor() { return isDarkModeLive() ? COLORS.bonus.dark : COLORS.bonus.light; }
+    function getBonusColor() { return darkMode ? COLORS.bonus.dark : COLORS.bonus.light; }
 
     function extractStats(el, selectors) {
         let damage = 0, accuracy = 0, armour = 0;
@@ -795,8 +746,7 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
             const iconEl = qs(selectors.statIcon, entry);
             const val = parseFloat(valueEl?.textContent) || 0;
             const typeEl = selectors.statTypeElement === 'value' ? valueEl : iconEl;
-            let typeText = selectors.statTypeAttribute === 'className' ? getClassString(typeEl).toLowerCase() :
-(typeEl?.getAttribute(selectors.statTypeAttribute) || '').toLowerCase();
+            let typeText = selectors.statTypeAttribute === 'className' ? (typeEl?.className || '').toLowerCase() : (typeEl?.getAttribute(selectors.statTypeAttribute) || '').toLowerCase();
             if (typeText.includes('damage')) damage = val;
             else if (typeText.includes('accuracy')) accuracy = val;
             else if (typeText.includes('armor') || typeText.includes('defence')) armour = val;
@@ -810,11 +760,11 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
             const titleAttr = icon.getAttribute(selectors.bonusTitleAttr) || '';
             const descAttr = icon.getAttribute(selectors.bonusDescAttr) || '';
             if (!titleAttr && !descAttr) return;
-            const tmp = parseBonusTitleAttr(titleAttr);
-            const title = qs('b', tmp)?.textContent || tmp.textContent || '';
-            const descText = tmp.textContent.replace(title, '').trim() || descAttr;
-            const _bv = extractBonusValue(descText); const valueMatch = _bv != null ? [String(_bv), String(_bv)] : null;
-            if (title) bonuses.push({ title, value: valueMatch ? parseFloat(valueMatch[1]) : null, description: descText });
+            const tmp = create('div'); tmp.innerHTML = titleAttr;
+            const title = (qs('b', tmp)?.textContent || tmp.textContent || '').trim();
+            const descText = (tmp.textContent || '').replace(title, '').trim() || descAttr;
+            const value = parseBonusValue(descText);
+            if (title) bonuses.push({ title, value, description: descText });
         });
         return bonuses;
     }
@@ -851,10 +801,10 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
         markProcessed(el, key);
     }
 
-    function getQualityBoxBg() { return isDarkModeLive() ? COLORS.qualityBoxBg.dark : COLORS.qualityBoxBg.light; }
+    function getQualityBoxBg() { return darkMode ? COLORS.qualityBoxBg.dark : COLORS.qualityBoxBg.light; }
     function calcQuality(itemID, damage, accuracy, armour) {
         const base = BASE_STATS_MAP[itemID];
-        if (!base) { logUnknownItem(itemID); return null; }
+        if (!base) return null;
         if (armour && armour !== 0) return ((armour - base.baseArmour) * 20).toFixed(1);
         return (((damage - base.baseDamage) + (accuracy - base.baseAccuracy)) * 10).toFixed(1);
     }
@@ -865,91 +815,96 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
         return '';
     }
 
-    // Complete Yellow / Orange / Red ranges (from community data + wiki)
+    // =============================================================================
+// === DATA: bonus tier ranges (edit here when wiki/community ranges update) ===
+// Fill is ALWAYS relative to the detected tier's [min, max], never the red max.
+// =============================================================================
     const WEAPON_BONUS_RANGES = {
-        'achilles':    { yellow: [50, 74],   orange: [75, 112],  red: [113, 169] },
-        'assassinate': { yellow: [50, 70],   orange: [70, 100],  red: [100, 148] },
-        'backstab':    { yellow: [30, 43],   orange: [44, 64],   red: [66, 96] },
-        'berserk':     { yellow: [20, 35],   orange: [36, 58],   red: [60, 88] },
-        'bleed':       { yellow: [20, 30],   orange: [31, 46],   red: [48, 72] },
-        'blindside':   { yellow: [25, 39],   orange: [40, 62],   red: [63, 97] },
-        'bloodlust':   { yellow: [10, 12],   orange: [12, 15],   red: [15, 19] },
-        'comeback':    { yellow: [50, 70],   orange: [70, 99],   red: [102, 138] },
-        'conserve':    { yellow: [25, 30],   orange: [30, 37],   red: [38, 49] },
-        'cripple':     { yellow: [20, 29],   orange: [29, 41],   red: [43, 63] },
-        'crusher':     { yellow: [50, 74],   orange: [75, 108],  red: [114, 171] },
-        'cupid':       { yellow: [50, 74],   orange: [75, 110],  red: [113, 168] },
-        'deadeye':     { yellow: [25, 45],   orange: [45, 74],   red: [75, 123] },
-        'deadly':      { yellow: [2, 3],     orange: [4, 6],     red: [7, 11] },
-        'disarm':      { yellow: [3, 5],     orange: [5, 9],     red: [9, 15] },
-        'double tap':  { yellow: [15, 24],   orange: [24, 36],   red: [38, 58] },
-        'double-edged':{ yellow: [10, 16],   orange: [16, 24],   red: [25, 40] },
-        'empower':     { yellow: [50, 89],   orange: [90, 148],  red: [152, 245] },
-        'eviscerate':  { yellow: [15, 19],   orange: [19, 25],   red: [25, 34] },
-        'execute':     { yellow: [15, 18],   orange: [18, 22],   red: [23, 30] },
-        'expose':      { yellow: [7, 9],     orange: [10, 14],   red: [14, 21] },
-        'finale':      { yellow: [10, 12],   orange: [12, 15],   red: [15, 18] },
-        'focus':       { yellow: [15, 19],   orange: [19, 24],   red: [25, 35] },
-        'frenzy':      { yellow: [5, 7],     orange: [7, 10],    red: [10, 14] },
-        'fury':        { yellow: [10, 16],   orange: [16, 24],   red: [25, 40] },
-        'grace':       { yellow: [20, 36],   orange: [36, 55],   red: [60, 84] },
-        'home run':    { yellow: [50, 59],   orange: [60, 74],   red: [76, 99] },
-        'irradiate':   { yellow: [0, 19],    orange: [20, 49],   red: [50, 86] },
-        'motivation':  { yellow: [15, 19],   orange: [19, 25],   red: [25, 35] },
-        'paralyze':    { yellow: [5, 8],     orange: [8, 12],    red: [13, 18] },
-        'parry':       { yellow: [50, 60],   orange: [60, 74],   red: [75, 95] },
-        'penetrate':   { yellow: [25, 30],   orange: [30, 37],   red: [38, 49] },
-        'plunder':     { yellow: [20, 26],   orange: [26, 35],   red: [35, 49] },
-        'powerful':    { yellow: [15, 22],   orange: [22, 32],   red: [33, 50] },
-        'proficience': { yellow: [20, 28],   orange: [28, 39],   red: [40, 59] },
-        'puncture':    { yellow: [15, 20],   orange: [20, 27],   red: [28, 39] },
-        'quicken':     { yellow: [50, 89],   orange: [90, 149],  red: [150, 245] },
-        'rage':        { yellow: [4, 6],     orange: [7, 11],    red: [11, 18] },
-        'revitalize':  { yellow: [10, 13],   orange: [13, 17],   red: [18, 24] },
-        'roshambo':    { yellow: [50, 73],   orange: [75, 107],  red: [113, 160] },
-        'slow':        { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] },
-        'smurf':       { yellow: [1, 1],     orange: [2, 3],     red: [3, 5] },
-        'specialist':  { yellow: [20, 28],   orange: [28, 39],   red: [40, 59] },
-        'stricken':    { yellow: [30, 43],   orange: [44, 63],   red: [69, 99] },
-        'stun':        { yellow: [10, 16],   orange: [16, 25],   red: [25, 40] },
-        'suppress':    { yellow: [25, 32],   orange: [32, 42],   red: [43, 51] },
-        'sure shot':   { yellow: [3, 4],     orange: [5, 8],     red: [8, 12] },
-        'throttle':    { yellow: [50, 74],   orange: [75, 111],  red: [113, 170] },
-        'warlord':     { yellow: [15, 20],   orange: [20, 27],   red: [28, 45] },
-        'weaken':      { yellow: [20, 29],   orange: [29, 42],   red: [43, 63] },
-        'wind-up':     { yellow: [125, 145], orange: [145, 174], red: [175, 221] },
-        'wither':      { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] }
+        'achilles':     { yellow: [50, 74],   orange: [75, 112],  red: [113, 169] },
+        'assassinate':  { yellow: [50, 70],   orange: [70, 100],  red: [100, 148] },
+        'backstab':     { yellow: [30, 43],   orange: [44, 64],   red: [66, 96] },
+        'berserk':      { yellow: [20, 35],   orange: [36, 58],   red: [60, 88] },
+        'bleed':        { yellow: [20, 30],   orange: [31, 46],   red: [48, 72] },
+        'blindside':    { yellow: [25, 39],   orange: [40, 62],   red: [63, 97] },
+        'bloodlust':    { yellow: [10, 12],   orange: [12, 15],   red: [15, 19] },
+        'comeback':     { yellow: [50, 70],   orange: [70, 99],   red: [102, 138] },
+        'conserve':     { yellow: [25, 30],   orange: [30, 37],   red: [38, 49] },
+        'cripple':      { yellow: [20, 29],   orange: [29, 41],   red: [43, 63] },
+        'crusher':      { yellow: [50, 74],   orange: [75, 108],  red: [114, 171] },
+        'cupid':        { yellow: [50, 74],   orange: [75, 110],  red: [113, 168] },
+        'deadeye':      { yellow: [25, 45],   orange: [45, 74],   red: [75, 123] },
+        'deadly':       { yellow: [2, 3],     orange: [4, 6],     red: [7, 11] },
+        'disarm':       { yellow: [3, 5],     orange: [5, 9],     red: [9, 15] },
+        'double tap':   { yellow: [15, 24],   orange: [24, 36],   red: [38, 58] },
+        'double-edged': { yellow: [10, 16],   orange: [16, 24],   red: [25, 40] },
+        'empower':      { yellow: [50, 89],   orange: [90, 148],  red: [152, 245] },
+        'eviscerate':   { yellow: [15, 19],   orange: [19, 25],   red: [25, 34] },
+        'execute':      { yellow: [15, 18],   orange: [18, 22],   red: [23, 30] },
+        'expose':       { yellow: [7, 9],     orange: [10, 14],   red: [14, 21] },
+        'finale':       { yellow: [10, 12],   orange: [12, 15],   red: [15, 18] },
+        'focus':        { yellow: [15, 19],   orange: [19, 24],   red: [25, 35] },
+        'frenzy':       { yellow: [5, 7],     orange: [7, 10],    red: [10, 14] },
+        'fury':         { yellow: [10, 16],   orange: [16, 24],   red: [25, 40] },
+        'grace':        { yellow: [20, 36],   orange: [36, 55],   red: [60, 84] },
+        'home run':     { yellow: [50, 59],   orange: [60, 74],   red: [76, 99] },
+        'irradiate':    { yellow: [0, 19],    orange: [20, 49],   red: [50, 86] },
+        'motivation':   { yellow: [15, 19],   orange: [19, 25],   red: [25, 35] },
+        'paralyze':     { yellow: [5, 8],     orange: [8, 12],    red: [13, 18] },
+        'parry':        { yellow: [50, 60],   orange: [60, 74],   red: [75, 95] },
+        'penetrate':    { yellow: [25, 30],   orange: [30, 37],   red: [38, 49] },
+        'plunder':      { yellow: [20, 26],   orange: [26, 35],   red: [35, 49] },
+        'powerful':     { yellow: [15, 22],   orange: [22, 32],   red: [33, 50] },
+        'proficience':  { yellow: [20, 28],   orange: [28, 39],   red: [40, 59] },
+        'puncture':     { yellow: [15, 20],   orange: [20, 27],   red: [28, 39] },
+        'quicken':      { yellow: [50, 89],   orange: [90, 149],  red: [150, 245] },
+        'rage':         { yellow: [4, 6],     orange: [7, 11],    red: [11, 18] },
+        'revitalize':   { yellow: [10, 13],   orange: [13, 17],   red: [18, 24] },
+        'roshambo':     { yellow: [50, 73],   orange: [75, 107],  red: [113, 160] },
+        'slow':         { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] },
+        'smurf':        { yellow: [1, 1],     orange: [2, 3],     red: [3, 5] },
+        'specialist':   { yellow: [20, 28],   orange: [28, 39],   red: [40, 59] },
+        'stricken':     { yellow: [30, 43],   orange: [44, 63],   red: [69, 99] },
+        'stun':         { yellow: [10, 16],   orange: [16, 25],   red: [25, 40] },
+        'suppress':     { yellow: [25, 32],   orange: [32, 42],   red: [43, 51] },
+        'sure shot':    { yellow: [3, 4],     orange: [5, 8],     red: [8, 12] },
+        'throttle':     { yellow: [50, 74],   orange: [75, 111],  red: [113, 170] },
+        'warlord':      { yellow: [15, 20],   orange: [20, 27],   red: [28, 45] },
+        'weaken':       { yellow: [20, 29],   orange: [29, 42],   red: [43, 63] },
+        'wind-up':      { yellow: [125, 145], orange: [145, 174], red: [175, 221] },
+        'wither':       { yellow: [20, 29],   orange: [29, 42],   red: [43, 64] }
     };
-    // 1.12.29: Special bonuses - single [min,max] range for fill, color stays regular unless glow says otherwise.
+
+    // Special weapon bonuses — grey bar; fill within their own min–max (not Y/O/R tiers)
     const SPECIAL_BONUS_RANGES = {
-        'blindfire': [15, 20],
-        'burn': [30, 50],
-        'demoralize': [20, 23],
-        'emasculate': [15, 16],
-        'freeze': [20, 26],
-        'hazardous': [20, 31],
-        'laceration': [35, 45],
-        'poison': [85, 100],
-        'severe burning': [100, 100],
-        'shock': [75, 100],
-        'sleep': [0, 0],
-        'smash': [100, 100],
-        'spray': [20, 24],
-        'storage': [0, 0],
-        'toxin': [30, 44]
+        'blindfire':       [15, 20],
+        'burn':            [30, 50],
+        'demoralize':      [20, 23],
+        'emasculate':      [15, 16],
+        'freeze':          [20, 26],
+        'hazardous':       [20, 31],
+        'laceration':      [35, 45],
+        'poison':          [85, 100],
+        'severe burning':  [100, 100],
+        'shock':           [75, 100],
+        'sleep':           [0, 0],
+        'smash':           [100, 100],
+        'spray':           [20, 24],
+        'storage':         [0, 0],
+        'toxin':           [30, 44]
     };
-    // 1.12.29: Armour bonuses - color is exact by name, range is MERGED across slots (approximate until slot/ID plumbed through).
+
+    // Armor bonuses by name — color + range (slot differences collapsed to widest band)
     const ARMOR_BONUS_RANGES = {
-        'imperviable': { color: 'orange', min: 2, max: 11, rows: [{ id: 100, min: 2, max: 3, slots: ['gloves'] }, { id: 22, min: 5, max: 7, slots: ['helmet'] }, { id: 97, min: 7, max: 11, slots: ['body_armor'] }, { id: 98, min: 4, max: 6, slots: ['pants'] }, { id: 99, min: 2, max: 3, slots: ['boots'] }] },
-        'kinetokinesis': { color: 'yellow', min: 75, max: 75, rows: [{ id: 110, min: 75, max: 75, slots: ['body_armor'] }, { id: 111, min: 75, max: 75, slots: ['pants'] }, { id: 112, min: 75, max: 75, slots: ['boots'] }, { id: 113, min: 75, max: 75, slots: ['gloves'] }, { id: 114, min: 75, max: 75, slots: ['helmet'] }] },
-        'immutable': { color: 'orange', min: 15, max: 52, rows: [{ id: 115, min: 30, max: 43, slots: ['helmet'] }, { id: 116, min: 40, max: 52, slots: ['body_armor'] }, { id: 117, min: 25, max: 33, slots: ['pants'] }, { id: 118, min: 15, max: 19, slots: ['boots'] }, { id: 119, min: 15, max: 19, slots: ['gloves'] }] },
-        'irrepressible': { color: 'orange', min: 15, max: 52, rows: [{ id: 121, min: 30, max: 41, slots: ['helmet'] }, { id: 122, min: 40, max: 52, slots: ['body_armor'] }, { id: 123, min: 25, max: 33, slots: ['pants'] }, { id: 124, min: 15, max: 19, slots: ['boots'] }, { id: 125, min: 15, max: 19, slots: ['gloves'] }] },
-        'impregnable': { color: 'yellow', min: 20, max: 29, rows: [{ id: 15, min: 20, max: 29, slots: ['helmet', 'body_armor', 'pants', 'boots', 'gloves'] }] },
-        'impenetrable': { color: 'yellow', min: 20, max: 29, rows: [{ id: 17, min: 20, max: 29, slots: ['helmet', 'body_armor', 'pants', 'boots', 'gloves'] }] },
-        'impassable': { color: 'red', min: 20, max: 29, rows: [{ id: 26, min: 20, max: 29, slots: ['helmet', 'body_armor', 'pants', 'boots', 'gloves'] }] },
-        'radiation protection': { color: 'yellow', min: 1, max: 82, rows: [{ id: 90, min: 1, max: 82, slots: ['helmet'] }] },
-        'invulnerable': { color: 'orange', min: 4, max: 15, rows: [{ id: 91, min: 12, max: 15, slots: ['helmet'] }, { id: 93, min: 8, max: 11, slots: ['body_armor'] }, { id: 94, min: 7, max: 10, slots: ['pants'] }, { id: 95, min: 4, max: 7, slots: ['boots'] }, { id: 96, min: 4, max: 7, slots: ['gloves'] }] },
-        'insurmountable': { color: 'yellow', min: 30, max: 40, rows: [{ id: 92, min: 30, max: 40, slots: ['helmet', 'body_armor', 'pants', 'boots', 'gloves'] }] }
+        'impregnable':           { color: 'yellow', range: [20, 29] },
+        'impenetrable':          { color: 'yellow', range: [20, 29] },
+        'insurmountable':        { color: 'yellow', range: [30, 40] },
+        'radiation protection':  { color: 'yellow', range: [1, 82] },
+        'kinetokinesis':         { color: 'yellow', range: [75, 75] },
+        'impassable':            { color: 'red',    range: [20, 29] },
+        'imperviable':           { color: 'orange', range: [2, 11] },
+        'immutable':             { color: 'orange', range: [15, 52] },
+        'irrepressible':         { color: 'orange', range: [15, 52] },
+        'invulnerable':          { color: 'orange', range: [4, 15] }
     };
 
     // Colors taken from the reference badge script (fill + empty base)
@@ -961,7 +916,12 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
         regular:{ fill: 'rgba(120,120,130,0.75)',base: 'rgba(180,180,190,0.35)' }
     };
 
-    function getBonusRarityAndRange(bonus, contextEl, opts) {
+    function getBonusRarityAndRange(bonus, contextEl) {
+        const title = (bonus.title || '').toLowerCase().trim();
+        const v = bonus.value != null ? Number(bonus.value) : null;
+
+        // Optional plate glow (weapon rarity) — used only as a hint / fallback.
+        // Dual-bonus weapons can have a lower-tier second bonus than the plate glow.
         let glowRarity = null;
         if (contextEl) {
             const plate = contextEl.closest('[class*="item-plate"], [class*="itemTile"], .item-cont-wrap, li[data-item]') || contextEl;
@@ -969,101 +929,93 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
             else if (plate.classList.contains('glow-orange') || plate.querySelector('.glow-orange')) glowRarity = 'orange';
             else if (plate.classList.contains('glow-yellow') || plate.querySelector('.glow-yellow')) glowRarity = 'yellow';
         }
-        // 1.13.2 display case: 1.12.27's glow rule. Glow set the colour and
-        // discarded the range (range null -> fill = value-as-percent).
-        // Later versions made glow authoritative for range + absolute fill,
-        // which is what makes a 16% Motivation bar look half-filled with a
-        // hard split in a 13px display-case bar.
-        if (opts && opts.displayCase) {
-            if (glowRarity) return { rarity: glowRarity, range: null, fillMax: null };
-            if (bonus.value == null) return { rarity: 'regular', range: null, fillMax: null };
-            const titleDc = (bonus.title || '').toLowerCase().trim();
-            const weaponDc = WEAPON_BONUS_RANGES[titleDc];
-            if (!weaponDc) return { rarity: 'regular', range: null, fillMax: null };
-            const vDc = Number(bonus.value);
-            if (vDc >= weaponDc.red[0]) return { rarity: 'red', range: weaponDc.red, fillMax: null };
-            if (vDc >= weaponDc.orange[0]) return { rarity: 'orange', range: weaponDc.orange, fillMax: null };
-            if (vDc >= weaponDc.yellow[0]) return { rarity: 'yellow', range: weaponDc.yellow, fillMax: null };
-            return { rarity: 'regular', range: null, fillMax: null };
+
+        // Standard Y/O/R weapon bonuses — tier from VALUE, fill range = that tier only
+        const ranges = WEAPON_BONUS_RANGES[title];
+        if (ranges) {
+            let rarity = 'regular';
+            if (v != null && !Number.isNaN(v)) {
+                if (v >= ranges.red[0]) rarity = 'red';
+                else if (v >= ranges.orange[0]) rarity = 'orange';
+                else if (v >= ranges.yellow[0]) rarity = 'yellow';
+            }
+            // Value below yellow min → fall back to glow if present
+            if (rarity === 'regular' && glowRarity) rarity = glowRarity;
+            const range = ranges[rarity] || null;
+            return { rarity, range };
         }
-        if (bonus.value == null) return { rarity: glowRarity || 'regular', range: null, fillMax: null };
-        const title = (bonus.title || '').toLowerCase().trim();
-        const v = Number(bonus.value);
-        const weapon = WEAPON_BONUS_RANGES[title];
-        if (weapon) {
-            // 1.12.29: glow is authoritative for BOTH color and range. Previously glow set color
-            // but range came from value thresholds, so a boundary value like 26% Plunder (glow-yellow,
-            // value >= orange min 26) mixed yellow color + orange range [26,35] -> 0% fill, all base.
-            if (glowRarity && weapon[glowRarity]) return { rarity: glowRarity, range: weapon[glowRarity], fillMax: weapon.red[1] };
-            if (v >= weapon.red[0]) return { rarity: 'red', range: weapon.red, fillMax: weapon.red[1] };
-            if (v >= weapon.orange[0]) return { rarity: 'orange', range: weapon.orange, fillMax: weapon.red[1] };
-            if (v >= weapon.yellow[0]) return { rarity: 'yellow', range: weapon.yellow, fillMax: weapon.red[1] };
-            return { rarity: 'regular', range: null, fillMax: weapon.red[1] };
+
+        // Armor bonuses (Impenetrable, …)
+        const armor = ARMOR_BONUS_RANGES[title];
+        if (armor) {
+            return { rarity: armor.color, range: armor.range };
         }
+
+        // Specials (Burn, Shock, …) — grey bar, fill within special min–max
         const special = SPECIAL_BONUS_RANGES[title];
-        if (special) return { rarity: glowRarity || 'regular', range: special, fillMax: special[1] };
-        const armor = ARMOR_BONUS_RANGES[title];
-        if (armor) return { rarity: glowRarity || armor.color, range: [armor.min, armor.max], fillMax: armor.max };
-        return { rarity: glowRarity || 'regular', range: null, fillMax: null };
+        if (special) {
+            return { rarity: 'regular', range: special };
+        }
+
+        // Unknown — solid-ish bar, no false tier color
+        if (glowRarity) return { rarity: glowRarity, range: null };
+        return { rarity: 'regular', range: null };
     }
-    function getBonusFullRange(bonus) {
-        if (!bonus || bonus.value == null) return null;
-        const title = (bonus.title || '').toLowerCase().trim();
-        const weapon = WEAPON_BONUS_RANGES[title];
-        if (weapon) return [weapon.yellow[0], weapon.red[1]];
-        const special = SPECIAL_BONUS_RANGES[title];
-        if (special) return special;
-        const armor = ARMOR_BONUS_RANGES[title];
-        if (armor) return [armor.min, armor.max];
-        return null;
-    }
-    // 1.12.30: hover tooltip second line with min-max for this bonus kind.
-    // Plunder 20% -> "20% Plunder\nRange: 20% - 49%". Uses the FULL range (yellow min to red max),
-    // not just the current tier, so you see the whole possible span. Unit comes from the bonus's
-    // own value/description, so Disarm shows "3 - 15" (no %) and Plunder shows "%".
-    // Armour ranges are the merged across-slot ranges already in the script (approximate).
-    function getBonusTooltipText(bonus) {
-        const value = bonus.value;
-        const unit = getUnitFromDescription(bonus.description, value);
-        const text = value != null ? `${value}${unit} ${bonus.title}` : bonus.title;
-        const full = getBonusFullRange(bonus);
-        if (!full) return text;
-        return `${text}\nRange: ${full[0]}${unit} - ${full[1]}${unit}`;
-    }
-    function createBonusBarBackground(value, rarity, range, fillMax) {
+
+    function createBonusBarBackground(value, rarity, range) {
         const colors = BONUS_BAR_COLORS[rarity] || BONUS_BAR_COLORS.regular;
         let percent = 100;
-        if (fillMax && fillMax > 0 && value != null) {
-            // 1.12.29: absolute fill vs the bonus's red max, not relative inside the tier.
-            // Relative-inside-tier made tier-min values look broken: 20% Plunder (yellow [20,26])
-            // -> (20-20)/6 = 0% fill, all base. Now 20/49 = 41%, 42/49 = 86%, 26/49 = 53%.
-            percent = Math.min(Math.max((Number(value) / fillMax) * 100, 0), 100);
-            if (Number(value) > 0 && percent < 10) percent = 10;
-        } else if (range && range[1] > range[0] && value != null) {
-            percent = Math.min(Math.max(((Number(value) - range[0]) / (range[1] - range[0])) * 100, 0), 100);
-            if (Number(value) > 0 && percent < 10) percent = 10;
-        } else if (range && range[1] === range[0] && value != null) {
-            percent = Number(value) >= range[0] ? 100 : 0;
-        } else if (value != null) {
+        if (range && value != null && !Number.isNaN(Number(value))) {
+            const lo = Number(range[0]);
+            const hi = Number(range[1]);
+            if (hi > lo) {
+                // Fill ONLY within this tier's min–max (e.g. yellow Motivation 15–19)
+                // 15 → ~0%, 17 → ~50%, 19 → ~100%
+                percent = Math.min(Math.max(((Number(value) - lo) / (hi - lo)) * 100, 0), 100);
+            } else {
+                // Fixed value (e.g. Smash 100–100) → full bar
+                percent = 100;
+            }
+        } else if (value != null && !Number.isNaN(Number(value))) {
+            // Unknown bonus: soft absolute fallback, capped
             percent = Math.min(Math.max(Number(value), 0), 100);
         }
         return `linear-gradient(90deg, ${colors.fill} 0%, ${colors.fill} ${Math.max(percent - 0.2, 0)}%, ${colors.base} ${Math.min(percent + 0.2, 100)}%, ${colors.base} 100%)`;
     }
-    // 1.13.2: display case uses 1.12.27's rendering (the version confirmed working).
-    // After 1.12.27, 1.12.29 added inline textShadow on a 9-10px label inside a
-    // 13-14px bar (reads as smeared/doubled text, top/bottom clipped in screenshot),
-    // changed red text in light mode from #1a1a1a to #fff, and changed fill from
-    // relative-inside-tier / value-as-percent to absolute vs the red max (a low
-    // yellow bonus went from mostly-pale to half-filled with a hard split).
-    // 1.13.0 has 1.12.27 geometry + 1.12.29 text/fill: the worst of both.
-    // Display-case call sites pass { displayCase: true } for the 1.12.27 path.
-    // Every other page keeps the 1.12.29+ fill / text logic untouched.
-    function createBonusEl(bonus, contextEl, opts) {
-        const isDisplayCase = !!(opts && opts.displayCase);
+
+    function formatBonusRangeTooltip(bonus, rarity, range) {
+        const title = (bonus.title || '').trim();
+        const value = bonus.value;
+        const unit = getUnitFromDescription(bonus.description, value);
+        const head = value != null ? `${value}${unit} ${title}` : title;
+        const key = title.toLowerCase();
+        const lines = [head];
+
+        // Show only the range for the detected tier (user can already see the color)
+        if (range && Array.isArray(range) && range.length >= 2) {
+            lines.push(`Range ${range[0]}% - ${range[1]}%`);
+        } else {
+            const weapon = WEAPON_BONUS_RANGES[key];
+            if (weapon && rarity && weapon[rarity]) {
+                lines.push(`Range ${weapon[rarity][0]}% - ${weapon[rarity][1]}%`);
+            } else {
+                const armor = ARMOR_BONUS_RANGES[key];
+                if (armor) lines.push(`Range ${armor.range[0]}% - ${armor.range[1]}%`);
+                else {
+                    const special = SPECIAL_BONUS_RANGES[key];
+                    if (special) lines.push(`Range ${special[0]}% - ${special[1]}%`);
+                }
+            }
+        }
+        return lines.join('\n');
+    }
+
+    function createBonusEl(bonus, contextEl) {
         if (FIXED_BONUSES.includes(bonus.title)) {
             return create('div', {
                 className: 'om-bonus-bar om-bonus-fixed',
                 textContent: bonus.title,
+                title: bonus.title,
                 style: { color: getBonusColor() }
             });
         }
@@ -1074,8 +1026,9 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
             ? `${value}${unit} ${bonus.title}`
             : bonus.title;
 
-        const { rarity, range, fillMax } = getBonusRarityAndRange(bonus, contextEl, opts);
-        const bg = createBonusBarBackground(value, rarity, range, fillMax);
+        const { rarity, range } = getBonusRarityAndRange(bonus, contextEl);
+        const bg = createBonusBarBackground(value, rarity, range);
+        const tip = formatBonusRangeTooltip(bonus, rarity, range);
 
         // Keep darkMode in sync (Torn may toggle theme without a full reload)
         checkDarkMode();
@@ -1086,15 +1039,14 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
         if (rarity === 'yellow' || rarity === 'orange') {
             textColor = darkMode ? '#e8e8e8' : '#111';
         } else if (rarity === 'red') {
-            // 1.12.27 for display case: #1a1a1a in light mode. 1.12.29 white-on-red stays for market / inventory / armoury.
-            textColor = isDisplayCase ? (darkMode ? '#fff' : '#1a1a1a') : '#fff';
+            textColor = darkMode ? '#fff' : '#1a1a1a';
         } else if (rarity === 'regular') {
             textColor = darkMode ? '#fff' : '#111';
         }
 
         const bar = create('div', {
-            className: `om-bonus-bar om-bonus-${rarity}` + (isDisplayCase ? ' om-bonus-displaycase' : ''),
-            title: getBonusTooltipText(bonus),
+            className: `om-bonus-bar om-bonus-${rarity}`,
+            title: tip,
             style: {
                 background: bg
             }
@@ -1103,8 +1055,8 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
         const label = create('span', {
             className: 'om-bonus-text',
             textContent: text,
-            // 1.12.27: label had only color, no shadow. The 1.12.29 shadow is what makes display-case text look smeared.
-            style: isDisplayCase ? { color: textColor } : { color: textColor, textShadow: '0 1px 2px rgba(0,0,0,0.55)' }
+            title: tip,
+            style: { color: textColor }
         });
 
         bar.appendChild(label);
@@ -1115,45 +1067,17 @@ icon.getAttribute('data-title')].filter(Boolean).join(' ').toLowerCase(); }
         if (!container) return;
         const clamped = Math.min(Math.max(parseFloat(value), 0), maxRange);
         const span = create('span', { className: 'label-value t-overflow', textContent: `Q ${clamped.toFixed(1)}%` });
-        const box = create('div', { className: 'openmarket-quality-box', style: { position: 'absolute', top: '2px', left: '2px', padding: '1px 3px',
-borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', background: getQualityBoxBg(), color: getQualityColor(clamped, maxRange) } }, [span]);
+        const box = create('div', { className: 'openmarket-quality-box', style: { position: 'absolute', top: '2px', left: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', background: getQualityBoxBg(), color: getQualityColor(clamped, maxRange) } }, [span]);
         if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
         container.appendChild(box);
     }
 
     function insertQualityInline(nameEl, value, maxRange) {
         if (!nameEl) return;
-        // 1.13.16: PROVEN by console test + screenshots. The name is
-        // <span class="title____AfRU"><span class="name___nbqSl>Blowgun</span></span>
-        // inside <button class="viewInfoButton___...">.
-        // 1.13.13 put the badge AFTER the whole title, as a direct child of
-        // the BUTTON. That BUTTON is a grid/flex row, so the badge became a
-        // grid item and stretched to full row height, white bg filling the
-        // whole cell = "big gigantic square" in the screenshots.
-        // The console test used nameEl.after(badge) — INSIDE the title,
-        // right after the name — and those yellow badges stayed small pills.
-        // So: badge goes INSIDE the title, right after the name.
         const titleContainer = nameEl.parentElement;
         if (!titleContainer) return;
-        // Remove stale pills from BOTH places: 1.13.13-1.13.15 left a
-        // stretched pill as a sibling of the title (in the BUTTON), and
-        // old versions left one inside the title. If we don't clear the
-        // BUTTON-level one, the tall white square stays next to the new pill.
-        try {
-            const buttonEl = titleContainer.parentElement;
-            if (buttonEl) buttonEl.querySelectorAll('.openmarket-quality-inline').forEach(n => n.remove());
-        } catch (_) {}
-        titleContainer.querySelectorAll('.openmarket-quality-inline').forEach(n => n.remove());
-        // Let the title show the pill: Torn gives title overflow-hidden /
-        // ellipsis on some pages, which would clip an inline pill. Make
-        // this one title overflow-visible + inline-flex so the pill fits.
-        try {
-            titleContainer.style.overflow = 'visible';
-            titleContainer.style.display = 'inline-flex';
-            titleContainer.style.alignItems = 'center';
-            titleContainer.style.flexWrap = 'nowrap';
-            titleContainer.style.maxWidth = 'none';
-        } catch (_) {}
+        const existing = qs('.openmarket-quality-inline', titleContainer);
+        if (existing) existing.remove();
         const clamped = Math.min(Math.max(parseFloat(value), 0), maxRange);
         const badge = create('span', {
             className: 'openmarket-quality-inline',
@@ -1163,26 +1087,13 @@ borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', backgrou
                 padding: '1px 4px',
                 borderRadius: '3px',
                 fontSize: '11px',
-                lineHeight: '1.2',
                 fontWeight: 'bold',
                 whiteSpace: 'nowrap',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flex: '0 0 auto',
-                flexShrink: '0',
-                alignSelf: 'center',
-                height: 'auto',
-                maxHeight: '18px',
-                width: 'auto',
-                maxWidth: 'none',
-                verticalAlign: 'middle',
-                overflow: 'visible',
                 background: getQualityBoxBg(),
                 color: getQualityColor(clamped, maxRange)
             }
         });
-        nameEl.after(badge);
+        titleContainer.appendChild(badge);
     }
     function insertBonusOverlay(container, bonuses) {
         if (!container || !bonuses || bonuses.length === 0) return;
@@ -1190,14 +1101,12 @@ borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', zIndex: '2', backgrou
         if (existing) existing.remove();
         const text = bonuses.map(b => FIXED_BONUSES.includes(b.title) ? b.title : (b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title)).join(' · ');
         if (!text) return;
-        const tooltip = bonuses.map(b => getBonusTooltipText(b)).join('\n');
-        const span = create('span', { className: 'label-value t-overflow', textContent: text, title: tooltip });
-        const box = create('div', { className: 'openmarket-bonus-box', style: { position: 'absolute', bottom: '2px', left: '2px', right: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold', zIndex: '2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background:
-getQualityBoxBg(), color: getBonusColor() } }, [span]);
+        const span = create('span', { className: 'label-value t-overflow', textContent: text, title: text });
+        const box = create('div', { className: 'openmarket-bonus-box', style: { position: 'absolute', bottom: '2px', left: '2px', right: '2px', padding: '1px 3px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold', zIndex: '2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: getQualityBoxBg(), color: getBonusColor() } }, [span]);
         if (window.getComputedStyle(container).position === 'static') container.style.position = 'relative';
         container.appendChild(box);
     }
-    function isPageActive() { return !document.hidden; } // 1.12.29: hasFocus() blocked processing when devtools had focus
+    function isPageActive() { return !document.hidden && document.hasFocus(); }
     function setupActiveListeners() {
         const onActivate = () => { if (currentHandler) currentHandler.processAll(); };
         document.addEventListener('visibilitychange', onActivate);
@@ -1213,17 +1122,57 @@ getQualityBoxBg(), color: getBonusColor() } }, [span]);
 
     const itemMarket = {
         cache: [], selectors: SELECTORS.itemMarket, observer: null, pendingTimeoutId: null,
-        pushCache(newItems) { this.cache.push(...newItems); if (this.cache.length > MAX_CACHE_ITEMS) this.cache.splice(0, this.cache.length - MAX_CACHE_ITEMS);
-},
+        pushCache(newItems) {
+            const normalized = (newItems || []).map(item => ({
+                ...item,
+                listingID: item.listingID ?? item.listingId ?? item.id ?? item.ID ?? null,
+                itemID: item.itemID ?? item.itemId ?? item.item_id ?? null
+            }));
+            this.cache.push(...normalized);
+            if (this.cache.length > MAX_CACHE_ITEMS) this.cache.splice(0, this.cache.length - MAX_CACHE_ITEMS);
+        },
         resetCache() { this.cache = []; },
+        extractListingId(el) {
+            if (!el) return null;
+            const attrNames = [
+                'data-listingid', 'data-listing-id', 'data-listing', 'data-id',
+                'data-itemuid', 'data-uid', 'data-armoury', 'data-armory'
+            ];
+            const nodes = [el, ...qsa('[data-listingid], [data-listing-id], [data-listing], [data-id], [data-itemuid], [data-uid], a[href]', el)];
+            for (const node of nodes) {
+                if (!node || !node.getAttribute) continue;
+                for (const name of attrNames) {
+                    const v = node.getAttribute(name);
+                    if (v && /^\d{4,}$/.test(String(v).trim())) return Number(v);
+                }
+                const href = node.getAttribute('href') || '';
+                const m = href.match(/listing[=_:](\d+)/i)
+                    || href.match(/[?&](?:listingID|listingId|listing_id|id)=(\d+)/i);
+                if (m) return Number(m[1]);
+            }
+            return null;
+        },
         matchToCache(el) {
+            // 1) Prefer unique listing ID from the tile (safe)
+            const listingID = this.extractListingId(el);
+            if (listingID != null) {
+                const byId = this.cache.find(item => Number(item.listingID) === Number(listingID));
+                if (byId) return byId;
+            }
+            // 2) Fallback: unique price + stats only (abstain if ambiguous)
             const price = parseInt(qs(this.selectors.price, el)?.textContent.replace(/[^\d]/g, ''), 10) || 0;
             const stats = extractStats(el, this.selectors);
-            const candidates = this.cache.filter(item => (item.armor && item.armor > 0) ? (item.minPrice === price && item.armor === stats.armour) :
-(item.minPrice === price && item.damage === stats.damage && item.accuracy === stats.accuracy));
-            if (candidates.length === 0) return null;
-            if (candidates.length > 1) return null;
-            return candidates[0];
+            const candidates = this.cache.filter(item => {
+                if (item.armor && item.armor > 0) {
+                    return item.minPrice === price && item.armor === stats.armour;
+                }
+                return item.minPrice === price && item.damage === stats.damage && item.accuracy === stats.accuracy;
+            });
+            if (candidates.length === 1) return candidates[0];
+            if (candidates.length > 1) {
+                debugLog('Ambiguous market cache match (price+stats); skipped tile', { price, stats, n: candidates.length });
+            }
+            return null;
         },
         processAll() {
             if (!isPageActive()) return;
@@ -1299,506 +1248,55 @@ getQualityBoxBg(), color: getBonusColor() } }, [span]);
     // =========================================================================
     const itemMarketSingle = {
         observer: null,
-        pollTimer: null,
-        getSingleImageId(img) {
-            if (!img) return null;
-            const urls = [
-                img.currentSrc || '',
-                (typeof img.getAttribute === 'function' ? (img.getAttribute('src') || '') : (img.src || '')),
-                (typeof img.getAttribute === 'function' ? (img.getAttribute('data-src') || img.getAttribute('data-original') || '') : ''),
-                (typeof img.getAttribute === 'function' ? (img.getAttribute('srcset') || '').split(',')[0].trim().split(' ')[0] : ''),
-                (typeof img.getAttribute === 'function' ? (img.getAttribute('style') || '') : '')
-            ];
-            for (const u of urls) {
-                if (!u) continue;
-                const m = String(u).match(/\/images\/items\/(\d+)\b/);
-                if (m) return parseInt(m[1], 10);
-            }
-            return null;
-        },
-        parseSingleAriaLabel(label) {
-            const text = String(label || '').replace(/\n/g, ' ').trim();
-            const result = { damage: 0, accuracy: 0, armour: 0, bonuses: [] };
-            const dm = text.match(/Damage\s*:?\s*(\d+(?:\.\d+)?)/i) || text.match(/(\d+(?:\.\d+)?)\s*damage\s*points/i); if (dm) result.damage = parseFloat(dm[1]);
-            const am = text.match(/Accuracy\s*:?\s*(\d+(?:\.\d+)?)/i) || text.match(/(\d+(?:\.\d+)?)\s*accuracy\s*points/i); if (am) result.accuracy = parseFloat(am[1]);
-            const rm = text.match(/Armou?r\s*:?\s*(\d+(?:\.\d+)?)/i) || text.match(/(\d+(?:\.\d+)?)\s*armou?r\s*points/i); if (rm) result.armour = parseFloat(rm[1]);
-            const seen = new Set();
-            const push = (title, value, description) => {
-                const t = String(title || '').trim();
-                if (!t) return;
-                const low = t.toLowerCase();
-                if (seen.has(low)) return;
-                if (/^(details|amount|rarity progress|damage|accuracy|armou?r|primary|secondary|melee|temporary|defensive|item defence|item defense|defence|defense)$/i.test(t)) return;
-                if (low.startsWith('item ')) return;
-                seen.add(low);
-                result.bonuses.push({ title: t, value: value != null ? Number(value) : null, description: String(description || '').trim() });
-            };
-            text.split(/\.(?=\s|$)/).forEach(part => {
-                const trimmed = part.trim();
-                if (!trimmed || /^Details:|^Amount:|^Rarity progress:|^Damage:|^Accuracy:|^Armou?r:/i.test(trimmed)) return;
-                const bm = trimmed.match(/^([^:]+):\s*(.+)$/);
-                if (bm) {
-                    const vm = bm[2].match(/(\d+(?:\.\d+)?)/);
-                    push(bm[1], vm ? vm[1] : null, bm[2]);
-                }
-            });
-            for (const m of text.matchAll(/([A-Z][a-zA-Z](?:[a-zA-Z\s\-]{0,28}[a-zA-Z])?):\s*(\d+(?:\.\d+)?)(%|)/g)) {
-                push(m[1], m[2], m[0]);
-            }
-            return result;
-        },
-        extractSingleStats(row) {
-            const stats = { damage: 0, accuracy: 0, armour: 0 };
-            // 1.13.15 PROVEN by console test on #/addListing: stats are ONLY in
-            // aria-label="37.97 damage points" / "53.67 accuracy points" inside
-            // DIV.info > DIV.properties, NOT in textContent, NOT as "Damage: 37.97".
-            // parseFloat(label) works, textContent.includes('damage') is always false.
-            try {
-                const dmgEl = row.querySelector('[aria-label*="damage points"]');
-                if (dmgEl) { const v = parseFloat(dmgEl.getAttribute('aria-label') || ''); if (Number.isFinite(v)) stats.damage = v; }
-                const accEl = row.querySelector('[aria-label*="accuracy points"]');
-                if (accEl) { const v = parseFloat(accEl.getAttribute('aria-label') || ''); if (Number.isFinite(v)) stats.accuracy = v; }
-                const armEl = row.querySelector('[aria-label*="armour points"], [aria-label*="armor points"]');
-                if (armEl) { const v = parseFloat(armEl.getAttribute('aria-label') || ''); if (Number.isFinite(v)) stats.armour = v; }
-                if (stats.damage || stats.accuracy || stats.armour) return stats;
-            } catch (_) {}
-            const STAT_ICON_SELECTOR = [
-                '.bonus-attachment-item-damage-bonus',
-                '.bonus-attachment-item-accuracy-bonus',
-                '.bonus-attachment-item-armour-bonus',
-                '.bonus-attachment-item-armor-bonus',
-                '.bonus-attachment-item-defence-bonus',
-                '.bonus-attachment-item-defense-bonus'
-            ].join(', ');
-            row.querySelectorAll(STAT_ICON_SELECTOR).forEach(icon => {
-                const cls = getClassString(icon).toLowerCase();
-                let val = NaN;
-                if (icon.nextElementSibling) val = parseFloat(icon.nextElementSibling.textContent);
-                if (isNaN(val)) {
-                    const parentVal = icon.parentElement?.querySelector('span, b, strong, [class*="value"]');
-                    if (parentVal) val = parseFloat(parentVal.textContent);
-                }
-                if (isNaN(val)) val = parseFloat(icon.getAttribute('aria-label') || icon.getAttribute('title') || '');
-                if (!Number.isFinite(val) || val <= 0) return;
-                if (cls.includes('damage')) stats.damage = val;
-                else if (cls.includes('accuracy')) stats.accuracy = val;
-                else if (cls.includes('armour') || cls.includes('armor') || cls.includes('defence') || cls.includes('defense')) stats.armour = val;
-            });
-            if (stats.damage || stats.accuracy || stats.armour) return stats;
-            row.querySelectorAll('i, svg, [class*="icon"]').forEach(icon => {
-                const indicators = getIconIndicators(icon);
-                if (!indicators.includes('damage') && !indicators.includes('accuracy') && !indicators.includes('armor') && !indicators.includes('armour') && !indicators.includes('defence') && !indicators.includes('defense')) return;
-                let valueEl = icon.nextElementSibling;
-                if (!valueEl || isNaN(parseFloat(valueEl.textContent))) valueEl = icon.parentElement?.querySelector('span, div, b, strong, [class*="value"]');
-                if (!valueEl || isNaN(parseFloat(valueEl.textContent))) valueEl = icon.parentElement?.nextElementSibling;
-                const val = parseFloat(valueEl?.textContent) || 0;
-                if (val <= 0) return;
-                if (indicators.includes('damage')) stats.damage = val;
-                else if (indicators.includes('accuracy')) stats.accuracy = val;
-                else if (indicators.includes('armor') || indicators.includes('armour') || indicators.includes('defence') || indicators.includes('defense')) stats.armour = val;
-            });
-            if (stats.damage || stats.accuracy || stats.armour) return stats;
-            // aria-labels inside the container
-            row.querySelectorAll('[aria-label]').forEach(el => {
-                const parsed = this.parseSingleAriaLabel(el.getAttribute('aria-label') || '');
-                if (parsed.damage) stats.damage = parsed.damage;
-                if (parsed.accuracy) stats.accuracy = parsed.accuracy;
-                if (parsed.armour) stats.armour = parsed.armour;
-            });
-            if (stats.damage || stats.accuracy || stats.armour) return stats;
-            // Plain-text pairs: "Damage 60.19", "Damage: 60.19", "Armour 61.14"
-            // Scoped to this container only, so a big page container cannot
-            // steal another item's stats. Only used when the container is
-            // small enough to plausibly be one item.
-            try {
-                const txt = row.textContent || '';
-                if (txt.length < 4000) {
-                    const dm = txt.match(/Damage\s*:?\s*(\d+(?:\.\d+)?)/i) || txt.match(/(\d+(?:\.\d+)?)\s*damage\s*points/i); if (dm) stats.damage = parseFloat(dm[1]);
-                    const am = txt.match(/Accuracy\s*:?\s*(\d+(?:\.\d+)?)/i) || txt.match(/(\d+(?:\.\d+)?)\s*accuracy\s*points/i); if (am) stats.accuracy = parseFloat(am[1]);
-                    const rm = txt.match(/Armou?r\s*:?\s*(\d+(?:\.\d+)?)/i) || txt.match(/(\d+(?:\.\d+)?)\s*armou?r\s*points/i); if (rm) stats.armour = parseFloat(rm[1]);
-                }
-            } catch (_) {}
-            return stats;
-        },
-        extractSingleBonuses(row) {
-            const bonuses = [];
-            const seen = new Set();
-            const push = (title, value, description) => {
-                const t = String(title || '').trim();
-                if (!t) return;
-                const low = t.toLowerCase();
-                if (seen.has(low)) return;
-                if (/^(primary|secondary|melee|temporary|defensive|item defence|item defense|defence|defense|armour|armor|damage|accuracy)$/i.test(t)) return;
-                if (low.includes('item defence') || low.includes('item defense')) return;
-                if (low.startsWith('item ')) return;
-                seen.add(low);
-                bonuses.push({ title: t, value: value != null ? Number(value) : null, description: String(description || '').trim() });
-            };
-            row.querySelectorAll('[data-bonus-attachment-title], .bonus-attachment-icons[title], i[class*="bonus-attachment-"][title]').forEach(node => {
-                const cls = getClassString(node).toLowerCase();
-                if (/\b(item-damage|item-accuracy|item-armou?r|item-defen[cs]e)\b/.test(cls)) return;
-                const titleAttr = node.getAttribute('data-bonus-attachment-title') || node.getAttribute('title') || '';
-                if (!titleAttr) return;
-                const tmp = parseBonusTitleAttr(titleAttr);
-                let title = (qs('b', tmp)?.textContent || '').trim();
-                if (!title) title = (tmp.textContent || '').split(/\n|\r/)[0].trim();
-                if (!title) return;
-                const descText = (tmp.textContent || '').replace(title, '').trim();
-                const v = extractBonusValue(descText);
-                push(title, v, descText || titleAttr);
-            });
-            row.querySelectorAll('[class*="bonus-attachment-"]').forEach(icon => {
-                const found = [...icon.classList].find(c =>
-                    c.startsWith('bonus-attachment-') &&
-                    !c.includes('blank') &&
-                    !c.includes('damage') &&
-                    !c.includes('accuracy') &&
-                    !c.includes('armour') &&
-                    !c.includes('armor') &&
-                    !c.includes('defence') &&
-                    !c.includes('defense') &&
-                    !c.includes('item-')
-                );
-                if (!found) return;
-                const raw = found.replace('bonus-attachment-', '').replace(/-/g, ' ');
-                const title = raw.charAt(0).toUpperCase() + raw.slice(1);
-                const titleAttr = icon.getAttribute('title') || '';
-                push(title, extractBonusValue(titleAttr), titleAttr);
-            });
-            // aria-label bonuses (hover element carries "Motivation: 16% ..." etc.)
-            row.querySelectorAll('[aria-label]').forEach(el => {
-                const parsed = this.parseSingleAriaLabel(el.getAttribute('aria-label') || '');
-                parsed.bonuses.forEach(b => push(b.title, b.value, b.description));
-            });
-            return bonuses;
-        },
-        findSingleNameEl(row) {
-            return row.querySelector('.name-wrap .t-overflow')
-                || row.querySelector('[class*="title___"] [class*="name___"]')
-                || row.querySelector('[class*="name___"]')
-                || row.querySelector('.name-wrap')
-                || row.querySelector('[class*="title___"]')
-                || row.querySelector('h2, h3, [class*="name"], [class*="title"]')
-                || null;
-        },
-        findSingleContainer(img) {
-            // 1.13.14: PROVEN from screenshot, not a guess. The row is
-            // <button class="viewInfoButton___CU0mT"> containing image +
-            // title + pill, inside <div class="itemRow___...">. The pill
-            // lives in the BUTTON, not the row. Tracking the row as
-            // processed is wrong: Torn replaces the button on load, the row
-            // object stays the same, so isProcessed(row) says "done" and
-            // we never re-add the pill to the new button. Clicking forces
-            // a new button, which is why the pill only appeared after a
-            // click. Return the button itself.
-            try {
-                const btn = img && img.closest ? img.closest('button[class*="viewInfoButton"]') : null;
-                if (btn) return btn;
-            } catch (_) {}
-            let best = null, bestScore = -Infinity;
-            let el = img.parentElement;
-            for (let depth = 0; depth < 10 && el && el !== document.body && el !== document.documentElement; depth++) {
-                if (el.id === 'mainContainer' || el.id === 'displayCaseRoot') break;
-                let score = -depth * 0.3;
-                let imgCount = 0;
-                try { imgCount = el.querySelectorAll('img[src*="/images/items/"], img[data-src*="/images/items/"]').length; } catch (_) {}
-                if (imgCount === 1) score += 2;
-                else if (imgCount > 1 && imgCount <= 3) score -= 1;
-                else if (imgCount > 3) score -= 6;
-                try {
-                    if (this.findSingleNameEl(el)) score += 3;
-                    if (el.querySelector('[class*="bonus-attachment-"], [data-bonus-attachment-title]')) score += 2;
-                    if (el.querySelector('[aria-label*="Damage:"], [aria-label*="damage points"]')) score += 2;
-                } catch (_) {}
-                if (score > bestScore) { bestScore = score; best = el; }
-                if (score >= 7 && imgCount === 1) break;
-                el = el.parentElement;
-            }
-            return best || img.parentElement;
-        },
-        findClosestAriaLabel(imgEl) {
-            // 1.13.8: on addListing the picker has many Damage: aria-labels,
-            // so the old fallback (only use it when <=2 images share the ID,
-            // or when there is exactly 1 label on the page) never fired.
-            // Pick the label closest to THIS image in the DOM, by lowest
-            // common ancestor distance, no matter how many labels exist.
-            const hoverEls = Array.from(document.querySelectorAll('[aria-label*="Damage:"], [aria-label*="damage points"], [aria-label*="accuracy points"]'));
-            if (!hoverEls.length || !imgEl) return null;
-            const ancestors = new Map();
-            let el = imgEl, d = 0;
-            while (el && el !== document.documentElement) { ancestors.set(el, d); el = el.parentElement; d++; }
-            let best = null, bestScore = Infinity;
-            hoverEls.forEach(h => {
-                let a = h, hd = 0;
-                while (a && a !== document.documentElement) {
-                    if (ancestors.has(a)) { const score = ancestors.get(a) + hd; if (score < bestScore) { bestScore = score; best = h; } break; }
-                    a = a.parentElement; hd++;
-                }
-            });
-            return best;
-        },
-        showSingleDiag(info) {
-            // 1.13.19: REMOVED. This was the black diagnostic popup
-            // ("OpenMarket single diag (click to dismiss)") that appeared on
-            // viewListing / addListing item pages. It is gone: this method
-            // now only removes a leftover box from an older version, and
-            // never creates one. Diagnostics still go to the console via
-            // debugLog() when Debug logging is on, and to Copy report.
-            try { document.getElementById('om-single-diag')?.remove(); } catch (_) {}
-            return;
-        },
-        renderSingleContainer(container, itemID, imgEl, opts) {
-            const showDiag = false; // 1.13.19: diagnostic popup removed — never show it
-            let stats = this.extractSingleStats(container);
-            // 1.13.15: container is BUTTON.viewInfoButton (name only). Stats live in
-            // sibling DIV.info inside DIV.itemRow. If button has no stats, read the row.
-            if (!stats.damage && !stats.accuracy && !stats.armour) {
-                try {
-                    const rowEl = container.closest ? container.closest('div[class*="itemRow___"]') : null;
-                    if (rowEl && rowEl !== container) {
-                        const rowStats = this.extractSingleStats(rowEl);
-                        if (rowStats.damage || rowStats.accuracy || rowStats.armour) stats = rowStats;
-                    }
-                } catch (_) {}
-            }
-            let bonuses = this.extractSingleBonuses(container);
-            const hasStats = stats.damage || stats.accuracy || stats.armour;
-            // Single-instance fallback: viewListing / selected preview. The
-            // hover element for this one item may be the only Damage: label
-            // on the page, or the one inside this container. Never use this
-            // for a picker list (many instances of the same itemID would all
-            // steal the same stats).
-            if (!hasStats || bonuses.length === 0) {
-                // Closest label to THIS image first (works with picker full of labels).
-                const closest = this.findClosestAriaLabel(imgEl);
-                const parsed = closest ? this.parseSingleAriaLabel(closest.getAttribute('aria-label') || '') : null;
-                if (parsed) {
-                    if (!hasStats && (parsed.damage || parsed.accuracy || parsed.armour)) {
-                        stats = { damage: parsed.damage, accuracy: parsed.accuracy, armour: parsed.armour };
-                    }
-                    if (bonuses.length === 0 && parsed.bonuses.length) bonuses = parsed.bonuses;
-                    else if (parsed.bonuses.length) {
-                        const seen = new Set(bonuses.map(b => (b.title || '').toLowerCase()));
-                        parsed.bonuses.forEach(b => { if (!seen.has((b.title || '').toLowerCase())) { seen.add((b.title || '').toLowerCase()); bonuses.push(b); } });
-                    }
-                }
-            }
-            // 1.13.9: 1.12.30-style leaf scan. Torn sometimes puts stats as
-            // "Damage: 60.19" inside an aria-label or text of a leaf element
-            // whose textContent starts with the label, so parseFloat gives NaN.
-            // Regex-extract the number after the label instead.
-            if (!hasStats) {
-                const leafStats = { damage: 0, accuracy: 0, armour: 0 };
-                container.querySelectorAll('span, div, p, b, strong, td, li, a').forEach(el => {
-                    const combined = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).toLowerCase();
-                    if (combined.length > 500) return; // skip big wrappers, they match everything
-                    const dm = combined.match(/damage\s*:?\s*(\d+(?:\.\d+)?)/) || combined.match(/(\d+(?:\.\d+)?)\s*damage\s*points/);
-                    const am = combined.match(/accuracy\s*:?\s*(\d+(?:\.\d+)?)/) || combined.match(/(\d+(?:\.\d+)?)\s*accuracy\s*points/);
-                    const rm = combined.match(/armou?r\s*:?\s*(\d+(?:\.\d+)?)/) || combined.match(/(\d+(?:\.\d+)?)\s*armou?r\s*points/);
-                    if (dm) leafStats.damage = parseFloat(dm[1]);
-                    if (am) leafStats.accuracy = parseFloat(am[1]);
-                    if (rm) leafStats.armour = parseFloat(rm[1]);
-                });
-                if (leafStats.damage || leafStats.accuracy || leafStats.armour) {
-                    stats = leafStats;
-                }
-            }
-            // 1.13.12 + 1.13.14: stats live in the row, not the button.
-            // The button (viewInfoButton) holds image + title + pill, while
-            // Damage / Accuracy live in sibling cells in itemRow___. Climb
-            // from the button to the row and use the row's stats, but keep
-            // the pill in the button next to the name.
-            if (!stats.damage && !stats.accuracy && !stats.armour) {
-                let up = container.parentElement;
-                for (let d = 0; d < 4 && up && up !== document.body && up !== document.documentElement; d++) {
-                    const upStats = this.extractSingleStats(up);
-                    if (upStats.damage || upStats.accuracy || upStats.armour) { stats = upStats; break; }
-                    // Leaf-style regex on the row as well, in case stats are
-                    // plain text in sibling cells.
-                    let rowLeaf = { damage: 0, accuracy: 0, armour: 0 };
-                    up.querySelectorAll('td, span, div').forEach(el => {
-                        const combined = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).toLowerCase();
-                        if (combined.length > 200) return;
-                        const dm = combined.match(/damage\s*:?\s*(\d+(?:\.\d+)?)/) || combined.match(/(\d+(?:\.\d+)?)\s*damage\s*points/);
-                        const am = combined.match(/accuracy\s*:?\s*(\d+(?:\.\d+)?)/) || combined.match(/(\d+(?:\.\d+)?)\s*accuracy\s*points/);
-                        const rm = combined.match(/armou?r\s*:?\s*(\d+(?:\.\d+)?)/) || combined.match(/(\d+(?:\.\d+)?)\s*armou?r\s*points/);
-                        if (dm) rowLeaf.damage = parseFloat(dm[1]);
-                        if (am) rowLeaf.accuracy = parseFloat(am[1]);
-                        if (rm) rowLeaf.armour = parseFloat(rm[1]);
-                    });
-                    if (rowLeaf.damage || rowLeaf.accuracy || rowLeaf.armour) { stats = rowLeaf; break; }
-                    up = up.parentElement;
-                }
-            }
-            const hasStatsNow = stats.damage || stats.accuracy || stats.armour;
-            // 1.13.6: viewListing / addListing show the quality pill only.
-            // No bonus bars here, so without stats there is nothing to show.
-            if (!hasStatsNow) {
-                try { console.log('[OpenMarket] single: NO STATS, no pill', { itemID, stats, bonuses: bonuses.length, containerTag: container.tagName, containerClass: container.className }); } catch (_) {}
-                if (showDiag) this.showSingleDiag({ images: document.querySelectorAll('img[src*="/images/items/"], img[data-src*="/images/items/"]').length, itemID: String(itemID), inBase: BASE_STATS_MAP[itemID] ? 'yes' : 'no', stats, quality: 'none', pill: 'NOT SHOWN', reason: 'NO STATS found in container or closest aria-label. If the item has no Damage/Accuracy/Armour (consumable, drug, book), no Q pill is expected.', extra: '' });
-                return false;
-            }
-            const key = computeItemKey(itemID, stats, bonuses);
-            // 1.13.11: Torn's React re-renders the row after we add the pill
-            // and wipes our span. The container object is reused, so the old
-            // isProcessed check said "already done" and never re-added it.
-            // Pill only appeared after a click forced a new container.
-            // If the pill is gone, fall through and re-render it.
-            if (isProcessed(container, key)) {
-                // 1.13.14: container is now the BUTTON (viewInfoButton), not
-                // the row. If Torn replaced the button, this is a new object,
-                // isProcessed is false, and we re-render. No click needed.
-                // 1.13.12: a pill inside a HIDDEN container (detail panel not
-                // yet opened) counts as NOT there. On load we rendered into
-                // the detail panel, the click showed it. The list row needs
-                // its own visible pill.
-                const stillThere = container.querySelector('.openmarket-quality-inline, .openmarket-quality-box');
-                const isVisible = (el) => { if (!el) return false; if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false; return getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden'; };
-                if (stillThere && isVisible(stillThere) && isVisible(container)) return true;
-                // else fall through to re-render into the visible container
-            }
-            const nameEl = this.findSingleNameEl(container);
-            let host = nameEl?.parentElement || null;
-            if (!host) {
-                const nameLike = container.querySelector('[class*="name"], [class*="title"], h2, h3');
-                host = (nameLike && nameLike.parentElement) || container;
-            }
-            // Clear stale badge / bars in this container (host may have moved).
-            // Also clear a stale image pill on this container's image wrapper.
-            container.querySelectorAll('.openmarket-single-meta, .openmarket-quality-inline, .openmarket-quality-box').forEach(n => n.remove());
-            if (hasStatsNow) {
-                const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
-                const maxRange = stats.armour > 0 ? 100 : 300;
-                const numericQuality = quality !== null ? parseFloat(quality) : null;
-                const qualityOk = numericQuality !== null && numericQuality >= -10 && numericQuality <= maxRange + 10;
-                if (qualityOk) {
-                    // 1.13.10: Q pill goes NEXT TO THE NAME, where it used
-                    // to be. Not inside the thumbnail, which is only visible
-                    // when the item is clicked / expanded. Image pill is only
-                    // a fallback when no name element is found.
-                    let imageEl = null;
-                    if (imgEl && imgEl.tagName === 'IMG') imageEl = imgEl;
-                    else if (imgEl && imgEl.getAttribute) imageEl = imgEl; // background-image tile
-                    if (!imageEl) {
-                        const imgsInContainer = Array.from(container.querySelectorAll('img[src*="/images/items/"], img[data-src*="/images/items/"]'));
-                        imageEl = imgsInContainer.find(im => this.getSingleImageId(im) === itemID) || imgsInContainer[0] || null;
-                    }
-                    let wrapper = null;
-                    if (imageEl) {
-                        if (imageEl.tagName === 'IMG') {
-                            wrapper = imageEl.closest('[class*="item-plate"], [class*="itemTile"], [class*="img-wrap"], [class*="thumbnail"], [class*="item-cont-wrap"], li, a, div') || imageEl.parentElement;
-                        } else {
-                            wrapper = imageEl; // background-image tile is its own wrapper
-                        }
-                    }
-                    // Name first. Image wrapper only if no name element.
-                    if (nameEl) {
-                        insertQualityInline(nameEl, quality, maxRange);
-                    } else if (wrapper && wrapper.tagName !== 'IMG') {
-                        const staleBox = wrapper.querySelector('.openmarket-quality-box');
-                        if (staleBox) staleBox.remove();
-                        insertQualityBox(wrapper, quality, maxRange);
-                    } else {
-                        // No image wrapper and no name: badge directly in the text host.
-                        const clamped = Math.min(Math.max(parseFloat(quality), 0), maxRange);
-                        const badge = create('span', {
-                            className: 'openmarket-quality-inline',
-                            textContent: `Q ${clamped.toFixed(1)}%`,
-                            style: { marginLeft: '6px', padding: '1px 4px', borderRadius: '3px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap', background: getQualityBoxBg(), color: getQualityColor(clamped, maxRange) }
-                        });
-                        host.appendChild(badge);
-                    }
-                } else {
-                    try { console.log('[OpenMarket] single: quality out of range, no pill', { itemID, stats, quality, maxRange }); } catch (_) {}
-                    if (showDiag) this.showSingleDiag({ images: document.querySelectorAll('img[src*="/images/items/"], img[data-src*="/images/items/"]').length, itemID: String(itemID), inBase: 'yes', stats, quality: String(quality) + ' (max ' + maxRange + ')', pill: 'NOT SHOWN', reason: 'Quality out of range, check BASE_STATS for this item.', extra: '' });
-                }
-            }
-            // 1.13.6: NO bonus bars on viewListing / addListing, per request.
-            // Quality pill only. Bonuses are still extracted above because
-            // they are part of the processed key, but they are not rendered.
-            // Stale bars from 1.13.5 are cleared by the
-            // querySelectorAll('.openmarket-single-meta') above, and by
-            // teardown(), so upgrading removes them without a refresh.
-            markProcessed(container, key);
-            if (showDiag) this.showSingleDiag({ images: document.querySelectorAll('img[src*="/images/items/"], img[data-src*="/images/items/"]').length, itemID: String(itemID), inBase: 'yes', stats, quality: hasStatsNow ? String(calcQuality(itemID, stats.damage, stats.accuracy, stats.armour)) : 'none', pill: 'SHOULD BE NEXT TO NAME', reason: 'Rendered. If you still see no pill, screenshot this box plus the item name area.', extra: '' });
-            return true;
-        },
-        processAll() {
-            if (!isPageActive()) return;
-            // 1.13.10: viewListing can be a LIST (Your items table, one row
-            // per listing, each row needs its own pill next to its name),
-            // while addListing has a picker (40+ thumbnails, no stats) plus
-            // one detail panel. So process EVERY image, but show only ONE
-            // summary diag: picker thumbnails must never overwrite a
-            // successful row's diag with NO STATS.
-            const candidates = [];
-            const pushCandidate = (el, kind) => {
-                const itemID = kind === 'img' ? this.getSingleImageId(el) : (parseInt((String(el.getAttribute('style') || '').match(/\/images\/items\/(\d+)\b/) || [])[1], 10) || null);
-                if (!itemID || !BASE_STATS_MAP[itemID]) return;
-                candidates.push({ el, itemID });
-            };
-            document.querySelectorAll('img[src*="/images/items/"], img[data-src*="/images/items/"]').forEach(img => {
-                // 1.13.12: skip images in hidden panels. A hidden detail image
-                // must not consume the render for this itemID, the visible
-                // list row is the one that needs the pill on load.
-                try { if (img.offsetParent === null && getComputedStyle(img).position !== 'fixed') return; if (getComputedStyle(img).display === 'none' || getComputedStyle(img).visibility === 'hidden') return; } catch (_) {}
-                pushCandidate(img, 'img');
-            });
-            document.querySelectorAll('[style*="/images/items/"]').forEach(el => pushCandidate(el, 'bg'));
-            if (candidates.length === 0) {
-                this.showSingleDiag({ images: 0, itemID: '-', inBase: '-', stats: { damage: 0, accuracy: 0, armour: 0 }, quality: 'none', pill: 'NOT SHOWN', reason: 'NO item images found on this page. Torn may use a different image URL or the item panel has not loaded yet.', extra: '' });
-                return;
-            }
-            // 1.13.16: dedupe by CONTAINER ELEMENT, not by itemID+class.
-            // Old key was tag|itemID|class — all 60 Blowguns share the same
-            // itemID + same BUTTON class, so they collapsed to 1. Axe + 1
-            // Blowgun = "2 rendered". All Lugers collapsed to 1 on addListing.
-            // Same button seen twice (img + bg queries) still dedupes, but
-            // different rows with the same itemID now each get their own pill.
-            const seen = new Set();
-            let rendered = 0, firstSuccess = null, firstFailure = null;
-            for (const cand of candidates) {
-                const container = this.findSingleContainer(cand.el);
-                if (!container) continue;
-                if (seen.has(container)) continue;
-                seen.add(container);
-                const ok = this.renderSingleContainer(container, cand.itemID, cand.el, { quiet: true });
-                if (ok) { rendered++; if (!firstSuccess) firstSuccess = cand; }
-                else if (!firstFailure) firstFailure = cand;
-            }
-            if (rendered > 0) {
-                // One summary diag for the first successful row / detail item.
-                // Do not show a NO STATS diag for picker thumbnails.
-                const c = firstSuccess;
-                // Re-read stats for the diag via a quiet re-render is wasteful;
-                // show counts instead, pill placement is next to the name.
-                this.showSingleDiag({ images: candidates.length, itemID: String(c.itemID), inBase: 'yes', stats: { damage: 0, accuracy: 0, armour: 0 }, quality: 'see pill', pill: 'NEXT TO NAME (' + rendered + ' rendered)', reason: 'Rendered ' + rendered + ' pill(s). Picker thumbnails with no stats are skipped, not shown as failures.', extra: '' });
-            } else if (firstFailure) {
-                this.showSingleDiag({ images: candidates.length, itemID: String(firstFailure.itemID), inBase: 'yes', stats: { damage: 0, accuracy: 0, armour: 0 }, quality: 'none', pill: 'NOT SHOWN', reason: 'NO STATS found for any candidate. If the item has no Damage/Accuracy/Armour (consumable, drug, book), no Q pill is expected.', extra: '' });
-            }
-        },
         init() {
             const self = this;
             const root = document.querySelector('#mainContainer') || document.body;
             const observer = new MutationObserver(() => {
                 self.processAll();
             });
-            observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-src', 'srcset', 'class', 'title', 'aria-label', 'style'] });
+            observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class'] });
             self.observer = observer;
-            // 1.13.12: Torn loads stats async. Poll 60s so a late stats
-            // load still gets a pill without needing a click.
-            let polls = 0;
-            self.pollTimer = setInterval(() => {
-                self.processAll();
-                polls++;
-                if (polls >= 120) { clearInterval(self.pollTimer); self.pollTimer = null; }
-            }, 500);
             self.processAll();
+        },
+        processAll() {
+            if (!isPageActive()) return;
+            const images = document.querySelectorAll('img[src*="/images/items/"]');
+            images.forEach(img => {
+                const container = img.closest('div') || img.parentElement;
+                if (container && container.querySelector('.openmarket-quality-inline')) return;
+                const match = img.src.match(/\/images\/items\/(\d+)\//);
+                if (!match) return;
+                const itemID = parseInt(match[1], 10);
+                if (!BASE_STATS_MAP[itemID]) return;
+
+                let stats = { damage: 0, accuracy: 0, armour: 0 };
+                container.querySelectorAll('span, div, p, b, strong, td').forEach(el => {
+                    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (el.textContent || '').toLowerCase();
+                    const combined = ariaLabel + ' ' + text;
+                    let val = parseFloat(el.textContent);
+                    if (isNaN(val)) val = parseFloat(ariaLabel);
+                    if (!isNaN(val)) {
+                        if (combined.includes('damage')) stats.damage = val;
+                        else if (combined.includes('accuracy')) stats.accuracy = val;
+                        else if (combined.includes('armor') || combined.includes('armour') || combined.includes('defence')) stats.armour = val;
+                    }
+                });
+
+                const quality = calcQuality(itemID, stats.damage, stats.accuracy, stats.armour);
+                if (quality !== null) {
+                    const maxRange = stats.armour > 0 ? 100 : 300;
+                    const numericQuality = parseFloat(quality);
+                    if (numericQuality >= -10 && numericQuality <= maxRange + 10) {
+                        const nameEl = container.querySelector('[class*="title___"] [class*="name___"]')
+                            || container.querySelector('[class*="name___"]');
+                        insertQualityInline(nameEl, quality, maxRange);
+                    }
+                }
+            });
         },
         teardown() {
             if (this.observer) { this.observer.disconnect(); this.observer = null; }
-            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
-            document.querySelectorAll('.openmarket-single-meta').forEach(n => n.remove());
         }
     };
 
@@ -1814,15 +1312,14 @@ getQualityBoxBg(), color: getBonusColor() } }, [span]);
                 if (!itemID || !BASE_STATS_MAP[itemID]) return;
                 const stats = extractStats(el, this.selectors);
                 if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) return;
-                processItem(el, { itemID, stats, bonuses: extractBonusesFromDOM(el, this.selectors), selectors: this.selectors, hideElements:
-[qs(this.selectors.rarityLine, qs(this.selectors.title, el))] });
+                processItem(el, { itemID, stats, bonuses: extractBonusesFromDOM(el, this.selectors), selectors: this.selectors, hideElements: [qs(this.selectors.rarityLine, qs(this.selectors.title, el))] });
             });
         },
         init() {
             const self = this;
             waitForRoot(this.selectors.root, (root) => {
                 self.pendingTimeoutId = null;
-                const observer = new MutationObserver(debouncedProcessAll(() => self.processAll()));
+                const observer = new MutationObserver(() => self.processAll());
                 observer.observe(root, { childList: true, subtree: true });
                 self.observer = observer;
                 self.processAll();
@@ -1843,8 +1340,7 @@ getQualityBoxBg(), color: getBonusColor() } }, [span]);
                 if (!BASE_STATS_MAP[itemID]) return;
                 const stats = extractStats(el, this.selectors);
                 if (stats.damage === 0 && stats.accuracy === 0 && stats.armour === 0) return;
-                processItem(el, { itemID, stats, bonuses: extractBonusesFromDOM(el, this.selectors), selectors: this.selectors, insertBefore:
-qs(this.selectors.stockElement, qs(this.selectors.title, el)), hideElements: [qs(this.selectors.stockElement, qs(this.selectors.title, el))] });
+                processItem(el, { itemID, stats, bonuses: extractBonusesFromDOM(el, this.selectors), selectors: this.selectors, insertBefore: qs(this.selectors.stockElement, qs(this.selectors.title, el)), hideElements: [qs(this.selectors.stockElement, qs(this.selectors.title, el))] });
             });
         },
         init() {
@@ -1854,7 +1350,7 @@ qs(this.selectors.stockElement, qs(this.selectors.title, el)), hideElements: [qs
                 const outerObserver = new MutationObserver((_, obs) => {
                     const container = qs(self.selectors.itemsContainer, root);
                     if (!container) return;
-                    const innerObserver = new MutationObserver(debouncedProcessAll(() => self.processAll()));
+                    const innerObserver = new MutationObserver(() => self.processAll());
                     innerObserver.observe(container, { childList: true, subtree: true });
                     self.innerObserver = innerObserver;
                     self.processAll();
@@ -1874,8 +1370,7 @@ qs(this.selectors.stockElement, qs(this.selectors.title, el)), hideElements: [qs
             let damage = 0, accuracy = 0, armour = 0;
             el.querySelectorAll('i, svg, [class*="icon"], [class*="stat"]').forEach(icon => {
                 const indicators = getIconIndicators(icon);
-                if (!indicators.includes('damage') && !indicators.includes('accuracy') && !indicators.includes('armor') && !indicators.includes('armour'))
-return;
+                if (!indicators.includes('damage') && !indicators.includes('accuracy') && !indicators.includes('armor') && !indicators.includes('armour')) return;
                 let valueEl = icon.nextElementSibling;
                 if (!valueEl || isNaN(parseFloat(valueEl.textContent))) valueEl = icon.parentElement?.querySelector('span, div, b, strong, [class*="value"]');
                 if (!valueEl || isNaN(parseFloat(valueEl.textContent))) valueEl = icon.parentElement?.nextElementSibling;
@@ -1886,9 +1381,7 @@ return;
                 else if (indicators.includes('armor') || indicators.includes('armour')) armour = val;
             });
             if (damage === 0 && accuracy === 0 && armour === 0) {
-                const fallback = extractStats(el, { statsContainer: '[class*="infoBonuses"], [class*="properties"], .item-hover', statEntry:
-'[class*="container"], [class*="property"], [class*="entry"], span, div', statValue: 'span, div, [class*="value"]', statIcon: 'i, svg, [class*="icon"]',
-statTypeElement: 'icon', statTypeAttribute: 'className' });
+                const fallback = extractStats(el, { statsContainer: '[class*="infoBonuses"], [class*="properties"], .item-hover', statEntry: '[class*="container"], [class*="property"], [class*="entry"], span, div', statValue: 'span, div, [class*="value"]', statIcon: 'i, svg, [class*="icon"]', statTypeElement: 'icon', statTypeAttribute: 'className' });
                 damage = fallback.damage; accuracy = fallback.accuracy; armour = fallback.armour;
             }
             return { damage, accuracy, armour };
@@ -1920,13 +1413,12 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
                 if (!trimmed || /^Details:|^Amount:|^Rarity progress:|^Damage:|^Accuracy:|^Armou?r:/i.test(trimmed)) return;
                 const bonusMatch = trimmed.match(/^([^:]+):\s*(.+)$/);
                 if (bonusMatch) {
-                    const valueMatch = bonusMatch[2].match(/(\d+(?:\.\d+)?)/);
-                    pushBonus(bonusMatch[1], valueMatch ? valueMatch[1] : null, bonusMatch[2]);
+                    pushBonus(bonusMatch[1], parseBonusValue(bonusMatch[2]), bonusMatch[2]);
                 }
             });
             // Full-text sweep — catches "Impenetrable: 20% decreased..." even mid-sentence after Armour:
             for (const m of text.matchAll(/([A-Z][a-zA-Z](?:[a-zA-Z\s\-]{0,28}[a-zA-Z])?):\s*(\d+(?:\.\d+)?)(%|)/g)) {
-                pushBonus(m[1], m[2], m[0]);
+                pushBonus(m[1], parseBonusValue(m[0]), m[0]);
             }
             return result;
         },
@@ -1940,7 +1432,8 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
                 const c = String(cls || '').toLowerCase();
                 // Only skip pure stat value icons, not protection / resist bonuses
                 if (/\b(item-damage|item-accuracy|item-armou?r|item-defense|item-defence)\b/.test(c)) return;
-                const tmp = parseBonusTitleAttr(titleAttr);
+                const tmp = create('div');
+                tmp.innerHTML = titleAttr;
                 let title = (qs('b', tmp)?.textContent || '').trim();
                 if (!title) title = (tmp.textContent || '').split(/\n|\r|<br/i)[0].trim();
                 if (!title || NON.test(title) || /^item\s/i.test(title)) return;
@@ -1952,10 +1445,9 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
                     return;
                 }
                 const descText = (tmp.textContent || '').replace(title, '').trim();
-                const valueMatch = descText.match(/(\d+(?:\.\d+)?)/);
                 bonuses.push({
                     title,
-                    value: valueMatch ? parseFloat(valueMatch[1]) : null,
+                    value: parseBonusValue(descText),
                     description: descText
                 });
             };
@@ -1966,7 +1458,7 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
             ).forEach(node => {
                 addFromTitle(
                     node.getAttribute('title') || node.getAttribute('data-bonus-attachment-title') || '',
-                    getClassString(node)
+                    node.className
                 );
             });
             return bonuses;
@@ -2011,19 +1503,19 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
                     const bonusContainer = create('div', {
                         className: 'om-displaycase-bonuses' + (isDouble ? ' om-displaycase-double' : '')
                     });
-                    bonuses.slice(0, 2).forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus, el, { displayCase: true })));
-                    // Replace rarity progress + hide star/rarity icon; keep x1 for grid line
+                    bonuses.slice(0, 2).forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus, el)));
+                    // DO NOT TOUCH: display case bonus bar placement (stable as of v1.12.40)
+                    // Dual bars go in the rarity slot. x1 is hidden for dual so the grid stays aligned.
                     const rarityEl = row?.querySelector('.b-item-rarity');
                     if (rarityEl) {
                         const progress = rarityEl.querySelector('.progressbar-wrap');
-                        if (progress) progress.style.display = 'none';
-                        // Star / rarity icon pushes the bar down — hide it
-                        rarityEl.querySelectorAll('i').forEach(i => { i.style.display = 'none'; });
+                        if (progress) { progress.style.display = 'none'; progress.style.height = '0'; }
+                        rarityEl.querySelectorAll('i').forEach(i => { i.style.display = 'none'; i.style.height = '0'; });
                         rarityEl.appendChild(bonusContainer);
                     } else {
                         row?.appendChild(bonusContainer);
                     }
-                    // Single: keep x1 for grid line. Double: hide x1 so two bars fit without stretching the row
+                    // Single: keep x1 for grid line. Dual: hide x1 so two bars fit without stretching
                     const amountEl = row?.querySelector('.b-item-amount');
                     if (amountEl) {
                         if (isDouble) amountEl.classList.add('om-displaycase-amount-hidden');
@@ -2045,15 +1537,15 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
                 if (!li || li.querySelector('.om-displaycase-bonuses')) return;
                 const titleAttr = node.getAttribute('title') || '';
                 if (!titleAttr) return;
-                const cls = getClassString(node).toLowerCase();
+                const cls = String(node.className || '').toLowerCase();
                 if (/\b(item-damage|item-accuracy|item-armou?r|item-defense|item-defence)\b/.test(cls)) return;
-                const tmp = parseBonusTitleAttr(titleAttr);
+                const tmp = create('div');
+                tmp.innerHTML = titleAttr;
                 let title = (qs('b', tmp)?.textContent || '').trim();
                 if (!title) title = (tmp.textContent || '').split(/\n|\r/)[0].trim();
                 if (!title || /^(primary|secondary|melee|temporary|defensive|item defence|item defense|defence|defense|armour|armor)$/i.test(title)) return;
                 const descText = (tmp.textContent || '').replace(title, '').trim();
-                const valueMatch = descText.match(/(\d+(?:\.\d+)?)/);
-                const bonus = { title, value: valueMatch ? parseFloat(valueMatch[1]) : null, description: descText };
+                const bonus = { title, value: parseBonusValue(descText), description: descText };
                 if (!byLi.has(li)) byLi.set(li, []);
                 const list = byLi.get(li);
                 if (!list.some(b => (b.title || '').toLowerCase() === title.toLowerCase())) list.push(bonus);
@@ -2064,12 +1556,12 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
                 const bonusContainer = create('div', {
                     className: 'om-displaycase-bonuses' + (isDouble ? ' om-displaycase-double' : '')
                 });
-                bonuses.slice(0, 2).forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus, li, { displayCase: true })));
+                bonuses.slice(0, 2).forEach(bonus => bonusContainer.appendChild(createBonusEl(bonus, li)));
                 const rarityEl = li.querySelector('.b-item-rarity');
                 if (rarityEl) {
                     const progress = rarityEl.querySelector('.progressbar-wrap');
-                    if (progress) progress.style.display = 'none';
-                    rarityEl.querySelectorAll('i').forEach(i => { i.style.display = 'none'; });
+                    if (progress) { progress.style.display = 'none'; progress.style.height = '0'; }
+                    rarityEl.querySelectorAll('i').forEach(i => { i.style.display = 'none'; i.style.height = '0'; });
                     rarityEl.appendChild(bonusContainer);
                 } else {
                     li.appendChild(bonusContainer);
@@ -2093,7 +1585,17 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
             });
             observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'loaded', 'class', 'title'] });
             self.observer = observer;
-            // 1.12.29: synthetic mouseenter removed. Bonuses appear after real user hover.
+            // Force-load bonus data on ALL tiles (not only those missing aria-label)
+            setTimeout(() => {
+                qsa(self.selectors.tile, root).forEach((el, i) => {
+                    const hoverEl = qs('.item-hover', el);
+                    if (!hoverEl) return;
+                    setTimeout(() => {
+                        el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                        hoverEl.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                    }, i * 60);
+                });
+            }, 400);
             let polls = 0;
             self.pollTimer = setInterval(() => {
                 self.processAll();
@@ -2121,19 +1623,18 @@ statTypeElement: 'icon', statTypeAttribute: 'className' });
         },
         extractInventoryBonuses(el) {
             const weaponBonuses = [], modBonuses = [], seenWeapon = new Set(), seenMod = new Set();
-            const pushBonus = (target, seen, title, value, description) => { if (title && !seen.has(title.toLowerCase())) { seen.add(title.toLowerCase());
-target.push({ title, value, description }); } };
+            const pushBonus = (target, seen, title, value, description) => { if (title && !seen.has(title.toLowerCase())) { seen.add(title.toLowerCase()); target.push({ title, value, description }); } };
             qsa(this.selectors.bonusIcons, el).forEach(icon => {
                 const isMod = !!icon.closest('li[data-attachments-itemid]');
                 let titleAttr = icon.getAttribute(this.selectors.bonusTitleAttr) || icon.getAttribute('title') || icon.getAttribute('aria-label') || '';
                 let descAttr = icon.getAttribute(this.selectors.bonusDescAttr) || icon.getAttribute('data-title') || '';
                 if (!titleAttr && !descAttr) return;
-                const tmp = parseBonusTitleAttr(titleAttr);
+                const tmp = create('div'); tmp.innerHTML = titleAttr;
                 const title = qs('b', tmp)?.textContent || tmp.textContent?.split(/[:<\n]/)[0]?.trim() || '';
                 const descText = (tmp.textContent || '').replace(title, '').trim() || descAttr;
-                const valueMatch = descText.match(NUMBER_REGEX) || titleAttr.match(NUMBER_REGEX);
-                if (isMod) pushBonus(modBonuses, seenMod, title, valueMatch ? parseFloat(valueMatch[1]) : null, descText || titleAttr);
-                else pushBonus(weaponBonuses, seenWeapon, title, valueMatch ? parseFloat(valueMatch[1]) : null, descText || titleAttr);
+                const value = parseBonusValue(descText || titleAttr);
+                if (isMod) pushBonus(modBonuses, seenMod, title, value, descText || titleAttr);
+                else pushBonus(weaponBonuses, seenWeapon, title, value, descText || titleAttr);
             });
             return { weaponBonuses, modBonuses };
         },
@@ -2143,8 +1644,7 @@ target.push({ title, value, description }); } };
             let damage = 0, accuracy = 0, armour = 0;
             qsa('i, svg, [class*="icon"]', el).forEach(icon => {
                 const indicators = getIconIndicators(icon);
-                if (!indicators.includes('damage') && !indicators.includes('accuracy') && !indicators.includes('armor') && !indicators.includes('armour') &&
-!indicators.includes('defence') && !indicators.includes('defense')) return;
+                if (!indicators.includes('damage') && !indicators.includes('accuracy') && !indicators.includes('armor') && !indicators.includes('armour') && !indicators.includes('defence') && !indicators.includes('defense')) return;
                 let valueEl = icon.nextElementSibling;
                 if (!valueEl || isNaN(parseFloat(valueEl.textContent))) valueEl = icon.parentElement?.querySelector('span, div, b, strong, [class*="value"]');
                 if (!valueEl || isNaN(parseFloat(valueEl.textContent))) valueEl = icon.parentElement?.nextElementSibling;
@@ -2152,8 +1652,7 @@ target.push({ title, value, description }); } };
                 if (val <= 0) return;
                 if (indicators.includes('damage')) damage = val;
                 else if (indicators.includes('accuracy')) accuracy = val;
-                else if (indicators.includes('armor') || indicators.includes('armour') || indicators.includes('defence') || indicators.includes('defense'))
-armour = val;
+                else if (indicators.includes('armor') || indicators.includes('armour') || indicators.includes('defence') || indicators.includes('defense')) armour = val;
             });
             return { damage, accuracy, armour };
         },
@@ -2177,19 +1676,14 @@ armour = val;
                 const titleEl = qs('.name-wrap, .title-wrap .name, .name-wrap .name, .title-wrap .t-overflow', el) || qs(this.selectors.title, el);
                 if (titleEl) {
                     const existingMeta = qs('.openmarket-inventory-meta', el); if (existingMeta) existingMeta.remove();
-                    const meta = create('span', { className: 'openmarket-inventory-meta', style: { display: 'inline-flex', alignItems: 'center', flexWrap:
-'wrap', gap: '4px 8px', marginLeft: '8px', verticalAlign: 'middle', fontSize: '11px', lineHeight: '1.3', fontWeight: 'bold' } });
-                    if (qualityOk) meta.appendChild(create('span', { className: 'openmarket-inventory-quality', textContent: `Q ${numericQuality.toFixed(1)}%`,
-style: { color: getQualityColor(Math.min(Math.max(numericQuality, 0), maxRange), maxRange), padding: '0 4px', borderRadius: '3px', background:
-getQualityBoxBg() } }));
+                    const meta = create('span', { className: 'openmarket-inventory-meta', style: { display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px 8px', marginLeft: '8px', verticalAlign: 'middle', fontSize: '11px', lineHeight: '1.3', fontWeight: 'bold' } });
+                    if (qualityOk) meta.appendChild(create('span', { className: 'openmarket-inventory-quality', textContent: `Q ${numericQuality.toFixed(1)}%`, style: { color: getQualityColor(Math.min(Math.max(numericQuality, 0), maxRange), maxRange), padding: '0 4px', borderRadius: '3px', background: getQualityBoxBg() } }));
                     if (weaponBonuses.length > 0) {
-                        const bonusContainer = create('span', { className: 'openmarket-bonuses openmarket-inventory-bonuses', title: weaponBonuses.map(b => getBonusTooltipText(b)).join('\n'), style: { display: 'inline-flex', gap: '3px',
-alignItems: 'center' } });
+                        const bonusContainer = create('span', { className: 'openmarket-bonuses openmarket-inventory-bonuses', title: weaponBonuses.map(b => b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title).join(' · '), style: { display: 'inline-flex', gap: '3px', alignItems: 'center' } });
                         weaponBonuses.forEach((bonus) => { bonusContainer.appendChild(createBonusEl(bonus, el)); });
                         meta.appendChild(bonusContainer);
                     }
-                    if (modBonuses.length > 0) meta.appendChild(create('span', { textContent: 'ⓘ', title: modBonuses.map(b => getBonusTooltipText(b)).join('\n'), style: { marginLeft: '3px', cursor: 'help', opacity: '0.75',
-fontSize: '11px' } }));
+                    if (modBonuses.length > 0) meta.appendChild(create('span', { textContent: 'ⓘ', title: modBonuses.map(b => b.value != null ? `${b.value}${getUnitFromDescription(b.description, b.value)} ${b.title}` : b.title).join(' · '), style: { marginLeft: '3px', cursor: 'help', opacity: '0.75', fontSize: '11px' } }));
                     if (meta.childNodes.length > 0) titleEl.appendChild(meta);
                 }
             });
@@ -2197,11 +1691,10 @@ fontSize: '11px' } }));
         init() {
             const self = this;
             const root = qs('.items-wrap') || qs('#mainContainer') || document.body;
-            const observer = new MutationObserver(debouncedProcessAll(() => self.processAll()));
+            const observer = new MutationObserver(() => self.processAll());
             observer.observe(root, { childList: true, subtree: true });
             self.observer = observer;
-            let polls = 0; self.pollTimer = setInterval(() => { self.processAll(); polls++; if (polls >= 20) { clearInterval(self.pollTimer); self.pollTimer =
-null; } }, 500);
+            let polls = 0; self.pollTimer = setInterval(() => { self.processAll(); polls++; if (polls >= 20) { clearInterval(self.pollTimer); self.pollTimer = null; } }, 500);
             self.processAll();
         },
         teardown() {
@@ -2250,8 +1743,7 @@ null; } }, 500);
                         if (!Number.isFinite(value) || value <= 0) return;
                         if (indicators.includes('damage')) stats.damage = value;
                         else if (indicators.includes('accuracy')) stats.accuracy = value;
-                        else if (indicators.includes('armour') || indicators.includes('armor') || indicators.includes('defence') ||
-indicators.includes('defense')) stats.armour = value;
+                        else if (indicators.includes('armour') || indicators.includes('armor') || indicators.includes('defence') || indicators.includes('defense')) stats.armour = value;
                     });
 
                     if (stats.damage || stats.accuracy || stats.armour) {
@@ -2310,11 +1802,11 @@ indicators.includes('defense')) stats.armour = value;
                     const titleAttr = icon.getAttribute('title') || icon.getAttribute('data-bonus-attachment-title') || '';
                     if (!titleAttr) return;
                     // Skip pure stat icons
-                    const cls = getClassString(icon).toLowerCase();
-                    if (cls.includes('damage') || cls.includes('accuracy') || cls.includes('armour') || cls.includes('armor') || cls.includes('defence') ||
-cls.includes('defense')) return;
+                    const cls = String(icon.className || '').toLowerCase();
+                    if (cls.includes('damage') || cls.includes('accuracy') || cls.includes('armour') || cls.includes('armor') || cls.includes('defence') || cls.includes('defense')) return;
 
-                    const tmp = parseBonusTitleAttr(titleAttr);
+                    const tmp = create('div');
+                    tmp.innerHTML = titleAttr;
                     const title = (qs('b', tmp)?.textContent || tmp.textContent || '').trim();
                     if (!title || !isRealBonus(title)) return;
                     if (FIXED_BONUSES.includes(title)) {
@@ -2322,10 +1814,9 @@ cls.includes('defense')) return;
                         return;
                     }
                     const descText = tmp.textContent.replace(title, '').trim();
-                    const valueMatch = descText.match(/(\d+(?:\.\d+)?)/);
                     bonuses.push({
                         title,
-                        value: valueMatch ? parseFloat(valueMatch[1]) : null,
+                        value: parseBonusValue(descText),
                         description: descText
                     });
                 });
@@ -2349,10 +1840,9 @@ cls.includes('defense')) return;
                         const title = raw.charAt(0).toUpperCase() + raw.slice(1);
                         if (!isRealBonus(title)) return;
                         const titleAttr = icon.getAttribute('title') || '';
-                        const valueMatch = titleAttr.match(/(\d+(?:\.\d+)?)/);
                         bonuses.push({
                             title,
-                            value: valueMatch ? parseFloat(valueMatch[1]) : null,
+                            value: parseBonusValue(titleAttr),
                             description: titleAttr
                         });
                     });
@@ -2418,7 +1908,7 @@ cls.includes('defense')) return;
                     const valueEl = icon.parentElement?.querySelector('span');
                     const value = parseFloat(valueEl?.textContent);
                     if (!Number.isFinite(value) || value <= 0) return;
-                    const cls = getClassString(icon).toLowerCase();
+                    const cls = String(icon.className).toLowerCase();
                     if (cls.includes('damage')) stats.damage = value;
                     else if (cls.includes('accuracy')) stats.accuracy = value;
                     else if (cls.includes('armour') || cls.includes('armor') || cls.includes('defence') || cls.includes('defense')) stats.armour = value;
@@ -2466,10 +1956,8 @@ cls.includes('defense')) return;
 
     function teardownCurrentHandler() {
         if (!currentHandler) return;
-        try { cleanupOpenMarketDOM(); } catch (e) {}
         if (typeof currentHandler.teardown === 'function') currentHandler.teardown();
-        else ['observer', 'outerObserver', 'innerObserver'].forEach(key => { if (currentHandler[key]) { currentHandler[key].disconnect(); currentHandler[key] =
-null; } });
+        else ['observer', 'outerObserver', 'innerObserver'].forEach(key => { if (currentHandler[key]) { currentHandler[key].disconnect(); currentHandler[key] = null; } });
         if (currentHandler.pendingTimeoutId) { clearTimeout(currentHandler.pendingTimeoutId); currentHandler.pendingTimeoutId = null; }
 
         resetBonusSort();
@@ -2486,7 +1974,7 @@ null; } });
             bazaarAdd: CONFIG.enableBazaar,
             displayCase: CONFIG.enableDisplayCase,
             inventory: CONFIG.enableInventory,
-            factionArmoury: CONFIG.enableFactionArmoury
+            factionArmoury: true
         };
         if (!type || !enabledMap[type]) { teardownCurrentHandler(); currentHandler = null; return; }
         const nextHandler = handlers[type];
@@ -2501,23 +1989,10 @@ null; } });
 
     function setupRouteWatcher() {
         const originalPushState = history.pushState;
-        window.__omOriginalPushState = originalPushState;
         const originalReplaceState = history.replaceState;
-        window.__omOriginalReplaceState = originalReplaceState;
-        history.pushState = function (...args) { const result = originalPushState.apply(this, args); window.dispatchEvent(new
-Event('openmarket-locationchange')); return result; };
-        history.replaceState = function (...args) { const result = originalReplaceState.apply(this, args); window.dispatchEvent(new
-Event('openmarket-locationchange')); return result; };
+        history.pushState = function (...args) { const result = originalPushState.apply(this, args); window.dispatchEvent(new Event('openmarket-locationchange')); return result; };
+        history.replaceState = function (...args) { const result = originalReplaceState.apply(this, args); window.dispatchEvent(new Event('openmarket-locationchange')); return result; };
         ['popstate', 'hashchange', 'openmarket-locationchange'].forEach(evt => { window.addEventListener(evt, () => activateHandlerForCurrentUrl()); });
-        // 1.13.11: Torn's SPA can navigate with a history reference it
-        // captured before we patched pushState, so no event fires on page
-        // load and the handler starts late, only after a click. Poll the
-        // URL so a missed navigation is caught within 500ms.
-        let lastUrl = window.location.href;
-        setInterval(() => {
-            const now = window.location.href;
-            if (now !== lastUrl) { lastUrl = now; activateHandlerForCurrentUrl(); }
-        }, 500);
     }
 
     function interceptFetchAndXHR() {
@@ -2540,7 +2015,6 @@ Event('openmarket-locationchange')); return result; };
         };
 
         const originalFetch = window.fetch;
-        window.__omOriginalFetch = originalFetch;
         window.fetch = async (...args) => {
             const response = await originalFetch(...args);
             const url = args[0] instanceof Request ? args[0].url : String(args[0]);
@@ -2564,7 +2038,6 @@ Event('openmarket-locationchange')); return result; };
         };
 
         const originalXHROpen = XMLHttpRequest.prototype.open;
-        window.__omOriginalXHROpen = originalXHROpen;
         XMLHttpRequest.prototype.open = function(method, url) {
             if (typeof url === 'string' && url.includes('sid=iMarket')) {
                 this.addEventListener('load', function() {
@@ -2602,36 +2075,18 @@ Event('openmarket-locationchange')); return result; };
     line-height: 1.2 !important;
     box-sizing: border-box !important;
 }
-/* Display case: 1.13.2 restore of 1.12.27's look (100px centered bars).
-   What the screenshot shows wrong with 1.13.0's bars, and what this fixes:
-   - Bars looked full-width and text looked clipped top/bottom. Cause:
-     the generic .om-bonus-bar keeps a 1px border + box-sizing:border-box,
-     so a 13px bar has only 11px of inner height for a 9-10px label, and
-     the 1.12.29 inline textShadow smeared the label. Fix: border none
-     on display-case bars, line-height == bar height, no shadow.
-   - Fallback container (.b-item-wrap > .om-displaycase-bonuses, used
-     when .b-item-rarity is not found in time) had no width/centering
-     CSS in 1.12.27-1.13.0, so its bars could stretch full-width.
-     Fix: same 100px centered flex CSS as the rarity-row container.
-   - #displayCaseRoot prefix raises specificity above Torn's own
-     .b-item-rarity rules, so Torn cannot stretch the bars to 100%.
-   - Container stays pointer-events:none (tile clicks pass through),
-     bars are pointer-events:auto so the Range tooltip actually fires.
-     1.12.27 had pointer-events:none inherited by the bars, so hover
-     was dead; 1.12.32 fixed that, 1.13.0 lost it. Restored here
-     without 1.12.32's fixed-height rarity row, which is not needed
-     once the bars are 100px and the x1 spacer is kept as in 1.12.27. */
-/* 1.13.4: REVERTED 1.13.3 plate shrink. It broke the display case:
-   Torn positions the stat pills (60.19 / 61.14) inside the bottom edge
-   of .item-plate. Shrinking the plate to height:auto pulled the rarity
-   row (bonus bars) up OVER the stat pills. 1.12.28 had NO .item-plate /
-   .b-item-wrap / .b-item-rarity CSS at all, and that was the known-good
-   geometry: stat pills inside the plate, bars directly below it, 1px
-   gap between the two bars. Do NOT touch the plate again. The gap
-   between Q pill and bars is Torn's plate height, not ours to close. */
-#displayCaseRoot .b-item-rarity .om-displaycase-bonuses,
-.b-item-rarity .om-displaycase-bonuses,
-.b-item-wrap > .om-displaycase-bonuses {
+/*
+ * ========================================================================
+ * DISPLAY CASE BONUS BARS — DO NOT TOUCH
+ * ========================================================================
+ * Dual bars live in the rarity slot (normal flow). x1 is hidden with a
+ * 14px spacer. Absolute positioning and forced tile heights break the grid.
+ * This layout is stable as of v1.12.40. Do not modify without re-testing
+ * both single-bonus and dual-bonus display case tiles.
+ * ========================================================================
+ */
+/* Dual bars in the rarity slot (normal flow, not absolute) */
+.b-item-rarity .om-displaycase-bonuses {
     display: flex !important;
     flex-direction: column !important;
     gap: 1px !important;
@@ -2639,54 +2094,32 @@ Event('openmarket-locationchange')); return result; };
     justify-content: center !important;
     width: 100% !important;
     margin: 0 !important;
-    margin-top: 0 !important;
-    pointer-events: none !important;
+    padding: 0 !important;
+    pointer-events: auto !important;
 }
-#displayCaseRoot .b-item-rarity .om-displaycase-bonuses .om-bonus-bar,
-.b-item-rarity .om-displaycase-bonuses .om-bonus-bar,
-.b-item-wrap > .om-displaycase-bonuses .om-bonus-bar {
+.b-item-rarity .om-displaycase-bonuses .om-bonus-bar {
     width: 100px !important;
     min-width: 100px !important;
     max-width: 100px !important;
-    height: 14px !important;
-    line-height: 14px !important;
+    height: 12px !important;
+    line-height: 12px !important;
     margin: 0 auto !important;
     font-size: 10px !important;
-    border: none !important;
     border-radius: 3px !important;
     box-shadow: none !important;
+    cursor: help !important;
     pointer-events: auto !important;
-    overflow: hidden !important;
 }
-/* 1.13.5: double-bonus gap fix, from the diff you showed. The parent
-   container has gap:1px, so two 13px bars took 13+1+13 = 27px. This
-   makes the double container gap:0 and the bars 11px tall, so two
-   bars take 11+0+11 = 22px, 5px shorter, with no plate change. Unlike
-   the 1.13.3 plate shrink, this only touches our own bars inside the
-   rarity row, below the plate, so it cannot pull the bars over the
-   stat pills. Font stays 9px, line-height 11px still leaves 2px. */
-#displayCaseRoot .b-item-rarity .om-displaycase-bonuses.om-displaycase-double,
-.b-item-rarity .om-displaycase-bonuses.om-displaycase-double,
-.b-item-wrap > .om-displaycase-bonuses.om-displaycase-double {
-    gap: 0 !important;
-}
-#displayCaseRoot .b-item-rarity .om-displaycase-bonuses.om-displaycase-double .om-bonus-bar,
-.b-item-rarity .om-displaycase-bonuses.om-displaycase-double .om-bonus-bar,
-.b-item-wrap > .om-displaycase-bonuses.om-displaycase-double .om-bonus-bar {
+.b-item-rarity .om-displaycase-bonuses.om-displaycase-double .om-bonus-bar {
     height: 11px !important;
     line-height: 11px !important;
     font-size: 9px !important;
 }
-#displayCaseRoot .b-item-rarity .om-displaycase-bonuses .om-bonus-text,
-.b-item-rarity .om-displaycase-bonuses .om-bonus-text,
-.b-item-wrap > .om-displaycase-bonuses .om-bonus-text {
-    padding: 0 4px !important;
-    line-height: inherit !important;
-    text-shadow: none !important;
-    display: block !important;
-    overflow: hidden !important;
+.b-item-rarity .om-displaycase-bonuses .om-bonus-text {
+    padding: 0 3px !important;
+    pointer-events: none !important;
 }
-/* Dual-bonus: hide x1 text but keep spacer so the grid divider remains */
+/* Dual-bonus: hide x1 text but keep a 14px spacer so the grid line stays */
 .om-displaycase-amount-hidden {
     visibility: hidden !important;
     height: 14px !important;
@@ -2698,6 +2131,7 @@ Event('openmarket-locationchange')); return result; };
     margin: 0 !important;
     padding: 0 !important;
 }
+/* END DISPLAY CASE BONUS BARS — DO NOT TOUCH */
 .openmarket-inventory-quality { white-space: nowrap; }
 .openmarket-inventory-bonuses {
     max-width: 240px;
@@ -2775,61 +2209,18 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
     margin: 0;
 }
 
-/* viewListing / addListing: quality pill only next to the name, no bonus bars (1.13.6).
-   1.13.3 re-adds this (lost when 1.13.x was branched from an older base).
-   Bars are compact here (single pages are narrow) — same colors/fill logic.
-   The main item image is a bit smaller to fit both bars, like the item
-   market grid does: .openmarket-single-shrunk is added to the image
-   wrapper by itemMarketSingle. Picker thumbnails never get the class,
-   because they have no stats nearby and are skipped. */
-.openmarket-single-meta {
-    display: inline-flex !important;
-    flex-wrap: wrap !important;
-    gap: 3px !important;
-    align-items: center !important;
-    vertical-align: middle !important;
-    max-width: 100% !important;
-    overflow: hidden !important;
-    margin-top: 4px !important;
-}
-.openmarket-single-meta .om-bonus-bar {
-    width: 90px !important;
-    min-width: 90px !important;
-    max-width: 90px !important;
-    height: 16px !important;
-    line-height: 16px !important;
-    font-size: 10px !important;
-    pointer-events: auto !important;
-    flex-shrink: 0 !important;
-}
-.openmarket-single-shrunk img {
-    max-width: 88% !important;
-    height: auto !important;
-}
-
-/* Quality badge: compact, no layout shift — 1.13.16: never stretch.
-   If this span ever lands as a direct grid/flex child again, align-self +
-   height:auto stop it becoming a tall white square. */
+/* Quality badge: compact, no layout shift */
 .openmarket-quality-inline {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    align-self: center !important;
-    flex: 0 0 auto !important;
+    display: inline-block !important;
     vertical-align: middle !important;
     margin-left: 4px !important;
     padding: 1px 4px !important;
     border-radius: 3px !important;
     font-size: 10px !important;
     line-height: 1.2 !important;
-    height: auto !important;
-    max-height: 18px !important;
-    width: auto !important;
-    max-width: none !important;
     font-weight: bold !important;
     white-space: nowrap !important;
     flex-shrink: 0 !important;
-    overflow: visible !important;
 }
 
 /*
@@ -3147,8 +2538,6 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
 
         const clone = donor.cloneNode(true);
         clone.setAttribute('data-om-filter-slider', key);
-        clone.removeAttribute('id');
-        clone.querySelectorAll('[id]').forEach(n => n.removeAttribute('id'));
         clone.style.flex = '';
         clone.style.minWidth = '0';
         clone.style.width = '100%';
@@ -3178,7 +2567,7 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
         const segs = Array.from(clone.querySelectorAll('[class*="trackSegment"]'));
         let inRangeCls = '';
         if (segs.length) {
-            const parts = getClassString(segs[0]).split(/\s+/);
+            const parts = String(segs[0].className).split(/\s+/);
             for (const p of parts) { if (p.indexOf('inRange') === 0) { inRangeCls = p; break; } }
         }
 
@@ -3236,7 +2625,7 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
         }
         qualitySliderUI = buildRangeSlider({
             key: 'quality',
-            label: 'Quality (highlight)',
+            label: 'Quality',
             min: 0,
             max: filterState.qualityMaxRange,
             initialLo: filterState.qualityLo,
@@ -3342,14 +2731,15 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
         if (filterSliderRow && filterSliderRow.parentElement) filterSliderRow.remove();
         filterSliderRow = null;
         filterSliderNativeRow = null;
+
         document.querySelectorAll('.openmarket-filter-hit').forEach(t => t.classList.remove('openmarket-filter-hit'));
     }
-
 
     function scanBonusFilterSelection(menu) {
         const rows = Array.from(menu.querySelectorAll('li[role="option"]'));
         const selectedIDs = new Set();
         const names = new Map();
+
         rows.forEach(li => {
             if (li.getAttribute('aria-selected') !== 'true') return;
             const nameEl = li.querySelector('[class*="title___"]');
@@ -3362,7 +2752,6 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
             selectedIDs.add(bonusID);
             names.set(bonusID, name);
         });
-
 
         let changed = false;
         for (const bonusID of Array.from(filterState.bonuses.keys())) {
@@ -3395,9 +2784,10 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
             return;
         }
         if (bonusMenuObserverTarget === menu) return; // already watching this exact open menu
-        if (bonusMenuObserver) bonusMenuObserver.disconnect();
 
+        if (bonusMenuObserver) bonusMenuObserver.disconnect();
         scanBonusFilterSelection(menu);
+
         let t = null;
         bonusMenuObserver = new MutationObserver(() => {
             clearTimeout(t);
@@ -3406,7 +2796,6 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
         bonusMenuObserver.observe(menu, { attributes: true, attributeFilter: ['aria-selected', 'class'], subtree: true });
         bonusMenuObserverTarget = menu;
     }
-
 
     // =========================================================================
     // NATIVE DROPDOWN INTEGRATION (PROPERLY SCOPED)
@@ -3464,8 +2853,8 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
                 return item;
             };
 
-            const ascItem = createBonusItem('Bonus ascending (current page)', 'asc');
-            const descItem = createBonusItem('Bonus descending (current page)', 'desc');
+            const ascItem = createBonusItem('Bonus ascending', 'asc');
+            const descItem = createBonusItem('Bonus descending', 'desc');
 
             menu.appendChild(ascItem);
             menu.appendChild(descItem);
@@ -3481,16 +2870,16 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
             const hasOpenMenu = document.querySelector('[role="listbox"]');
 
             if (openDropdown || hasOpenMenu) {
-            setTimeout(() => {
-                injectIntoSortDropdown();
-                watchBonusMenu();
-            }, 100);
+                setTimeout(() => {
+                    injectIntoSortDropdown();
+                    watchBonusMenu();
+                }, 100);
             } else {
 
                 watchBonusMenu();
             }
-
         });
+
         dropdownObserver.observe(document.body, {
             childList: true,
             subtree: true,
@@ -3518,26 +2907,16 @@ body:not(.dark-mode) .om-bonus-red .om-bonus-text {
     // =========================================================================
     // INITIALISATION
     // =========================================================================
-    // --- 1.12.29 audit-fix helpers (F8/F13/F15/F16) ---
-    function cleanupOpenMarketDOM() {
-        document.querySelectorAll('.openmarket-quality-box, .openmarket-bonuses, .openmarket-quality-inline, .om-displaycase-bonuses, .openmarket-single-meta').forEach(n => { if (n.parentElement) n.remove(); });
-        document.querySelectorAll('.openmarket-single-shrunk').forEach(el => el.classList.remove('openmarket-single-shrunk'));
-        document.querySelectorAll('[data-om-original-display]').forEach(el => { el.style.display = el.dataset.omOriginalDisplay || ''; delete el.dataset.omOriginalDisplay; });
-        document.querySelectorAll('.om-armory-bonus-cell').forEach(cell => { if (cell.dataset.omOriginalType != null) cell.textContent = cell.dataset.omOriginalType; cell.classList.remove('om-armory-bonus-cell', 'om-armory-double'); delete cell.dataset.omOriginalType; });
-        document.querySelectorAll('.om-displaycase-amount-hidden').forEach(el => el.classList.remove('om-displaycase-amount-hidden'));
-        document.querySelectorAll('.b-item-rarity .progressbar-wrap').forEach(el => { el.style.display = ''; });
-        document.querySelectorAll('.b-item-rarity i').forEach(i => { i.style.display = ''; });
-    }
-    window.addEventListener('pagehide', () => { try { if (window.__omOriginalFetch) window.fetch = window.__omOriginalFetch; if (window.__omOriginalXHROpen) XMLHttpRequest.prototype.open = window.__omOriginalXHROpen; if (window.__omOriginalPushState) history.pushState = window.__omOriginalPushState; if (window.__omOriginalReplaceState) history.replaceState = window.__omOriginalReplaceState; } catch (e) {} });
-    function debouncedProcessAll(fn) { let raf = 0; return () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; try { fn(); } catch (e) { console.warn('[OpenMarket] processAll failed', e); } }); }; }
-    const __omUnknownItems = new Set();
-    function logUnknownItem(itemID) { if (__omUnknownItems.has(itemID)) return; __omUnknownItems.add(itemID); console.warn('[OpenMarket] Unknown item ID, no base stats:', itemID); }
     function init() {
         insertStyles();
         interceptFetchAndXHR();
-        const boot = () => { checkDarkMode(); setupActiveListeners(); setupRouteWatcher(); activateHandlerForCurrentUrl(); [1000, 2000, 5000].forEach(ms => setTimeout(() => activateHandlerForCurrentUrl(), ms)); };
-        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-        else boot();
+
+        document.addEventListener('DOMContentLoaded', () => {
+            checkDarkMode();
+            setupActiveListeners();
+            setupRouteWatcher();
+            activateHandlerForCurrentUrl();
+        });
     }
 
     init();
