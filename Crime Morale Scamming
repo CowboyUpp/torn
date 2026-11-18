@@ -1034,6 +1034,7 @@
           debugEvent('target-progress-change', {
             targetId: id, email: current.email, before: previous, after: current
           });
+          recordTargetProgressSteps(String(current.email || '').trim().toLowerCase(), previous, current);
           gameDataState.targets[id] = current;
           changed = true;
         }
@@ -1123,6 +1124,43 @@
       if (!wave) return;
       if (!wave.targetOutcomes || typeof wave.targetOutcomes !== 'object') wave.targetOutcomes = {};
       if (!Array.isArray(wave.pendingAbandons)) wave.pendingAbandons = [];
+      if (!wave.targetSteps || typeof wave.targetSteps !== 'object') wave.targetSteps = {};
+      if (!wave.pendingActions || typeof wave.pendingActions !== 'object') wave.pendingActions = {};
+    }
+
+    const NERVE_PER_SCAM_ACTION = 3;
+
+    function recordTargetProgressSteps(email, before, after) {
+      if (!activeWave || !email || !activeWave.targetEmails.includes(email)) return;
+      ensureWaveOutcomeState(activeWave);
+      const beforeTurns = Number(before?.turns ?? 0);
+      const afterTurns = Number(after?.turns ?? 0);
+      const turnDelta = Math.max(0, afterTurns - beforeTurns);
+      if (!turnDelta) return;
+      const steps = activeWave.targetSteps[email] || (activeWave.targetSteps[email] = []);
+      const pending = activeWave.pendingActions[email] || [];
+      const usedActions = pending.splice(0, turnDelta);
+      for (let i = 0; i < turnDelta; i++) {
+        const clicked = usedActions[i] || null;
+        const step = {
+          number: steps.length + 1,
+          turn: beforeTurns + i + 1,
+          round: after.round ?? null,
+          action: clicked?.label || 'Response (not identified)',
+          pip: after.pip ?? null,
+          suspicion: after.suspicion ?? null,
+          multiplierUsed: after.multiplierUsed ?? null,
+          nerve: NERVE_PER_SCAM_ACTION,
+          timestamp: new Date().toISOString()
+        };
+        steps.push(step);
+        debugEvent('target-action-step', { email, ...step });
+      }
+      activeWave.pendingActions[email] = pending;
+      activeWave.nerveSpent = Object.values(activeWave.targetSteps).reduce(
+        (total, list) => total + list.reduce((sum, step) => sum + Number(step.nerve || 0), 0), 0
+      );
+      saveTrackerState();
     }
 
     function recordTargetOutcome(email, outcome, source) {
@@ -1213,6 +1251,9 @@
         level: null,
         targetEmails: [],
         targetOutcomes: {},
+        targetSteps: {},
+        pendingActions: {},
+        nerveSpent: 0,
         pendingAbandons: []
       };
       debugEvent('wave-started', { trackerId: activeWave.id, startAddresses: activeWave.startAddresses, baselineTargetCount: baselineEmails.length, baselineEmails, waitingHtml: document.querySelector(WAITING_SELECTOR)?.outerHTML?.slice(0, 1800) || null });
@@ -1236,6 +1277,9 @@
         const now = Date.now();
         if (!activeWave.firstTargetAt) activeWave.firstTargetAt = now;
         activeWave.lastTargetAt = now;
+        ensureWaveOutcomeState(activeWave);
+        if (!Array.isArray(activeWave.targetSteps[email])) activeWave.targetSteps[email] = [];
+        if (!Array.isArray(activeWave.pendingActions[email])) activeWave.pendingActions[email] = [];
         debugEvent('target-detected', { email, method, level: methodLevel(method), targetText: String(card.innerText || '').trim().slice(0, 400), targetHtml: card.outerHTML.slice(0, 1800) });
       }
       saveTrackerState();
@@ -1289,6 +1333,8 @@
         outcomes: usedTargets,
         addressStockUsed: activeWave.outcomes,
         targetOutcomes: activeWave.targetOutcomes,
+        targetSteps: activeWave.targetSteps,
+        nerveSpent: activeWave.nerveSpent || 0,
         targetCount: activeWave.targetCount,
         firstResponseMs: activeWave.firstResponseMs,
         method: activeWave.method,
@@ -1345,6 +1391,21 @@
       const elapsed = wave ? Date.now() - wave.startedAt : 0;
       const used = wave ? getWaveUsed(wave) : 0;
       const currentStatus = wave ? 'WAVE ACTIVE' : 'STANDBY';
+      const targetActivityHtml = wave && wave.targetEmails.length
+        ? '<div class="cm-sw-section-title"><span>TARGET ACTIVITY</span><span>' + Number(wave.nerveSpent || 0) + ' NERVE SPENT</span></div><div class="cm-sw-target-activity">' +
+          wave.targetEmails.slice().reverse().map(email => {
+            const steps = (wave.targetSteps && wave.targetSteps[email]) || [];
+            const outcome = (wave.targetOutcomes && wave.targetOutcomes[email]) || 'in progress';
+            const stepHtml = steps.map(step =>
+              '<div class="cm-sw-step"><span>#' + Number(step.number || 0) + ' · ' + escapeHtml(step.action || 'Response') +
+              '</span><span>R' + escapeHtml(step.round == null ? '—' : step.round) + ' · Pip ' +
+              escapeHtml(step.pip == null ? '—' : step.pip) + ' · ' + Number(step.nerve || 0) + ' N</span></div>'
+            ).join('');
+            return '<div class="cm-sw-target"><div class="cm-sw-target-head"><strong>' + escapeHtml(email) +
+              '</strong><small>' + escapeHtml(outcome) + ' · ' +
+              steps.reduce((sum, step) => sum + Number(step.nerve || 0), 0) + ' N</small></div>' +
+              (stepHtml || '<div class="cm-sw-empty">No actions recorded yet.</div>') + '</div>';
+          }).join('') + '</div>' : '';
       const method = wave ? (wave.method || 'Detecting…') : 'No active wave';
       const level = wave && wave.level ? 'Level ' + wave.level : '';
       const responseDelay = wave && wave.firstTargetAt
@@ -1386,6 +1447,7 @@
         '</strong><span class="cm-sw-arrow">→</span><strong>' +
         (wave && wave.endAddresses !== null ? wave.endAddresses.toLocaleString() : (wave ? '…' : '—')) +
         '</strong></div>' +
+        targetActivityHtml +
         '<div class="cm-sw-section-title"><span>RECENT WAVES</span><span>' + history.length + ' SAVED</span></div>' +
         '<div class="cm-sw-history">' + (historyHtml || '<div class="cm-sw-empty">No completed waves yet. Your results will appear here.</div>') + '</div>' +
         debugHtml +
@@ -1538,6 +1600,12 @@
         '.cm-sw-arrow{opacity:.5}',
         '.cm-sw-section-title{display:flex;justify-content:space-between;margin:14px 0 7px;font-size:9px;letter-spacing:1px;font-weight:800;color:#626a73}',
         '.cm-sw-history-row{display:grid;grid-template-columns:minmax(100px,1fr) repeat(4,auto);gap:10px;align-items:center;padding:9px 0;border-top:1px solid #e6e8eb}',
+        '.cm-sw-target-activity{max-height:240px;overflow:auto;border-bottom:1px solid #e0e3e7}',
+        '.cm-sw-target{padding:8px 0;border-top:1px solid #e6e8eb}',
+        '.cm-sw-target-head{display:flex;justify-content:space-between;gap:8px;font-size:10px;overflow-wrap:anywhere}',
+        '.cm-sw-target-head small{white-space:nowrap;color:#737b84;font-size:9px}',
+        '.cm-sw-step{display:flex;justify-content:space-between;gap:8px;padding:4px 0 0 8px;font-size:9px;color:#555}',
+        '.cm-sw-step span:last-child{white-space:nowrap;color:#737b84;font-variant-numeric:tabular-nums}',
         '.cm-sw-history-main strong,.cm-sw-history-main small,.cm-sw-history-stats b,.cm-sw-history-stats small{display:block}',
         '.cm-sw-history-main small,.cm-sw-history-stats small{font-size:9px;color:#737b84;margin-top:2px}',
         '.cm-sw-history-stats{text-align:right}.cm-sw-history-stats b{font-size:13px;font-variant-numeric:tabular-nums}',
@@ -1567,19 +1635,23 @@
       installStyle();
       ensureUi();
       document.addEventListener('click', event => {
-        const button = event.target && event.target.closest ? event.target.closest('button, [role="button"]') : null;
-        if (!button) return;
-        const buttonLabel = [button.innerText, button.textContent, button.getAttribute('aria-label'), button.getAttribute('title'), button.getAttribute('data-cm-action')].filter(Boolean).join(' ').trim();
-        if (!/abandon/i.test(buttonLabel)) return;
-        const card = button.closest(TARGET_SELECTOR);
+        const card = event.target && event.target.closest ? event.target.closest(TARGET_SELECTOR) : null;
         if (!card || !activeWave) return;
         const email = readTargetEmail(card);
         if (!email || !activeWave.targetEmails.includes(email)) return;
+        const control = event.target.closest('button, [role="button"], [class*="button"], [class*="cell"]') || event.target;
+        const buttonLabel = [control.innerText, control.textContent, control.getAttribute?.('aria-label'), control.getAttribute?.('title'), control.getAttribute?.('data-cm-action')].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+        const label = buttonLabel.slice(0, 100) || String(control.className || 'Scamming action').slice(0, 100);
         ensureWaveOutcomeState(activeWave);
-        if (activeWave.targetOutcomes[email] === 'abandoned') return;
+        if (!/abandon/i.test(label)) {
+          const queue = activeWave.pendingActions[email] || (activeWave.pendingActions[email] = []);
+          queue.push({ label, clickedAt: Date.now() });
+          if (queue.length > 12) queue.splice(0, queue.length - 12);
+        }
+        if (!/abandon/i.test(label) || activeWave.targetOutcomes[email] === 'abandoned') return;
         activeWave.pendingAbandons = activeWave.pendingAbandons.filter(item => item.email !== email);
         activeWave.pendingAbandons.push({ email, clickedAt: Date.now() });
-        debugEvent('abandon-click-observed', { email, buttonLabel: buttonLabel.slice(0, 160), buttonHtml: button.outerHTML.slice(0, 900), note: 'Counts as abandoned only after the target card disappears.' });
+        debugEvent('abandon-click-observed', { email, buttonLabel: label, buttonHtml: control.outerHTML?.slice(0, 900) || null, note: 'Counts as abandoned only after the target card disappears.' });
         setTimeout(reconcilePendingAbandons, 1600);
       }, true);
       observer = new MutationObserver(records => {
