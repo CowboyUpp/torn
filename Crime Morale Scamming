@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.61
+// @version      1.4.62
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.62: Record action clicks immediately with parsed nerve cost; reconcile later game-state turns and detect explicit target result fields.
 // CHANGELOG 1.4.61: Count consumed address stock as used targets even when Torn has not exposed an explicit target outcome.
 // CHANGELOG 1.4.60: Track per-target action steps, game-state progress and nerve spent in Scam Tracker.
 // CHANGELOG 1.4.59: Fix over-escaped method-ID matcher so Torn dropdown IDs such as option-Romance-scam-309 resolve correctly.
@@ -904,13 +905,27 @@
         suggestedAction: target.solution && target.solution.action || null,
         unsynced: target.unsynced ?? null
       };
-      const resultKeys = ['finalOutcome', 'outcome', 'result'];
+      const resultKeys = ['finalOutcome', 'outcome', 'result', 'status', 'scamResult', 'resolution'];
       for (const key of resultKeys) {
         const value = target[key];
-        if (typeof value === 'string' && /^(success|fail|failed|abandon|abandoned)$/i.test(value.trim())) {
-          summary.confirmedOutcome = value.trim().toLowerCase();
+        if (typeof value === 'string' && /^(success|successful|complete|completed|fail|failed|failure|abandon|abandoned)$/i.test(value.trim())) {
+          const normalized = value.trim().toLowerCase();
+          summary.confirmedOutcome = /^(success|successful|complete|completed)$/.test(normalized) ? 'success'
+            : /^(abandon|abandoned)$/.test(normalized) ? 'abandoned' : 'fail';
           summary.confirmedOutcomeField = key;
           break;
+        }
+      }
+      if (!summary.confirmedOutcome) {
+        if (target.success === true || target.successful === true || target.completed === true) {
+          summary.confirmedOutcome = 'success';
+          summary.confirmedOutcomeField = target.success === true ? 'success' : target.successful === true ? 'successful' : 'completed';
+        } else if (target.failed === true || target.failure === true) {
+          summary.confirmedOutcome = 'fail';
+          summary.confirmedOutcomeField = target.failed === true ? 'failed' : 'failure';
+        } else if (target.abandoned === true) {
+          summary.confirmedOutcome = 'abandoned';
+          summary.confirmedOutcomeField = 'abandoned';
         }
       }
       return summary;
@@ -1130,7 +1145,12 @@
       if (!wave.pendingActions || typeof wave.pendingActions !== 'object') wave.pendingActions = {};
     }
 
-    const NERVE_PER_SCAM_ACTION = 3;
+    function updateNerveSpent(wave) {
+      if (!wave) return;
+      wave.nerveSpent = Object.values(wave.targetSteps || {}).reduce(
+        (total, list) => total + (Array.isArray(list) ? list.reduce((sum, step) => sum + (Number.isFinite(Number(step.nerve)) ? Number(step.nerve) : 0), 0) : 0), 0
+      );
+    }
 
     function recordTargetProgressSteps(email, before, after) {
       if (!activeWave || !email || !activeWave.targetEmails.includes(email)) return;
@@ -1141,27 +1161,19 @@
       if (!turnDelta) return;
       const steps = activeWave.targetSteps[email] || (activeWave.targetSteps[email] = []);
       const pending = activeWave.pendingActions[email] || [];
-      const usedActions = pending.splice(0, turnDelta);
-      for (let i = 0; i < turnDelta; i++) {
-        const clicked = usedActions[i] || null;
-        const step = {
-          number: steps.length + 1,
-          turn: beforeTurns + i + 1,
-          round: after.round ?? null,
-          action: clicked?.label || 'Response (not identified)',
-          pip: after.pip ?? null,
-          suspicion: after.suspicion ?? null,
-          multiplierUsed: after.multiplierUsed ?? null,
-          nerve: NERVE_PER_SCAM_ACTION,
-          timestamp: new Date().toISOString()
-        };
-        steps.push(step);
-        debugEvent('target-action-step', { email, ...step });
+      const candidates = steps.filter(step => step.awaitingProgress);
+      for (let i = 0; i < turnDelta && i < candidates.length; i++) {
+        const step = candidates[i];
+        step.awaitingProgress = false;
+        step.turn = beforeTurns + i + 1;
+        step.round = after.round ?? step.round ?? null;
+        step.pip = after.pip ?? step.pip ?? null;
+        step.suspicion = after.suspicion ?? step.suspicion ?? null;
+        step.multiplierUsed = after.multiplierUsed ?? step.multiplierUsed ?? null;
+        debugEvent('target-action-progress-confirmed', { email, step: { ...step } });
       }
-      activeWave.pendingActions[email] = pending;
-      activeWave.nerveSpent = Object.values(activeWave.targetSteps).reduce(
-        (total, list) => total + list.reduce((sum, step) => sum + Number(step.nerve || 0), 0), 0
-      );
+      activeWave.pendingActions[email] = pending.filter(action => !action.recorded);
+      updateNerveSpent(activeWave);
       saveTrackerState();
     }
 
@@ -1655,9 +1667,30 @@
         const label = buttonLabel.slice(0, 100) || String(control.className || 'Scamming action').slice(0, 100);
         ensureWaveOutcomeState(activeWave);
         if (!/abandon/i.test(label)) {
+          const nerveMatch = label.match(/(\\d+)\\s*nerve\\b/i);
+          const nerve = nerveMatch ? Number(nerveMatch[1]) : null;
+          const steps = activeWave.targetSteps[email] || (activeWave.targetSteps[email] = []);
+          const step = {
+            number: steps.length + 1,
+            turn: null,
+            round: null,
+            action: label || 'Scamming action',
+            pip: null,
+            suspicion: null,
+            multiplierUsed: null,
+            nerve,
+            nerveKnown: nerve !== null,
+            awaitingProgress: true,
+            timestamp: new Date().toISOString()
+          };
+          steps.push(step);
           const queue = activeWave.pendingActions[email] || (activeWave.pendingActions[email] = []);
-          queue.push({ label, clickedAt: Date.now() });
+          queue.push({ label, clickedAt: Date.now(), recorded: true });
           if (queue.length > 12) queue.splice(0, queue.length - 12);
+          updateNerveSpent(activeWave);
+          debugEvent('target-action-clicked', { email, ...step, controlHtml: control.outerHTML?.slice(0, 900) || null });
+          saveTrackerState();
+          renderPanel();
         }
         if (!/abandon/i.test(label) || activeWave.targetOutcomes[email] === 'abandoned') return;
         activeWave.pendingAbandons = activeWave.pendingAbandons.filter(item => item.email !== email);
@@ -1767,7 +1800,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.61',
+      version: '1.4.62',
       order: 20,
       open: handleOpen,
       close: handleClose,
