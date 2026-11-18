@@ -5,7 +5,7 @@
 // @author       cowboyup
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
-// @version      1.4.54
+// @version      1.4.55
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -13,6 +13,7 @@
 // @supportURL   https://greasyfork.org/en/users/1608691-cowboyup
 // @license      MIT
 // ==/UserScript==
+// CHANGELOG 1.4.55: Restore spam elapsed timers using the original parent-list-item ID mapping, without a dropdown-container dependency.
 // CHANGELOG 1.4.54: Detect spam dropdowns rendered outside the Scamming root and refresh their elapsed timers when opened.
 // CHANGELOG 1.4.53: Recover a missing wave-start address baseline when Torn renders the counter late.
 // CHANGELOG 1.4.51: Retry skill detection independently of wave state and observe skill-label DOM updates.
@@ -1662,7 +1663,7 @@
     const hubPayload = {
       id: 'crime-morale-scamming',
       name: 'Crime Morale Scamming',
-      version: '1.4.53',
+      version: '1.4.55',
       order: 20,
       open: handleOpen,
       close: handleClose,
