@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.10
+// @version      1.5.11
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.10';
+  const VERSION = '1.5.11';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
