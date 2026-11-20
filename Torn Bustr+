@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.6
+// @version      1.5.7
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.6';
+  const VERSION = '1.5.7';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -1440,7 +1440,10 @@
     if (!message) return;
     const amountMatch = message.replace(/<[^>]*>/g, ' ').match(/\$\s*([\d,]+)/);
     if (!amountMatch) return;
-    const xidMatch = String(responseUrl || '').match(/[?&]XID=\s*(\d+)/i);
+    // Torn may include the inmate XID in the embedded rescue link,
+    // rather than in the URL used for the confirmation request.
+    const xidMatch = String(responseUrl || '').match(/[?&]XID=\s*(\d+)/i)
+      || message.match(/[?&]XID=\s*(\d+)/i);
     if (!xidMatch) return;
     const xid = xidMatch[1];
     const selector = 'a[href*="XID=' + xid + '"]';
