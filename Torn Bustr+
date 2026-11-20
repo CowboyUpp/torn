@@ -334,8 +334,8 @@
             { key: 'greenLimit', type: 'number', label: 'Green at busts', default: 3, min: 0, hint: 'When the jail menu counter turns green.' },
             { key: 'redLimit', type: 'number', label: 'Red at busts', default: 0, min: 0, hint: 'When the jail menu counter turns red.' },
             { key: 'manualTotalBusts', type: 'text', label: 'Total Busts (Manual)', default: '', placeholder: 'e.g., 8857', hint: 'Optional: If background fetching fails, enter your total busts here and it will be used permanently.' },
-            { key: 'bailEducationDiscount', type: 'toggle', label: 'Bail: Education discount', default: false, hint: 'Apply the education bail discount (up to 57.25%) to formula-based bail estimates. Torn confirmation quotes already include applicable discounts.' },
-            { key: 'bailLawFirmDiscount', type: 'toggle', label: 'Bail: Law Firm 1-star discount', default: false, hint: 'Apply the Law Firm 1-star company special (50%) to formula-based bail estimates. Torn confirmation quotes already include applicable discounts.' },
+            { key: 'bailEducationDiscount', type: 'toggle', label: 'Bail: Education discount', default: false, hint: 'Apply the maximum 57.25% education reduction to the displayed bail estimate.' },
+            { key: 'bailLawFirmDiscount', type: 'toggle', label: 'Bail: Law Firm 1-star discount', default: false, hint: 'Apply the Law Firm 1-star company 50% reduction to the displayed bail estimate.' },
           ],
           values: {
             enabled: state.settings.enabled,
@@ -1703,4 +1703,4 @@
   } else {
     init();
   }
-})()
+})();
