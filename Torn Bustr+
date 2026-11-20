@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.11
+// @version      1.5.5
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.11';
+  const VERSION = '1.5.5';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -78,7 +78,6 @@
     observerStarted: false,
     hardnessObserverStarted: false,
     bustConfirmSkipperStarted: false,
-    bailCostCaptureStarted: false,
     pathWatcherStarted: false,
     hubPresent: false,
   };
@@ -535,10 +534,10 @@
       #bustr-plus-navitem .bustr-plus-navitem-label { white-space: nowrap; }
       #body .users-list-title { display: flex; justify-content: start; align-items: center; }
       #body .users-list-title .title { width: 269px; }
-      #body .users-list-title .time { width: 54px; }
-      #body .users-list-title .level { width: 57px; }
-      #body .users-list-title .reason { width: 193px; }
-      #body .users-list-title .hardness { display: block; width: 140px; min-width: 140px; flex: 0 0 140px; box-sizing: border-box; text-align: center; }
+      #body .users-list-title .time { width: 50px; }
+      #body .users-list-title .level { width: 53px; }
+      #body .users-list-title .reason { width: 205px; }
+      #body .users-list-title .hardness { display: block; width: 79px; text-align: center; }
       #body .users-list-title .bustr-plus-score-label { vertical-align: middle; }
       #body .users-list-title .bustr-plus-jail-refresh {
         display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
@@ -554,13 +553,11 @@
       #body .user-info-list-wrap > li .info-wrap .time { width: 54px; }
       #body .user-info-list-wrap > li .info-wrap .level { width: 57px; }
       #body .user-info-list-wrap > li .info-wrap .reason { width: 193px; }
-      #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 50px; text-align: center; }
+      #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 79px; min-width: 79px; flex: 0 0 79px; box-sizing: border-box; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
-      #body .user-info-list-wrap > li .info-wrap .bustr-plus-hardness-wrap { width: 140px; min-width: 140px; flex: 0 0 140px; box-sizing: border-box; text-align: center; }
-      .bustr-plus-score-line { display: inline-flex; align-items: center; justify-content: center; gap: 3px; white-space: nowrap; }
+      .bustr-plus-score-line { display: inline-flex; align-items: center; justify-content: center; gap: 3px; width: 100%; white-space: nowrap; }
       .bustr-plus-hardness { display: inline-block; width: auto; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
       .bustr-plus-success-chance { display: inline-block; width: auto; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
-      .bustr-plus-bail-cost { display: block; margin-top: 2px; font-size: 11px; line-height: 1.2; font-weight: 700; text-align: center; color: #85b200; white-space: nowrap; }
       .bustr-plus-hard-row { opacity: .32; }
       .bustr-plus-hidden-hard { display: none !important; }
       @media screen and (max-width: 784px) {
@@ -1406,14 +1403,14 @@
     if (!wrap) {
       wrap = document.createElement('span');
       wrap.className = 'hardness reason bustr-plus-hardness-wrap';
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span>';
       const reason = findJailColumnAnchor(info, 2);
       if (reason) reason.insertAdjacentElement('afterend', wrap);
       else info.appendChild(wrap);
     }
     let value = wrap.querySelector('.bustr-plus-hardness');
     if (!value) {
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span>';
       value = wrap.querySelector('.bustr-plus-hardness');
     }
     const nextText = Number.isFinite(score) ? String(score) : '-';
@@ -1572,69 +1569,6 @@
     recordLocalBustSuccess(text);
   }
 
-  function startBailCostCapture() {
-    if (state.bailCostCaptureStarted || typeof XMLHttpRequest === 'undefined') return;
-    state.bailCostCaptureStarted = true;
-
-    const originalOpen = XMLHttpRequest.prototype.open;
-    const originalSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-      this.__bustrPlusRequestUrl = String(url || '');
-      return originalOpen.call(this, method, url, ...rest);
-    };
-
-    XMLHttpRequest.prototype.send = function (...args) {
-      const requestUrl = this.__bustrPlusRequestUrl || '';
-      if (/jailview\.php/i.test(requestUrl) &&
-          /(?:\?|&)action=rescue(?:&|$)/i.test(requestUrl) &&
-          /(?:\?|&)step=buy(?:&|$)/i.test(requestUrl)) {
-        this.addEventListener('load', function () {
-          if (!isJailPage() || this.status < 200 || this.status >= 300) return;
-
-          let payload;
-          try {
-            payload = this.responseType === 'json' ? this.response : JSON.parse(this.responseText || '');
-          } catch (err) {
-            return;
-          }
-
-          const message = typeof payload?.msg === 'string' ? payload.msg : '';
-          const match = message.match(/cost you\s*<b[^>]*>\s*\$?\s*([\d,]+)\s*<\/b>/i);
-          if (!match) return;
-
-          let xid = '';
-          try {
-            xid = new URL(this.responseURL || requestUrl, window.location.href).searchParams.get('XID') || '';
-          } catch (err) {}
-          if (!xid) return;
-
-          const buyLink = [...document.querySelectorAll('a.bye[href*="step=buy"]')].find((link) => {
-            try {
-              return new URL(link.href, window.location.href).searchParams.get('XID') === xid;
-            } catch (err) {
-              return false;
-            }
-          });
-          if (!buyLink) return;
-
-          const row = buyLink.closest('li');
-          const scoreCell = row && row.querySelector('.info-wrap .bustr-plus-hardness-wrap');
-          if (!scoreCell) return;
-          let cost = scoreCell.querySelector('.bustr-plus-bail-cost');
-          if (!cost) {
-            cost = document.createElement('span');
-            cost.className = 'bustr-plus-bail-cost';
-            cost.title = 'Bail cost';
-            scoreCell.appendChild(cost);
-          }
-          cost.textContent = '$' + match[1];
-        });
-      }
-
-      return originalSend.apply(this, args);
-    };
-  }
   function startObservers() {
     if (!state.observerStarted) {
       state.observerStarted = true;
@@ -1698,7 +1632,6 @@
       renderPanel(true);
     }
     
-    startBailCostCapture();
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
