@@ -1489,7 +1489,7 @@
       .filter((row) => {
         if (!isLikelyJailPlayerRow(row) || !row.querySelector('.bustr-plus-bail-cost')) return false;
         const href = row.querySelector('a.bye[href]')?.getAttribute('href') || '';
-        if (!/[?&]step=\\s*buy\\b/i.test(href) || !/[?&]action=\\s*rescue\\b/i.test(href)) return false;
+        if (!/[?&]step=\s*buy\b/i.test(href) || !/[?&]action=\s*rescue\b/i.test(href)) return false;
         const parsed = parseRowLevelAndDuration(row);
         if (!parsed) return false;
         const score = calcHardnessScore(parsed.level, parsed.hours);
