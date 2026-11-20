@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.15
+// @version      1.5.16
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.15';
+  const VERSION = '1.5.16';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -75,7 +75,6 @@
     navStatsPending: false,
     hardnessRendering: false,
     hardnessRenderTimer: null,
-    bailRefreshRunning: false,
     refreshTimerId: null,
     returnToJailTimerId: null,
     observerStarted: false,
@@ -1331,16 +1330,16 @@
 
         const parsed = parseRowLevelAndDuration(row);
         if (!parsed) {
-          renderHardnessScore(info, null);
+          renderHardnessScore(info, null, null, null);
           resetHardnessTreatment(row);
           continue;
         }
         const score = calcHardnessScore(parsed.level, parsed.hours);
         const chance = state.settings.showSuccessChance ? calcSuccessChance(score, calcSuccessPenaltyPct(state.timestamps)) : null;
-        renderHardnessScore(info, score, chance);
+        const estimatedBail = calcEstimatedBail(parsed.level, parsed.hours);
+        renderHardnessScore(info, score, chance, estimatedBail);
         applyHardnessTreatment(row, score);
       }
-      refreshBailAmounts();
     } finally {
       setTimeout(() => {
         state.hardnessRendering = false;
@@ -1366,10 +1365,13 @@
     }
 
     if (!Number.isFinite(level)) return null;
-
-    const days = Number((rawTimeText.match(/(\d+)\s*(?:d|day)/i) || [0, 0])[1]);
-    const hours = Number((rawTimeText.match(/(\d+)\s*(?:h|hour)/i) || [0, 0])[1]);
-    const mins = Number((rawTimeText.match(/(\d+)\s*(?:m|min)/i) || [0, 0])[1]);
+    const dayMatch = rawTimeText.match(/(\d+)\s*(?:d|day)/i);
+    const hourMatch = rawTimeText.match(/(\d+)\s*(?:h|hour)/i);
+    const minMatch = rawTimeText.match(/(\d+)\s*(?:m|min)/i);
+    if (!dayMatch && !hourMatch && !minMatch) return null;
+    const days = Number(dayMatch?.[1] || 0);
+    const hours = Number(hourMatch?.[1] || 0);
+    const mins = Number(minMatch?.[1] || 0);
     return { level, hours: days * 24 + hours + mins / 60 };
   }
 
@@ -1383,6 +1385,16 @@
 
   function calcHardnessScore(level, hours) {
     return Math.floor(level * (hours + 3));
+  }
+
+  // Official base bail formula: $100 per remaining jail minute per inmate level.
+  // Uses Torn's displayed jail timer, so the result is an estimate.
+  function calcEstimatedBail(level, hours) {
+    if (!Number.isFinite(level) || level <= 0 || !Number.isFinite(hours) || hours < 0) return null;
+    let amount = 100 * level * hours * 60;
+    if (state.settings.bailEducationDiscount) amount *= 0.4275;
+    if (state.settings.bailLawFirmDiscount) amount *= 0.5;
+    return Math.round(amount);
   }
 
   function renderHardnessHeader() {
@@ -1408,7 +1420,7 @@
     else title.appendChild(header);
   }
 
-  function renderHardnessScore(info, score, chance = null) {
+  function renderHardnessScore(info, score, chance = null, bailAmount = null) {
     let wrap = info.querySelector('.bustr-plus-hardness-wrap');
     for (const extra of [...info.querySelectorAll('.bustr-plus-hardness-wrap')].slice(1)) extra.remove();
     if (!wrap) {
@@ -1438,91 +1450,257 @@
       if (pctText) pct.style.setProperty('--bustr-plus-success-color', successChanceColor(chance));
       else pct.style.removeProperty('--bustr-plus-success-color');
     }
+    const bail = wrap.querySelector('.bustr-plus-bail-cost');
+    if (bail) {
+      const bailText = Number.isFinite(bailAmount) ? '≈ 
+    const directChildren = [...container.children];
+    return directChildren.find((child) => child.classList.contains('reason') && !child.classList.contains('bustr-plus-hardness-wrap'))
+      || directChildren[fallbackIndex]
+      || directChildren[directChildren.length - 1]
+      || null;
   }
 
-  // Request each eligible inmate's BUY confirmation data in the background.
-  // Torn returns the bail amount for step=buy; this does not complete the rescue.
-  async function fetchBailAmountForRow(row) {
-    if (!row || row.dataset.bustrPlusBailRequested === 'true') return;
-    const buyLink = row.querySelector('a.bye[href]');
-    if (!buyLink || !row.querySelector('.bustr-plus-bail-cost')) return;
+  function applyHardnessTreatment(row, score) {
+    row.classList.toggle('bustr-plus-hard-row', score > state.settings.hardnessLimit && !state.settings.hideHardTargets);
+    row.classList.toggle('bustr-plus-hidden-hard', score > state.settings.hardnessLimit && state.settings.hideHardTargets);
+    const nextOrder = state.settings.sortByHardness ? String(score) : '';
+    if (row.style.order !== nextOrder) row.style.order = nextOrder;
+  }
 
-    const href = buyLink.getAttribute('href') || '';
-    if (!/[?&]step=\s*buy\b/i.test(href) || !/[?&]action=\s*rescue\b/i.test(href)) return;
-    const xidMatch = href.match(/[?&]XID=\s*(\d+)/i);
-    if (!xidMatch) return;
-    const xid = xidMatch[1];
+  function resetHardnessTreatment(row) {
+    row.classList.remove('bustr-plus-hard-row', 'bustr-plus-hidden-hard');
+    if (row.style.order) row.style.order = '';
+  }
 
-    row.dataset.bustrPlusBailRequested = 'true';
-    try {
-      const requestUrl = new URL(href, window.location.href);
-      if (requestUrl.origin !== window.location.origin) throw new Error('Unexpected bail URL origin');
-
-      const response = await fetch(requestUrl.href, { credentials: 'same-origin' });
-      if (!response.ok) throw new Error('Bail quote request failed: ' + response.status);
-      const data = await response.json();
-      const message = String(data?.msg || data?.message || '');
-      const amountMatch = message.replace(/<[^>]*>/g, ' ').match(/\$\s*([\d,]+)/);
-      if (!amountMatch) throw new Error('No bail amount in Torn response');
-
-      const amount = Number(amountMatch[1].replace(/,/g, ''));
-      if (!Number.isFinite(amount)) throw new Error('Invalid bail amount');
-
-      // Find the current row in case Torn refreshed the inmate list mid-request.
-      const currentRow = [...document.querySelectorAll('ul.user-info-list-wrap > li')].find((item) =>
-        [...item.querySelectorAll('a[href]')].some((link) => {
-          const match = String(link.getAttribute('href') || '').match(/[?&]XID=\s*(\d+)/i);
-          return match && match[1] === xid;
-        })
-      );
-      const output = currentRow?.querySelector('.bustr-plus-bail-cost');
-      if (output) {
-        output.textContent = '$' + amount.toLocaleString('en-US');
-        output.style.setProperty('--bustr-plus-bail-color', '#d6b36a');
-        output.title = 'Bail cost';
-      }
-    } catch (err) {
-      // Permit a later list refresh to retry a failed quote.
-      delete row.dataset.bustrPlusBailRequested;
+  function applyQuickBustLinks() {
+    if (window.location.pathname !== '/jailview.php') return;
+    const links = [...document.querySelectorAll("ul.user-info-list-wrap > li a[href*='breakout']")];
+    for (const link of links) {
+      if (state.settings.skipBustConfirm) markQuickBustLink(link);
+      else unmarkQuickBustLink(link);
     }
   }
 
-  async function refreshBailAmounts() {
-    if (window.location.pathname !== '/jailview.php' || state.bailRefreshRunning) return;
+  function markQuickBustLink(link) {
+    const href = link.getAttribute('href') || '';
+    if (!href) return;
+    if (!link.dataset.bustrPlusOriginalHref) link.dataset.bustrPlusOriginalHref = href;
+    if (href === `${link.dataset.bustrPlusOriginalHref}1`) return;
+    link.setAttribute('href', `${href}1`);
+  }
 
-    // Never request more quotes than the current bust budget allows.
-    const available = Number(state.availableBusts);
-    if (!Number.isFinite(available) || available <= 0) return;
+  function unmarkQuickBustLink(link) {
+    if (!link.dataset.bustrPlusOriginalHref) return;
+    link.setAttribute('href', link.dataset.bustrPlusOriginalHref);
+    delete link.dataset.bustrPlusOriginalHref;
+  }
 
-    const candidates = [...document.querySelectorAll('ul.user-info-list-wrap > li')]
-      .map((row) => {
-        if (!isLikelyJailPlayerRow(row) || !row.querySelector('.bustr-plus-bail-cost')) return null;
-        const parsed = parseRowLevelAndDuration(row);
-        if (!parsed) return null;
-        const score = calcHardnessScore(parsed.level, parsed.hours);
-        // Bail quotes are requested only for targets strictly below 100 hardness.
-        if (score >= 100) return null;
-        const href = row.querySelector('a.bye[href]')?.getAttribute('href') || '';
-        if (!/[?&]step=\s*buy\b/i.test(href) || !/[?&]action=\s*rescue\b/i.test(href)) return null;
-        return { row, score };
-      })
-      .filter(Boolean);
-
-    // Prefer the easiest targets when selecting the limited number of requests.
-    candidates.sort((a, b) => a.score - b.score);
-
-    // Sequential requests, capped at the number of busts currently available.
-    state.bailRefreshRunning = true;
-    try {
-      let requested = 0;
-      for (const { row } of candidates) {
-        if (requested >= Math.floor(available)) break;
-        if (row.dataset.bustrPlusBailRequested === 'true') continue;
-        requested += 1;
-        await fetchBailAmountForRow(row);
+  function startBustConfirmSkipper() {
+    if (state.bustConfirmSkipperStarted) return;
+    state.bustConfirmSkipperStarted = true;
+    document.addEventListener('click', (event) => {
+      if (!state.settings.skipBustConfirm || window.location.pathname !== '/jailview.php') return;
+      const row = event.target.closest('ul.user-info-list-wrap > li');
+      if (!row || !isLikelyJailPlayerRow(row)) return;
+      const bustLink = event.target.closest("a[href*='breakout']");
+      if (!bustLink) return;
+      const bustHref = bustLink.href || bustLink.getAttribute('href') || '';
+      if (bustHref === state.lastBustActionHref && Date.now() - state.lastBustActionClickMs < 1200) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
       }
-    } finally {
-      state.bailRefreshRunning = false;
+      state.lastBustActionClickMs = Date.now();
+      state.lastBustActionHref = bustHref;
+      sessionStorage.setItem('bustrReturnToJailUntil', String(Date.now() + 8000));
+      sessionStorage.setItem('bustrReturnToJailArmedAt', String(Date.now()));
+      sessionStorage.setItem('bustrLastQuickBustHref', bustHref);
+      armReturnToJailWatcher();
+    }, true);
+  }
+
+  function returnToJailAfterQuickBustRedirect() {
+    const until = Number(sessionStorage.getItem('bustrReturnToJailUntil') || 0);
+    if (!until || Date.now() > until) {
+      clearReturnToJailWatcher();
+      return false;
+    }
+    if (window.location.pathname === '/jailview.php') {
+      const armedAt = Number(sessionStorage.getItem('bustrReturnToJailArmedAt') || 0);
+      if (armedAt && Date.now() - armedAt > 2500) clearReturnToJailWatcher();
+      return false;
+    }
+    clearReturnToJailWatcher();
+    window.location.replace('/jailview.php');
+    return true;
+  }
+
+  function armReturnToJailWatcher() {
+    if (state.returnToJailTimerId) clearInterval(state.returnToJailTimerId);
+    state.returnToJailTimerId = setInterval(() => {
+      const until = Number(sessionStorage.getItem('bustrReturnToJailUntil') || 0);
+      if (!until || Date.now() > until) {
+        clearReturnToJailWatcher();
+        return;
+      }
+      returnToJailAfterQuickBustRedirect();
+    }, 100);
+  }
+
+  function clearReturnToJailWatcher() {
+    if (state.returnToJailTimerId) clearInterval(state.returnToJailTimerId);
+    state.returnToJailTimerId = null;
+    sessionStorage.removeItem('bustrReturnToJailUntil');
+    sessionStorage.removeItem('bustrReturnToJailArmedAt');
+  }
+
+  function scheduleHardnessRender() {
+    if (state.hardnessRendering || window.location.pathname !== '/jailview.php') return;
+    clearTimeout(state.hardnessRenderTimer);
+    state.hardnessRenderTimer = setTimeout(() => {
+      applyQuickBustLinks();
+      if (state.settings.showHardness) renderHardnessView();
+    }, 150);
+  }
+
+  function recordLocalBustSuccess(sourceText) {
+    if (window.location.pathname !== '/jailview.php') return false;
+    const match = String(sourceText || '').match(/You busted\s+(.+?)\s+out of jail/i);
+    if (!match) return false;
+    const signature = `${match[1].trim().toLowerCase()}|${state.lastBustActionHref || ''}`;
+    if (signature === state.lastLocalBustSignature) return false;
+    if (Date.now() - state.lastLocalBustMs < 750 && state.lastLocalBustSignature) return false;
+    state.lastLocalBustMs = Date.now();
+    state.lastLocalBustSignature = signature;
+    state.penaltyScore += state.settings.freshBustScore;
+    state.availableBusts = state.penaltyThreshold > 0
+      ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
+      : null;
+    // Optimistic total bump (API personalstats can lag until next day for some views)
+    if (Number.isFinite(state.totalBusts)) {
+      state.totalBusts += 1;
+      if (!state.settings.manualTotalBusts) saveTotalBusts(state.totalBusts);
+    }
+    saveStats();
+    renderAll();
+    return true;
+  }
+
+  function scanExistingBustSuccesses() {
+    if (window.location.pathname !== '/jailview.php') return;
+    const text = document.querySelector('#mainContainer')?.textContent || '';
+    recordLocalBustSuccess(text);
+  }
+
+  function startObservers() {
+    if (!state.observerStarted) {
+      state.observerStarted = true;
+      const target = document.querySelector('#mainContainer') || document.body;
+      new MutationObserver((mutations) => {
+        if (window.location.pathname !== '/jailview.php') return;
+        for (const mutation of mutations) {
+          if (recordLocalBustSuccess(mutation.target?.textContent || '')) return;
+        }
+      }).observe(target, { childList: true, subtree: true });
+    }
+
+    if (!state.hardnessObserverStarted) {
+      state.hardnessObserverStarted = true;
+      const target = document.querySelector('#mainContainer') || document.body;
+      new MutationObserver((mutations) => {
+        if (mutations.every((mutation) => {
+          const targetEl = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
+          return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel, #bustr-plus-navitem');
+        })) return;
+        scheduleHardnessRender();
+      }).observe(target, { childList: true, subtree: true });
+    }
+  }
+
+  function startRefreshTimer() {
+    if (state.refreshTimerId) clearInterval(state.refreshTimerId);
+    state.refreshTimerId = setInterval(async () => {
+      await loadBustData(false);
+      // Total busts change slowly; refresh cache when expired
+      await refreshTotalBusts(false);
+      renderAll();
+    }, Math.max(15, state.settings.refreshSeconds) * 1000);
+  }
+
+  // =========================================================================
+  // INITIALIZATION
+  // =========================================================================
+  async function init() {
+    loadState();
+    registerWithHub();
+    
+    armReturnToJailWatcher();
+    if (returnToJailAfterQuickBustRedirect()) return;
+    
+    injectStyles();
+    updateToggleVisibility();
+    renderApiKeyGenerator();
+    
+    if (!state.settings.enabled) {
+      cleanupModifications();
+      return;
+    }
+    
+    await refreshTotalBusts(false);
+    await loadBustData(false);
+    renderAll();
+    scanExistingBustSuccesses();
+    
+    if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
+      renderPanel(true);
+    }
+    
+    startBustConfirmSkipper();
+    startObservers();
+    startRefreshTimer();
+    startPathWatcher();
+    
+    window.addEventListener('resize', renderAll, { passive: true });
+    window.addEventListener('hashchange', () => {
+      renderApiKeyGenerator();
+      updateToggleVisibility();
+    }, { passive: true });
+    window.addEventListener('pageshow', () => {
+      armReturnToJailWatcher();
+      returnToJailAfterQuickBustRedirect();
+    }, { passive: true });
+
+    // Hub lifecycle listeners
+    document.addEventListener('torn-script-hub:ready', () => {
+      state.hubPresent = isHubPresent();
+      registerWithHub();
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:dormant', () => {
+      state.hubPresent = false;
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:active', () => {
+      state.hubPresent = isHubPresent();
+      updateToggleVisibility();
+      if (state.hubPresent) removeSettingsPanel();
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+ + bailAmount.toLocaleString('en-US') : '';
+      if (bail.textContent !== bailText) bail.textContent = bailText;
+      bail.style.display = bailText ? 'block' : 'none';
+      bail.style.setProperty('--bustr-plus-bail-color', '#d6b36a');
+      const discounts = [];
+      if (state.settings.bailEducationDiscount) discounts.push('education (up to 57.25%)');
+      if (state.settings.bailLawFirmDiscount) discounts.push('Law Firm 1-star (50%)');
+      bail.title = 'Estimated bail from level × remaining jail minutes × $100' + (discounts.length ? '; discounts: ' + discounts.join(', ') : '; no discounts applied') + '. Actual amount may vary with timer seconds and game-side discount rules.';
     }
   }
 
