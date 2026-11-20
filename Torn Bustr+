@@ -556,7 +556,8 @@
       #body .user-info-list-wrap > li .info-wrap .reason { width: 193px; }
       #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 50px; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
-      .bustr-plus-score-line { display: flex; align-items: center; justify-content: center; gap: 3px; width: 100%; }
+      #body .user-info-list-wrap > li .info-wrap .bustr-plus-hardness-wrap { width: 92px; min-width: 92px; flex: 0 0 92px; box-sizing: border-box; text-align: center; }
+      .bustr-plus-score-line { display: flex; align-items: center; justify-content: center; gap: 3px; width: 100%; white-space: nowrap; }
       .bustr-plus-hardness { display: inline-block; flex: 0 0 auto; width: auto; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
       .bustr-plus-success-chance { display: inline-block; flex: 0 0 auto; width: auto; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
       .bustr-plus-bail-cost { display: block; margin-top: 2px; font-size: 11px; line-height: 1.2; font-weight: 700; text-align: center; color: #85b200; white-space: nowrap; }
@@ -1424,7 +1425,7 @@
     const pct = wrap.querySelector('.bustr-plus-success-chance');
     if (pct) {
       const pctText = Number.isFinite(chance) && state.settings.showSuccessChance ? `${chance}%` : '';
-      pct.style.display = pctText ? 'block' : 'none';
+      pct.style.display = pctText ? 'inline-block' : 'none';
       if (pct.textContent !== pctText) pct.textContent = pctText;
       if (pctText) pct.style.setProperty('--bustr-plus-success-color', successChanceColor(chance));
       else pct.style.removeProperty('--bustr-plus-success-color');
