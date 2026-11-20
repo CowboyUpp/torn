@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.9
+// @version      1.5.10
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.9';
+  const VERSION = '1.5.10';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -1442,8 +1442,7 @@
     const xidMatch = href.match(/[?&]XID=\s*(\d+)/i);
     if (!xidMatch) return;
     const xid = xidMatch[1];
-    const output = row.querySelector('.bustr-plus-bail-cost');
-    if (!output) return;
+    if (!row.querySelector('.bustr-plus-bail-cost')) return;
 
     row.dataset.bustrPlusBailRequested = 'true';
     try {
@@ -1466,9 +1465,24 @@
           return match && match[1] === xid;
         })
       );
-      const currentOutput = currentRow?.querySelector('.bustr-plus-bail-cost');
-      if (currentOutput) {
-        currentOutput.textContent = '
+      const output = currentRow?.querySelector('.bustr-plus-bail-cost');
+      if (output) {
+        output.textContent = '$' + amount.toLocaleString('en-US');
+        output.style.setProperty('--bustr-plus-bail-color', '#d6b36a');
+        output.title = 'Bail cost';
+      }
+    } catch (err) {
+      // Allow a later render to retry transient request failures.
+      delete row.dataset.bustrPlusBailRequested;
+    }
+  }
+
+  function refreshBailAmounts() {
+    if (window.location.pathname !== '/jailview.php') return;
+    document.querySelectorAll('ul.user-info-list-wrap > li').forEach((row) => {
+      fetchBailAmountForRow(row);
+    });
+  }
 
   function findJailColumnAnchor(container, fallbackIndex) {
     const directChildren = [...container.children];
@@ -1913,7 +1927,6 @@
     if (returnToJailAfterQuickBustRedirect()) return;
     
     injectStyles();
-    installBailResponseCapture();
     updateToggleVisibility();
     renderApiKeyGenerator();
     
