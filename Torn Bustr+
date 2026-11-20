@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.11
+// @version      1.5.12
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.11';
+  const VERSION = '1.5.12';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -1477,11 +1477,36 @@
     }
   }
 
-  function refreshBailAmounts() {
+  async function refreshBailAmounts() {
     if (window.location.pathname !== '/jailview.php') return;
-    document.querySelectorAll('ul.user-info-list-wrap > li').forEach((row) => {
-      fetchBailAmountForRow(row);
-    });
+
+    // Never request more bail quotes than the current bust budget allows.
+    // If the budget is unknown or exhausted, do not make any quote requests.
+    const available = Number(state.availableBusts);
+    if (!Number.isFinite(available) || available <= 0) return;
+
+    const candidates = [...document.querySelectorAll('ul.user-info-list-wrap > li')]
+      .filter((row) => {
+        if (!isLikelyJailPlayerRow(row) || !row.querySelector('.bustr-plus-bail-cost')) return false;
+        const href = row.querySelector('a.bye[href]')?.getAttribute('href') || '';
+        if (!/[?&]step=\\s*buy\\b/i.test(href) || !/[?&]action=\\s*rescue\\b/i.test(href)) return false;
+        const parsed = parseRowLevelAndDuration(row);
+        if (!parsed) return false;
+        const score = calcHardnessScore(parsed.level, parsed.hours);
+        return !(state.settings.hideHardTargets && score > state.settings.hardnessLimit);
+      })
+      .map((row) => {
+        const parsed = parseRowLevelAndDuration(row);
+        return { row, score: calcHardnessScore(parsed.level, parsed.hours) };
+      });
+
+    // Match the user's easiest-first setting when choosing which inmates get quotes.
+    if (state.settings.sortByHardness) candidates.sort((a, b) => a.score - b.score);
+
+    // Run only the first N requests, sequentially, where N is the available bust count.
+    for (const { row } of candidates.slice(0, Math.floor(available))) {
+      await fetchBailAmountForRow(row);
+    }
   }
 
   function findJailColumnAnchor(container, fallbackIndex) {
