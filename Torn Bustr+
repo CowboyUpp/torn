@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.4
+// @version      1.5.5
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.4';
+  const VERSION = '1.5.5';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -78,6 +78,7 @@
     observerStarted: false,
     hardnessObserverStarted: false,
     bustConfirmSkipperStarted: false,
+    bailCostCaptureStarted: false,
     pathWatcherStarted: false,
     hubPresent: false,
   };
@@ -557,6 +558,7 @@
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
       .bustr-plus-hardness { display: inline-block; width: 46px; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
       .bustr-plus-success-chance { display: block; width: 100%; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
+      .bye .bustr-plus-bail-cost { display: block; margin-top: 2px; font-size: 11px; line-height: 1.2; font-weight: 700; text-align: center; color: #85b200; white-space: nowrap; }
       .bustr-plus-hard-row { opacity: .32; }
       .bustr-plus-hidden-hard { display: none !important; }
       @media screen and (max-width: 784px) {
@@ -1566,6 +1568,168 @@
     if (window.location.pathname !== '/jailview.php') return;
     const text = document.querySelector('#mainContainer')?.textContent || '';
     recordLocalBustSuccess(text);
+  }
+
+  function startBailCostCapture() {
+    if (state.bailCostCaptureStarted || typeof XMLHttpRequest === 'undefined') return;
+    state.bailCostCaptureStarted = true;
+
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalSend = XMLHttpRequest.prototype.send;
+
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__bustrPlusRequestUrl = String(url || '');
+      return originalOpen.call(this, method, url, ...rest);
+    };
+
+    XMLHttpRequest.prototype.send = function (...args) {
+      const requestUrl = this.__bustrPlusRequestUrl || '';
+      if (/jailview\.php/i.test(requestUrl) &&
+          /(?:\?|&)action=rescue(?:&|$)/i.test(requestUrl) &&
+          /(?:\?|&)step=buy(?:&|$)/i.test(requestUrl)) {
+        this.addEventListener('load', function () {
+          if (!isJailPage() || this.status < 200 || this.status >= 300) return;
+
+          let payload;
+          try {
+            payload = this.responseType === 'json' ? this.response : JSON.parse(this.responseText || '');
+          } catch (err) {
+            return;
+          }
+
+          const message = typeof payload?.msg === 'string' ? payload.msg : '';
+          const match = message.match(/cost you\s*<b[^>]*>\s*\$?\s*([\d,]+)\s*<\/b>/i);
+          if (!match) return;
+
+          let xid = '';
+          try {
+            xid = new URL(this.responseURL || requestUrl, window.location.href).searchParams.get('XID') || '';
+          } catch (err) {}
+          if (!xid) return;
+
+          const buyLink = [...document.querySelectorAll('a.bye[href*="step=buy"]')].find((link) => {
+            try {
+              return new URL(link.href, window.location.href).searchParams.get('XID') === xid;
+            } catch (err) {
+              return false;
+            }
+          });
+          if (!buyLink) return;
+
+          let cost = buyLink.querySelector('.bustr-plus-bail-cost');
+          if (!cost) {
+            cost = document.createElement('span');
+            cost.className = 'bustr-plus-bail-cost';
+            cost.title = 'Bail cost';
+            buyLink.appendChild(cost);
+          }
+          cost.textContent = '    if (!state.observerStarted) {
+      state.observerStarted = true;
+      const target = document.querySelector('#mainContainer') || document.body;
+      new MutationObserver((mutations) => {
+        if (window.location.pathname !== '/jailview.php') return;
+        for (const mutation of mutations) {
+          if (recordLocalBustSuccess(mutation.target?.textContent || '')) return;
+        }
+      }).observe(target, { childList: true, subtree: true });
+    }
+
+    if (!state.hardnessObserverStarted) {
+      state.hardnessObserverStarted = true;
+      const target = document.querySelector('#mainContainer') || document.body;
+      new MutationObserver((mutations) => {
+        if (mutations.every((mutation) => {
+          const targetEl = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
+          return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel, #bustr-plus-navitem');
+        })) return;
+        scheduleHardnessRender();
+      }).observe(target, { childList: true, subtree: true });
+    }
+  }
+
+  function startRefreshTimer() {
+    if (state.refreshTimerId) clearInterval(state.refreshTimerId);
+    state.refreshTimerId = setInterval(async () => {
+      await loadBustData(false);
+      // Total busts change slowly; refresh cache when expired
+      await refreshTotalBusts(false);
+      renderAll();
+    }, Math.max(15, state.settings.refreshSeconds) * 1000);
+  }
+
+  // =========================================================================
+  // INITIALIZATION
+  // =========================================================================
+  async function init() {
+    loadState();
+    registerWithHub();
+    
+    armReturnToJailWatcher();
+    if (returnToJailAfterQuickBustRedirect()) return;
+    
+    injectStyles();
+    updateToggleVisibility();
+    renderApiKeyGenerator();
+    
+    if (!state.settings.enabled) {
+      cleanupModifications();
+      return;
+    }
+    
+    await refreshTotalBusts(false);
+    await loadBustData(false);
+    renderAll();
+    scanExistingBustSuccesses();
+    
+    if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
+      renderPanel(true);
+    }
+    
+    startBustConfirmSkipper();
+    startBailCostCapture();
+    startObservers();
+    startRefreshTimer();
+    startPathWatcher();
+    
+    window.addEventListener('resize', renderAll, { passive: true });
+    window.addEventListener('hashchange', () => {
+      renderApiKeyGenerator();
+      updateToggleVisibility();
+    }, { passive: true });
+    window.addEventListener('pageshow', () => {
+      armReturnToJailWatcher();
+      returnToJailAfterQuickBustRedirect();
+    }, { passive: true });
+
+    // Hub lifecycle listeners
+    document.addEventListener('torn-script-hub:ready', () => {
+      state.hubPresent = isHubPresent();
+      registerWithHub();
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:dormant', () => {
+      state.hubPresent = false;
+      updateToggleVisibility();
+    });
+    document.addEventListener('torn-script-hub:active', () => {
+      state.hubPresent = isHubPresent();
+      updateToggleVisibility();
+      if (state.hubPresent) removeSettingsPanel();
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+ + match[1];
+        });
+      }
+
+      return originalSend.apply(this, args);
+    };
   }
 
   function startObservers() {
