@@ -1411,7 +1411,7 @@
     }
     let value = wrap.querySelector('.bustr-plus-hardness');
     if (!value) {
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span>';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
       value = wrap.querySelector('.bustr-plus-hardness');
     }
     const nextText = Number.isFinite(score) ? String(score) : '-';
@@ -1668,6 +1668,7 @@
     if (returnToJailAfterQuickBustRedirect()) return;
     
     injectStyles();
+    installBailResponseCapture();
     updateToggleVisibility();
     renderApiKeyGenerator();
     
