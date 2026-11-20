@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.10
+// @version      1.5.11
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.10';
+  const VERSION = '1.5.11';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -535,10 +535,10 @@
       #bustr-plus-navitem .bustr-plus-navitem-label { white-space: nowrap; }
       #body .users-list-title { display: flex; justify-content: start; align-items: center; }
       #body .users-list-title .title { width: 269px; }
-      #body .users-list-title .time { width: 50px; }
-      #body .users-list-title .level { width: 53px; }
-      #body .users-list-title .reason { width: 205px; }
-      #body .users-list-title .hardness { display: block; width: 79px; text-align: center; }
+      #body .users-list-title .time { width: 54px; }
+      #body .users-list-title .level { width: 57px; }
+      #body .users-list-title .reason { width: 193px; }
+      #body .users-list-title .hardness { display: block; width: 140px; min-width: 140px; flex: 0 0 140px; box-sizing: border-box; text-align: center; }
       #body .users-list-title .bustr-plus-score-label { vertical-align: middle; }
       #body .users-list-title .bustr-plus-jail-refresh {
         display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
