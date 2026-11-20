@@ -564,7 +564,7 @@
       #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 79px; min-width: 79px; flex: 0 0 79px; box-sizing: border-box; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
       .bustr-plus-score-line { display: inline-flex; align-items: center; justify-content: center; gap: 3px; width: 100%; white-space: nowrap; }
-      .bustr-plus-bail-cost { display: block; width: 100%; margin-top: 2px; text-align: center; font-size: 11px; line-height: 1.15; font-weight: 700; color: var(--bustr-plus-bail-color, #aaa); white-space: nowrap; }
+      .bustr-plus-bail-cost { display: block; width: 100%; margin-top: 2px; text-align: center; font-size: 11px; line-height: 1.15; font-weight: 400; color: #000; white-space: nowrap; }
       .bustr-plus-hardness { display: inline-block; width: auto; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
       .bustr-plus-success-chance { display: inline-block; width: auto; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
       .bustr-plus-hard-row { opacity: .32; }
@@ -1455,7 +1455,8 @@
       const bailText = Number.isFinite(bailAmount) ? '≈ $' + bailAmount.toLocaleString('en-US') : '';
       if (bail.textContent !== bailText) bail.textContent = bailText;
       bail.style.display = bailText ? 'block' : 'none';
-      bail.style.setProperty('--bustr-plus-bail-color', '#d6b36a');
+      bail.style.setProperty('color', '#000');
+      bail.style.setProperty('font-weight', '400');
       const discounts = [];
       if (state.settings.bailEducationDiscount) discounts.push('education (up to 57.25%)');
       if (state.settings.bailLawFirmDiscount) discounts.push('Law Firm 1-star (50%)');
