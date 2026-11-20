@@ -73,6 +73,7 @@
     navStatsPending: false,
     hardnessRendering: false,
     hardnessRenderTimer: null,
+    bailRefreshRunning: false,
     refreshTimerId: null,
     returnToJailTimerId: null,
     observerStarted: false,
@@ -1479,7 +1480,7 @@
   }
 
   async function refreshBailAmounts() {
-    if (window.location.pathname !== '/jailview.php') return;
+    if (window.location.pathname !== '/jailview.php' || state.bailRefreshRunning) return;
 
     // Never request more quotes than the current bust budget allows.
     const available = Number(state.availableBusts);
@@ -1503,12 +1504,17 @@
     candidates.sort((a, b) => a.score - b.score);
 
     // Sequential requests, capped at the number of busts currently available.
-    let requested = 0;
-    for (const { row } of candidates) {
-      if (requested >= Math.floor(available)) break;
-      if (row.dataset.bustrPlusBailRequested === 'true') continue;
-      requested += 1;
-      await fetchBailAmountForRow(row);
+    state.bailRefreshRunning = true;
+    try {
+      let requested = 0;
+      for (const { row } of candidates) {
+        if (requested >= Math.floor(available)) break;
+        if (row.dataset.bustrPlusBailRequested === 'true') continue;
+        requested += 1;
+        await fetchBailAmountForRow(row);
+      }
+    } finally {
+      state.bailRefreshRunning = false;
     }
   }
 
