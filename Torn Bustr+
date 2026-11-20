@@ -1584,9 +1584,9 @@
 
     XMLHttpRequest.prototype.send = function (...args) {
       const requestUrl = this.__bustrPlusRequestUrl || '';
-      if (/jailview\.php/i.test(requestUrl) &&
-          /(?:\?|&)action=rescue(?:&|$)/i.test(requestUrl) &&
-          /(?:\?|&)step=buy(?:&|$)/i.test(requestUrl)) {
+      if (/jailview\\.php/i.test(requestUrl) &&
+          /(?:\\?|&)action=rescue(?:&|$)/i.test(requestUrl) &&
+          /(?:\\?|&)step=buy(?:&|$)/i.test(requestUrl)) {
         this.addEventListener('load', function () {
           if (!isJailPage() || this.status < 200 || this.status >= 300) return;
 
@@ -1598,7 +1598,7 @@
           }
 
           const message = typeof payload?.msg === 'string' ? payload.msg : '';
-          const match = message.match(/cost you\s*<b[^>]*>\s*\$?\s*([\d,]+)\s*<\/b>/i);
+          const match = message.match(/cost you\\s*<b[^>]*>\\s*\\$?\\s*([\\d,]+)\\s*<\\/b>/i);
           if (!match) return;
 
           let xid = '';
@@ -1623,115 +1623,13 @@
             cost.title = 'Bail cost';
             buyLink.appendChild(cost);
           }
-          cost.textContent = '    if (!state.observerStarted) {
-      state.observerStarted = true;
-      const target = document.querySelector('#mainContainer') || document.body;
-      new MutationObserver((mutations) => {
-        if (window.location.pathname !== '/jailview.php') return;
-        for (const mutation of mutations) {
-          if (recordLocalBustSuccess(mutation.target?.textContent || '')) return;
-        }
-      }).observe(target, { childList: true, subtree: true });
-    }
-
-    if (!state.hardnessObserverStarted) {
-      state.hardnessObserverStarted = true;
-      const target = document.querySelector('#mainContainer') || document.body;
-      new MutationObserver((mutations) => {
-        if (mutations.every((mutation) => {
-          const targetEl = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
-          return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel, #bustr-plus-navitem');
-        })) return;
-        scheduleHardnessRender();
-      }).observe(target, { childList: true, subtree: true });
-    }
-  }
-
-  function startRefreshTimer() {
-    if (state.refreshTimerId) clearInterval(state.refreshTimerId);
-    state.refreshTimerId = setInterval(async () => {
-      await loadBustData(false);
-      // Total busts change slowly; refresh cache when expired
-      await refreshTotalBusts(false);
-      renderAll();
-    }, Math.max(15, state.settings.refreshSeconds) * 1000);
-  }
-
-  // =========================================================================
-  // INITIALIZATION
-  // =========================================================================
-  async function init() {
-    loadState();
-    registerWithHub();
-    
-    armReturnToJailWatcher();
-    if (returnToJailAfterQuickBustRedirect()) return;
-    
-    injectStyles();
-    updateToggleVisibility();
-    renderApiKeyGenerator();
-    
-    if (!state.settings.enabled) {
-      cleanupModifications();
-      return;
-    }
-    
-    await refreshTotalBusts(false);
-    await loadBustData(false);
-    renderAll();
-    scanExistingBustSuccesses();
-    
-    if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
-      renderPanel(true);
-    }
-    
-    startBustConfirmSkipper();
-    startBailCostCapture();
-    startObservers();
-    startRefreshTimer();
-    startPathWatcher();
-    
-    window.addEventListener('resize', renderAll, { passive: true });
-    window.addEventListener('hashchange', () => {
-      renderApiKeyGenerator();
-      updateToggleVisibility();
-    }, { passive: true });
-    window.addEventListener('pageshow', () => {
-      armReturnToJailWatcher();
-      returnToJailAfterQuickBustRedirect();
-    }, { passive: true });
-
-    // Hub lifecycle listeners
-    document.addEventListener('torn-script-hub:ready', () => {
-      state.hubPresent = isHubPresent();
-      registerWithHub();
-      updateToggleVisibility();
-    });
-    document.addEventListener('torn-script-hub:dormant', () => {
-      state.hubPresent = false;
-      updateToggleVisibility();
-    });
-    document.addEventListener('torn-script-hub:active', () => {
-      state.hubPresent = isHubPresent();
-      updateToggleVisibility();
-      if (state.hubPresent) removeSettingsPanel();
-    });
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-})();
- + match[1];
+          cost.textContent = '$' + match[1];
         });
       }
 
       return originalSend.apply(this, args);
     };
   }
-
   function startObservers() {
     if (!state.observerStarted) {
       state.observerStarted = true;
