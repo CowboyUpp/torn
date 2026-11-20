@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.12
+// @version      1.5.13
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.12';
+  const VERSION = '1.5.13';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -1331,7 +1331,6 @@
         renderHardnessScore(info, score, chance);
         applyHardnessTreatment(row, score);
       }
-      refreshBailAmounts();
     } finally {
       setTimeout(() => {
         state.hardnessRendering = false;
@@ -1431,82 +1430,71 @@
     }
   }
 
-  // Ask Torn for each inmate's BUY confirmation data in the background.
-  // The step=buy request returns the exact bail amount but does not buy them out.
-  async function fetchBailAmountForRow(row) {
-    if (!row || row.dataset.bustrPlusBailRequested === 'true') return;
-    const buyLink = row.querySelector('a.bye[href]');
-    if (!buyLink) return;
-    const href = buyLink.getAttribute('href') || '';
-    if (!/[?&]step=\s*buy\b/i.test(href) || !/[?&]action=\s*rescue\b/i.test(href)) return;
-    const xidMatch = href.match(/[?&]XID=\s*(\d+)/i);
+  // Read the confirmation response Torn already sends when BUY is clicked.
+  // This adds no requests of its own.
+  function showBailAmountFromResponse(responseUrl, responseText) {
+    if (window.location.pathname !== '/jailview.php') return;
+    let data;
+    try { data = JSON.parse(responseText); } catch (err) { return; }
+    const message = String(data?.msg || data?.message || '');
+    if (!message) return;
+    const amountMatch = message.replace(/<[^>]*>/g, ' ').match(/\$\s*([\d,]+)/);
+    if (!amountMatch) return;
+
+    const xidMatch = String(responseUrl || '').match(/[?&]XID=\s*(\d+)/i)
+      || message.match(/[?&]XID=\s*(\d+)/i);
     if (!xidMatch) return;
     const xid = xidMatch[1];
-    if (!row.querySelector('.bustr-plus-bail-cost')) return;
 
-    row.dataset.bustrPlusBailRequested = 'true';
-    try {
-      const requestUrl = new URL(href, window.location.href);
-      if (requestUrl.origin !== window.location.origin) throw new Error('Unexpected bail URL origin');
-      const response = await fetch(requestUrl.href, { credentials: 'same-origin' });
-      if (!response.ok) throw new Error('Bail quote request failed: ' + response.status);
-      const data = await response.json();
-      const message = String(data?.msg || data?.message || '');
-      const amountMatch = message.replace(/<[^>]*>/g, ' ').match(/\$\s*([\d,]+)/);
-      if (!amountMatch) throw new Error('No bail amount in Torn response');
-      const amount = Number(amountMatch[1].replace(/,/g, ''));
-      if (!Number.isFinite(amount)) throw new Error('Invalid bail amount');
+    const row = [...document.querySelectorAll('ul.user-info-list-wrap > li')].find((item) =>
+      [...item.querySelectorAll('a[href]')].some((link) => {
+        const match = String(link.getAttribute('href') || '').match(/[?&]XID=\s*(\d+)/i);
+        return match && match[1] === xid;
+      })
+    );
+    const output = row?.querySelector('.bustr-plus-bail-cost');
+    if (!output) return;
 
-      // The list can be refreshed while the quote is loading; find the
-      // current row by XID rather than relying on the original node.
-      const currentRow = [...document.querySelectorAll('ul.user-info-list-wrap > li')].find((item) =>
-        [...item.querySelectorAll('a[href]')].some((link) => {
-          const match = String(link.getAttribute('href') || '').match(/[?&]XID=\s*(\d+)/i);
-          return match && match[1] === xid;
-        })
-      );
-      const output = currentRow?.querySelector('.bustr-plus-bail-cost');
-      if (output) {
-        output.textContent = '$' + amount.toLocaleString('en-US');
-        output.style.setProperty('--bustr-plus-bail-color', '#d6b36a');
-        output.title = 'Bail cost';
-      }
-    } catch (err) {
-      // Allow a later render to retry transient request failures.
-      delete row.dataset.bustrPlusBailRequested;
-    }
+    const amount = Number(amountMatch[1].replace(/,/g, ''));
+    if (!Number.isFinite(amount)) return;
+    output.textContent = '$' + amount.toLocaleString('en-US');
+    output.style.setProperty('--bustr-plus-bail-color', '#d6b36a');
+    output.title = 'Bail cost';
   }
 
-  async function refreshBailAmounts() {
-    if (window.location.pathname !== '/jailview.php') return;
+  function installBailResponseCapture() {
+    if (window.__bustrPlusBailCaptureInstalled) return;
+    window.__bustrPlusBailCaptureInstalled = true;
 
-    // Never request more bail quotes than the current bust budget allows.
-    // If the budget is unknown or exhausted, do not make any quote requests.
-    const available = Number(state.availableBusts);
-    if (!Number.isFinite(available) || available <= 0) return;
-
-    const candidates = [...document.querySelectorAll('ul.user-info-list-wrap > li')]
-      .filter((row) => {
-        if (!isLikelyJailPlayerRow(row) || !row.querySelector('.bustr-plus-bail-cost')) return false;
-        const href = row.querySelector('a.bye[href]')?.getAttribute('href') || '';
-        if (!/[?&]step=\s*buy\b/i.test(href) || !/[?&]action=\s*rescue\b/i.test(href)) return false;
-        const parsed = parseRowLevelAndDuration(row);
-        if (!parsed) return false;
-        const score = calcHardnessScore(parsed.level, parsed.hours);
-        return !(state.settings.hideHardTargets && score > state.settings.hardnessLimit);
-      })
-      .map((row) => {
-        const parsed = parseRowLevelAndDuration(row);
-        return { row, score: calcHardnessScore(parsed.level, parsed.hours) };
-      });
-
-    // Match the user's easiest-first setting when choosing which inmates get quotes.
-    if (state.settings.sortByHardness) candidates.sort((a, b) => a.score - b.score);
-
-    // Run only the first N requests, sequentially, where N is the available bust count.
-    for (const { row } of candidates.slice(0, Math.floor(available))) {
-      await fetchBailAmountForRow(row);
+    const originalFetch = window.fetch;
+    if (typeof originalFetch === 'function') {
+      window.fetch = function (...args) {
+        const requestUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+        return originalFetch.apply(this, args).then((response) => {
+          try {
+            response.clone().text()
+              .then((body) => showBailAmountFromResponse(requestUrl, body))
+              .catch(() => {});
+          } catch (err) {}
+          return response;
+        });
+      };
     }
+
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__bustrPlusRequestUrl = String(url || '');
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (...args) {
+      this.addEventListener('load', function () {
+        try {
+          showBailAmountFromResponse(this.__bustrPlusRequestUrl, this.responseText || '');
+        } catch (err) {}
+      });
+      return originalSend.apply(this, args);
+    };
   }
 
   function findJailColumnAnchor(container, fallbackIndex) {
@@ -1695,6 +1683,7 @@
     if (returnToJailAfterQuickBustRedirect()) return;
     
     injectStyles();
+    installBailResponseCapture();
     // Bail quotes are loaded after the inmate rows have been rendered.
     updateToggleVisibility();
     renderApiKeyGenerator();
