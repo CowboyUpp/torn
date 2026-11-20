@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.14
+// @version      1.5.15
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.14';
+  const VERSION = '1.5.15';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -53,7 +53,9 @@
     theme: 'dark',
     redLimit: 0,
     greenLimit: 3,
-    manualTotalBusts: '' // NEW: Manual fallback
+    manualTotalBusts: '', // Manual fallback
+    bailEducationDiscount: false,
+    bailLawFirmDiscount: false
   };
 
   let state = {
@@ -333,6 +335,8 @@
             { key: 'greenLimit', type: 'number', label: 'Green at busts', default: 3, min: 0, hint: 'When the jail menu counter turns green.' },
             { key: 'redLimit', type: 'number', label: 'Red at busts', default: 0, min: 0, hint: 'When the jail menu counter turns red.' },
             { key: 'manualTotalBusts', type: 'text', label: 'Total Busts (Manual)', default: '', placeholder: 'e.g., 8857', hint: 'Optional: If background fetching fails, enter your total busts here and it will be used permanently.' },
+            { key: 'bailEducationDiscount', type: 'toggle', label: 'Bail: Education discount', default: false, hint: 'Apply the education bail discount (up to 57.25%) to formula-based bail estimates. Torn confirmation quotes already include applicable discounts.' },
+            { key: 'bailLawFirmDiscount', type: 'toggle', label: 'Bail: Law Firm 1-star discount', default: false, hint: 'Apply the Law Firm 1-star company special (50%) to formula-based bail estimates. Torn confirmation quotes already include applicable discounts.' },
           ],
           values: {
             enabled: state.settings.enabled,
@@ -354,6 +358,8 @@
             redLimit: state.settings.redLimit,
             apiKey: state.apiKey || '',
             manualTotalBusts: state.settings.manualTotalBusts || '',
+            bailEducationDiscount: !!state.settings.bailEducationDiscount,
+            bailLawFirmDiscount: !!state.settings.bailLawFirmDiscount,
           },
           onSave: (values) => {
             const wasEnabled = state.settings.enabled;
@@ -377,6 +383,8 @@
             state.settings.greenLimit = Math.max(0, Number(values.greenLimit) || 0);
             state.settings.redLimit = Math.max(0, Number(values.redLimit) || 0);
             state.settings.manualTotalBusts = String(values.manualTotalBusts || '').trim();
+            state.settings.bailEducationDiscount = !!values.bailEducationDiscount;
+            state.settings.bailLawFirmDiscount = !!values.bailLawFirmDiscount;
 
             // Only accept a real 16-char key; ignore blank Hub snapshots (never wipe key)
             if (typeof values.apiKey === 'string') {
