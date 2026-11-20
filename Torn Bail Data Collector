@@ -1,0 +1,250 @@
+// ==UserScript==
+// @name         Torn Bail Data Collector
+// @namespace    cowboyup
+// @version      1.0.0
+// @description  Passively collects real bail quotes and pairs them with inmate level, jail time and Bustr+ hardness. Does not make requests or confirm purchases.
+// @author       CowboyUp
+// @match        https://www.torn.com/jailview.php*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(() => {
+  'use strict';
+
+  const VERSION = '1.0.0';
+  const STORAGE_KEY = 'cowboyup_torn_bail_samples_v1';
+  const PENDING_TIMEOUT = 20000;
+  let pendingSample = null;
+  let pendingTimer = null;
+  let observer = null;
+
+  const log = (...args) => console.info('[Bail Data Collector]', ...args);
+
+  function readSamples() {
+    try {
+      const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      return Array.isArray(value) ? value : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function writeSamples(samples) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(samples));
+    updatePanel();
+  }
+
+  function getXidFromHref(href) {
+    return String(href || '').match(/[?&]XID=\s*(\d+)/i)?.[1] || '';
+  }
+
+  function parseRow(row) {
+    if (!row) return null;
+    const info = row.querySelector('.info-wrap') || row;
+    const cells = [...info.children].filter(el => !el.classList.contains('bustr-plus-hardness-wrap'));
+    const levelText = row.querySelector('.level')?.textContent ||
+      cells.find(el => /\blevel\b/i.test(el.className || ''))?.textContent ||
+      cells[1]?.textContent || '';
+    const timeText = row.querySelector('.time')?.textContent ||
+      cells.find(el => /\btime\b/i.test(el.className || ''))?.textContent ||
+      cells[0]?.textContent || '';
+
+    let level = Number((levelText.match(/\d+/) || [])[0]);
+    let rawTime = timeText;
+
+    if (!Number.isFinite(level) || !rawTime.trim()) {
+      const text = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+      const match = text.match(/((?:\d+\s*(?:d|day|h|hour|m|min)\s*){1,3})\s+(\d{1,4})\b/i);
+      if (match) {
+        if (!rawTime.trim()) rawTime = match[1];
+        if (!Number.isFinite(level)) level = Number(match[2]);
+      }
+    }
+    if (!Number.isFinite(level) || !rawTime.trim()) return null;
+
+    const days = Number((rawTime.match(/(\d+)\s*(?:d|day)/i) || [0, 0])[1]);
+    const hours = Number((rawTime.match(/(\d+)\s*(?:h|hour)/i) || [0, 0])[1]);
+    const mins = Number((rawTime.match(/(\d+)\s*(?:m|min)/i) || [0, 0])[1]);
+    const jailHours = days * 24 + hours + mins / 60;
+    return {
+      level,
+      jailHours: Number(jailHours.toFixed(4)),
+      hardness: Math.floor(level * (jailHours + 3)),
+      displayedJailTime: rawTime.trim()
+    };
+  }
+
+  function findInmateRow(xid, clickedLink) {
+    const rows = [...document.querySelectorAll('ul.user-info-list-wrap > li')];
+    return rows.find(row => [...row.querySelectorAll('a[href]')].some(link =>
+      getXidFromHref(link.getAttribute('href')) === xid
+    )) || clickedLink?.closest('li') || null;
+  }
+
+  function getInmateName(row, xid) {
+    const link = row?.querySelector('a.user.name, a[href*="XID="]');
+    const name = String(link?.textContent || '').replace(/\s+/g, ' ').trim();
+    return name || ('XID ' + xid);
+  }
+
+  function startPendingCapture(link) {
+    const href = link.getAttribute('href') || '';
+    if (!/[?&]step=\s*buy\b/i.test(href) || !/[?&]action=\s*rescue\b/i.test(href)) return;
+
+    const xid = getXidFromHref(href);
+    if (!xid) return;
+
+    const row = findInmateRow(xid, link);
+    const parsed = parseRow(row);
+    pendingSample = {
+      capturedAt: new Date().toISOString(),
+      xid,
+      name: getInmateName(row, xid),
+      level: parsed?.level ?? null,
+      jailTime: parsed?.displayedJailTime ?? null,
+      jailHours: parsed?.jailHours ?? null,
+      hardness: parsed?.hardness ?? null,
+      bailAmount: null,
+      page: location.href
+    };
+
+    clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => {
+      if (pendingSample) {
+        log('No bail amount was detected for the pending quote. No sample saved.', pendingSample);
+        pendingSample = null;
+      }
+    }, PENDING_TIMEOUT);
+
+    // Torn displays the quote in its BUY confirmation prompt. Observe that prompt;
+    // do not fetch the link, submit the confirmation, or interfere with Torn's action.
+    setTimeout(scanForQuote, 0);
+  }
+
+  function scanForQuote() {
+    if (!pendingSample) return;
+
+    const text = String(document.body?.innerText || '').replace(/\s+/g, ' ');
+    const phraseIndex = text.search(/Are you sure you want to buy/i);
+    if (phraseIndex < 0) return;
+
+    const prompt = text.slice(phraseIndex, phraseIndex + 1200);
+    const amountMatch = prompt.match(/It will cost you\s*\$\s*([\d,]+)/i);
+    if (!amountMatch) return;
+
+    const amount = Number(amountMatch[1].replace(/,/g, ''));
+    if (!Number.isFinite(amount) || amount <= 0) return;
+
+    const sample = { ...pendingSample, bailAmount: amount };
+    const samples = readSamples();
+    samples.push(sample);
+    writeSamples(samples);
+
+    clearTimeout(pendingTimer);
+    pendingSample = null;
+    log('Captured bail sample:', sample);
+    showNotice('Saved bail quote: $' + amount.toLocaleString('en-US'));
+  }
+
+  function csvEscape(value) {
+    const text = value == null ? '' : String(value);
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+
+  function downloadFile(filename, content, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function exportJSON() {
+    const samples = readSamples();
+    downloadFile('torn-bail-samples.json', JSON.stringify(samples, null, 2), 'application/json');
+  }
+
+  function exportCSV() {
+    const samples = readSamples();
+    const columns = ['capturedAt', 'xid', 'name', 'level', 'jailTime', 'jailHours', 'hardness', 'bailAmount', 'page'];
+    const lines = [columns.join(',')];
+    for (const sample of samples) {
+      lines.push(columns.map(key => csvEscape(sample[key])).join(','));
+    }
+    downloadFile('torn-bail-samples.csv', lines.join('\r\n'), 'text/csv;charset=utf-8');
+  }
+
+  function updatePanel() {
+    const count = document.getElementById('bail-data-count');
+    if (count) count.textContent = String(readSamples().length);
+  }
+
+  function showNotice(message) {
+    const notice = document.getElementById('bail-data-notice');
+    if (!notice) return;
+    notice.textContent = message;
+    notice.style.display = 'block';
+    clearTimeout(showNotice.timer);
+    showNotice.timer = setTimeout(() => { notice.style.display = 'none'; }, 4500);
+  }
+
+  function createPanel() {
+    if (document.getElementById('bail-data-panel')) return;
+    const panel = document.createElement('div');
+    panel.id = 'bail-data-panel';
+    panel.innerHTML = `
+      <div class="bdc-head"><strong>Bail Data Collector</strong><span>v${VERSION}</span></div>
+      <div class="bdc-info"><b id="bail-data-count">0</b> samples collected</div>
+      <div class="bdc-actions">
+        <button type="button" id="bdc-export-json">Export JSON</button>
+        <button type="button" id="bdc-export-csv">Export CSV</button>
+      </div>
+      <div class="bdc-help">Click an inmate's BUY button as usual. When Torn shows the bail confirmation prompt, the amount and inmate data are saved. Do not click the final confirmation unless you intend to bust.</div>
+      <div id="bail-data-notice"></div>
+    `;
+    document.body.appendChild(panel);
+
+    const style = document.createElement('style');
+    style.textContent = `
+      #bail-data-panel{position:fixed;right:12px;bottom:12px;z-index:999999;background:#222;color:#eee;border:1px solid #555;border-radius:7px;padding:10px;width:240px;box-shadow:0 2px 12px #0008;font:12px Arial,sans-serif}
+      #bail-data-panel .bdc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+      #bail-data-panel .bdc-head span{color:#aaa;font-size:10px}
+      #bail-data-panel .bdc-info{margin-bottom:8px;color:#ccc}
+      #bail-data-panel .bdc-info b{color:#f0c66a;font-size:15px}
+      #bail-data-panel .bdc-actions{display:flex;gap:6px}
+      #bail-data-panel button{flex:1;background:#444;color:#fff;border:1px solid #666;border-radius:4px;padding:6px 4px;cursor:pointer;font-size:11px}
+      #bail-data-panel button:hover{background:#555}
+      #bail-data-panel .bdc-help{margin-top:8px;color:#bbb;line-height:1.4}
+      #bail-data-notice{display:none;margin-top:7px;color:#9ed27c;line-height:1.35}
+    `;
+    document.head.appendChild(style);
+    panel.querySelector('#bdc-export-json').addEventListener('click', exportJSON);
+    panel.querySelector('#bdc-export-csv').addEventListener('click', exportCSV);
+    updatePanel();
+  }
+
+  // Capture before Torn's own click handler, but never prevent or alter that click.
+  document.addEventListener('click', event => {
+    const link = event.target?.closest?.('a.bye[href]');
+    if (link) startPendingCapture(link);
+  }, true);
+
+  observer = new MutationObserver(() => scanForQuote());
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+
+  function init() {
+    createPanel();
+    log('Ready. Passive capture only; no background requests are made.');
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();
