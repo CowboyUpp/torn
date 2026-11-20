@@ -24,7 +24,6 @@
   const SCRIPT = 'Bustr+';
   const VERSION = '1.5.16';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
-  const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
   const API_KEY_PERMISSION = 'User / Log + Personal Stats';
   const API_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=BUSTRPlus&user=log,personalstats';
