@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.5
+// @version      1.5.6
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.5';
+  const VERSION = '1.5.6';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -556,9 +556,10 @@
       #body .user-info-list-wrap > li .info-wrap .reason { width: 193px; }
       #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 50px; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
-      .bustr-plus-hardness { display: inline-block; width: 46px; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
-      .bustr-plus-success-chance { display: block; width: 100%; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
-      .bye .bustr-plus-bail-cost { display: block; margin-top: 2px; font-size: 11px; line-height: 1.2; font-weight: 700; text-align: center; color: #85b200; white-space: nowrap; }
+      .bustr-plus-score-line { display: flex; align-items: center; justify-content: center; gap: 3px; width: 100%; }
+      .bustr-plus-hardness { display: inline-block; flex: 0 0 auto; width: auto; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
+      .bustr-plus-success-chance { display: inline-block; flex: 0 0 auto; width: auto; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
+      .bustr-plus-bail-cost { display: block; margin-top: 2px; font-size: 11px; line-height: 1.2; font-weight: 700; text-align: center; color: #85b200; white-space: nowrap; }
       .bustr-plus-hard-row { opacity: .32; }
       .bustr-plus-hidden-hard { display: none !important; }
       @media screen and (max-width: 784px) {
@@ -1404,14 +1405,14 @@
     if (!wrap) {
       wrap = document.createElement('span');
       wrap.className = 'hardness reason bustr-plus-hardness-wrap';
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span>';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
       const reason = findJailColumnAnchor(info, 2);
       if (reason) reason.insertAdjacentElement('afterend', wrap);
       else info.appendChild(wrap);
     }
     let value = wrap.querySelector('.bustr-plus-hardness');
     if (!value) {
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span>';
+      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
       value = wrap.querySelector('.bustr-plus-hardness');
     }
     const nextText = Number.isFinite(score) ? String(score) : '-';
@@ -1616,12 +1617,15 @@
           });
           if (!buyLink) return;
 
-          let cost = buyLink.querySelector('.bustr-plus-bail-cost');
+          const row = buyLink.closest('li');
+          const scoreCell = row && row.querySelector('.bustr-plus-hardness-wrap');
+          if (!scoreCell) return;
+          let cost = scoreCell.querySelector('.bustr-plus-bail-cost');
           if (!cost) {
             cost = document.createElement('span');
             cost.className = 'bustr-plus-bail-cost';
             cost.title = 'Bail cost';
-            buyLink.appendChild(cost);
+            scoreCell.appendChild(cost);
           }
           cost.textContent = '$' + match[1];
         });
@@ -1693,6 +1697,7 @@
       renderPanel(true);
     }
     
+    startBailCostCapture();
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
