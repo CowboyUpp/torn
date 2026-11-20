@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.8
+// @version      1.5.9
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.8';
+  const VERSION = '1.5.9';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   const API_KEY_TITLE = 'BUSTRPlus';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
@@ -556,11 +556,9 @@
       #body .user-info-list-wrap > li .info-wrap .reason { width: 193px; }
       #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 50px; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
-      #body .user-info-list-wrap > li > .bustr-plus-hardness-wrap { display: block; width: 79px; min-width: 79px; flex: 0 0 79px; box-sizing: border-box; text-align: center; }
-      #body .user-info-list-wrap > li > .bustr-plus-hardness-wrap .title { display: none; }
-      .bustr-plus-score-line { display: flex; align-items: center; justify-content: center; gap: 3px; width: 100%; white-space: nowrap; }
-      .bustr-plus-hardness { display: inline-block; flex: 0 0 auto; width: auto; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
-      .bustr-plus-success-chance { display: inline-block; flex: 0 0 auto; width: auto; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
+      .bustr-plus-score-line { display: inline-flex; align-items: center; justify-content: center; gap: 3px; white-space: nowrap; }
+      .bustr-plus-hardness { display: inline-block; width: auto; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
+      .bustr-plus-success-chance { display: inline-block; width: auto; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
       .bustr-plus-bail-cost { display: block; margin-top: 2px; font-size: 11px; line-height: 1.2; font-weight: 700; text-align: center; color: #85b200; white-space: nowrap; }
       .bustr-plus-hard-row { opacity: .32; }
       .bustr-plus-hidden-hard { display: none !important; }
@@ -575,13 +573,14 @@
           overflow-wrap: anywhere;
           border-right: 1px solid rgb(34, 34, 34);
         }
-        #body .user-info-list-wrap > li > .bustr-plus-hardness-wrap {
+        #body .user-info-list-wrap > li .info-wrap .bustr-plus-hardness-wrap {
           width: 86px;
           min-width: 86px;
           flex: 0 0 86px;
+          box-sizing: border-box;
+          text-align: center;
           border-left: 1px solid rgb(34, 34, 34);
         }
-        #body .user-info-list-wrap > li > .bustr-plus-hardness-wrap .title { display: block; }
       }
       @media screen and (max-width: 386px) {
         #body .user-info-list-wrap > li .info-wrap .time { width: 98px; height: 37px; }
@@ -593,10 +592,13 @@
           overflow-wrap: anywhere;
           border-right: 1px solid rgb(34, 34, 34);
         }
-        #body .user-info-list-wrap > li > .bustr-plus-hardness-wrap {
+        #body .user-info-list-wrap > li .info-wrap .bustr-plus-hardness-wrap {
           width: 120px;
           min-width: 120px;
           flex: 0 0 120px;
+          box-sizing: border-box;
+          text-align: center;
+          border-left: 1px solid rgb(34, 34, 34);
         }
       }
     `;
@@ -1321,13 +1323,13 @@
 
         const parsed = parseRowLevelAndDuration(row);
         if (!parsed) {
-          renderHardnessScore(row, null);
+          renderHardnessScore(info, null);
           resetHardnessTreatment(row);
           continue;
         }
         const score = calcHardnessScore(parsed.level, parsed.hours);
         const chance = state.settings.showSuccessChance ? calcSuccessChance(score, calcSuccessPenaltyPct(state.timestamps)) : null;
-        renderHardnessScore(row, score, chance);
+        renderHardnessScore(info, score, chance);
         applyHardnessTreatment(row, score);
       }
     } finally {
@@ -1397,23 +1399,16 @@
     else title.appendChild(header);
   }
 
-  function renderHardnessScore(row, score, chance = null) {
-    const info = row.querySelector('.info-wrap') || row;
-    let wrap = row.querySelector(':scope > .bustr-plus-hardness-wrap');
-    if (!wrap) {
-      // Reuse and relocate a wrapper left inside .info-wrap by an earlier render.
-      wrap = row.querySelector('.bustr-plus-hardness-wrap');
-      if (wrap) info.insertAdjacentElement('afterend', wrap);
-    }
-    // Keep exactly one top-level Score cell per inmate row.
-    for (const extra of [...row.querySelectorAll('.bustr-plus-hardness-wrap')]) {
-      if (extra !== wrap) extra.remove();
-    }
+  function renderHardnessScore(info, score, chance = null) {
+    let wrap = info.querySelector('.bustr-plus-hardness-wrap');
+    for (const extra of [...info.querySelectorAll('.bustr-plus-hardness-wrap')].slice(1)) extra.remove();
     if (!wrap) {
       wrap = document.createElement('span');
-      wrap.className = 'hardness bustr-plus-hardness-wrap';
+      wrap.className = 'hardness reason bustr-plus-hardness-wrap';
       wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
-      info.insertAdjacentElement('afterend', wrap);
+      const reason = findJailColumnAnchor(info, 2);
+      if (reason) reason.insertAdjacentElement('afterend', wrap);
+      else info.appendChild(wrap);
     }
     let value = wrap.querySelector('.bustr-plus-hardness');
     if (!value) {
@@ -1429,7 +1424,7 @@
     const pct = wrap.querySelector('.bustr-plus-success-chance');
     if (pct) {
       const pctText = Number.isFinite(chance) && state.settings.showSuccessChance ? `${chance}%` : '';
-      pct.style.display = pctText ? 'inline-block' : 'none';
+      pct.style.display = pctText ? 'block' : 'none';
       if (pct.textContent !== pctText) pct.textContent = pctText;
       if (pctText) pct.style.setProperty('--bustr-plus-success-color', successChanceColor(chance));
       else pct.style.removeProperty('--bustr-plus-success-color');
@@ -1623,7 +1618,7 @@
           if (!buyLink) return;
 
           const row = buyLink.closest('li');
-          const scoreCell = row && row.querySelector('.bustr-plus-hardness-wrap');
+          const scoreCell = row && row.querySelector('.info-wrap .bustr-plus-hardness-wrap');
           if (!scoreCell) return;
           let cost = scoreCell.querySelector('.bustr-plus-bail-cost');
           if (!cost) {
