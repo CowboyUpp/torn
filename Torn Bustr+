@@ -1584,9 +1584,9 @@
 
     XMLHttpRequest.prototype.send = function (...args) {
       const requestUrl = this.__bustrPlusRequestUrl || '';
-      if (/jailview\\.php/i.test(requestUrl) &&
-          /(?:\\?|&)action=rescue(?:&|$)/i.test(requestUrl) &&
-          /(?:\\?|&)step=buy(?:&|$)/i.test(requestUrl)) {
+      if (/jailview\.php/i.test(requestUrl) &&
+          /(?:\?|&)action=rescue(?:&|$)/i.test(requestUrl) &&
+          /(?:\?|&)step=buy(?:&|$)/i.test(requestUrl)) {
         this.addEventListener('load', function () {
           if (!isJailPage() || this.status < 200 || this.status >= 300) return;
 
@@ -1598,7 +1598,7 @@
           }
 
           const message = typeof payload?.msg === 'string' ? payload.msg : '';
-          const match = message.match(/cost you\\s*<b[^>]*>\\s*\\$?\\s*([\\d,]+)\\s*<\\/b>/i);
+          const match = message.match(/cost you\s*<b[^>]*>\s*\$?\s*([\d,]+)\s*<\/b>/i);
           if (!match) return;
 
           let xid = '';
