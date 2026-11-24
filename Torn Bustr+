@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bustr+
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      1.5.16
+// @version      1.5.17
 // @description  Safer Torn jail-busting helper. Bust estimate, total people busted, hardness + estimated success %, in-place jail refresh, filtering, sorting, confirm skip. Script Hub + standalone sidebar. PDA compatible.
 // @author       cowboyup
 // @license      MIT
@@ -22,7 +22,7 @@
   'use strict';
 
   const SCRIPT = 'Bustr+';
-  const VERSION = '1.5.16';
+  const VERSION = '1.5.17';
   const STORAGE_PREFIX = 'bustrPlusSafe.';
   // Single custom key: Log (available estimate) + Personal Stats (total peoplebusted)
   const API_KEY_PERMISSION = 'User / Log + Personal Stats';
@@ -30,6 +30,10 @@
   const BUST_LOG_ID = 5360;
   const HUB_ID = 'bustr-plus';
   const CACHE_TTL_TOTAL = 6 * 60 * 60 * 1000; // 6 hours — total changes slowly
+  const SCORE_WRAP_HTML =
+    '<span class="title bold">SCORE</span>' +
+    '<span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span>' +
+    '<span class="bustr-plus-bail-cost"></span>';
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -150,7 +154,6 @@
   // TOTAL BUSTS VIA GM (With Manual Fallback)
   // =========================================================================
   function getCachedTotalBusts() {
-    // If user set a manual value, always use it
     if (state.settings.manualTotalBusts) {
       return parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
     }
@@ -167,15 +170,9 @@
     state.totalBusts = count;
   }
 
-  /**
-   * Total "People busted" from Torn API personalstats.peoplebusted.
-   * Requires the API key to include user → personalstats (Generate key button
-   * is pre-filled for log + personalstats). Falls back to page scrape, then manual.
-   */
   async function fetchTotalBustsViaAPI() {
     if (!state.apiKey) return null;
     try {
-      // Narrow request keeps payload small; key must include user → personalstats
       const url =
         `https://api.torn.com/v2/user/personalstats?cat=jail` +
         `&comment=BustrPlus&key=${encodeURIComponent(state.apiKey)}`;
@@ -384,7 +381,8 @@
             state.settings.bailEducationDiscount = !!values.bailEducationDiscount;
             state.settings.bailLawFirmDiscount = !!values.bailLawFirmDiscount;
 
-            // Only accept a real 16-char key; ignore blank Hub snapshots (never wipe key)
+            saveSettings();
+
             if (typeof values.apiKey === 'string') {
               const key = values.apiKey.trim();
               if (key && /^[A-Za-z0-9]{16}$/.test(key) && key !== state.apiKey) {
@@ -396,9 +394,10 @@
               }
             }
 
-            saveSettings();
-            recalcStats();
-            saveStats();
+            if (!keyPromise) {
+              recalcStats();
+              saveStats();
+            }
 
             if (state.settings.manualTotalBusts) {
               state.totalBusts = parseInt(state.settings.manualTotalBusts.replace(/,/g, ''), 10) || null;
@@ -407,7 +406,7 @@
             }
 
             if (!wasEnabled && state.settings.enabled) {
-              keyPromise = loadBustData(false).then(() => {
+              keyPromise = Promise.resolve(keyPromise).then(() => loadBustData(false)).then(() => {
                 renderAll();
                 startRefreshTimer();
                 scanExistingBustSuccesses();
@@ -431,15 +430,15 @@
   }
 
   function cleanupModifications() {
-    document.querySelectorAll('.bustr-plus-nav, .bustr-plus-pill').forEach(el => el.remove());
+    document.querySelectorAll('.bustr-plus-nav, .bustr-plus-pill, .bustr-plus-col-settings').forEach((el) => el.remove());
     document.body.classList.remove('bustr-plus-green', 'bustr-plus-orange', 'bustr-plus-red');
-    document.querySelectorAll('.bustr-plus-hardness-col').forEach(el => el.remove());
-    document.querySelectorAll('.bustr-plus-hardness-wrap').forEach(el => el.remove());
-    document.querySelectorAll('.bustr-plus-hard-row, .bustr-plus-hidden-hard').forEach(row => {
+    document.querySelectorAll('.bustr-plus-hardness-col').forEach((el) => el.remove());
+    document.querySelectorAll('.bustr-plus-hardness-wrap').forEach((el) => el.remove());
+    document.querySelectorAll('.bustr-plus-hard-row, .bustr-plus-hidden-hard').forEach((row) => {
       row.classList.remove('bustr-plus-hard-row', 'bustr-plus-hidden-hard');
       row.style.order = '';
     });
-    document.querySelectorAll("a[href*='breakout']").forEach(link => unmarkQuickBustLink(link));
+    document.querySelectorAll("a[href*='breakout']").forEach((link) => unmarkQuickBustLink(link));
     removeToggleButton();
     removeSettingsPanel();
   }
@@ -525,33 +524,29 @@
       #bustr-plus-panel .status { color: var(--bustr-plus-color, #85b200); font-weight: 700; }
       #bustr-plus-panel .version { color: var(--bustr-muted); font-size: 10px; text-align: right; }
       #bustr-plus-panel .icon-btn { width: 28px; min-width: 28px; padding: 0; display: inline-grid; place-items: center; }
-      #bustr-plus-navitem {
-        display: flex; justify-content: center; align-items: center; padding: 4px 0;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-link {
-        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-        width: 50px; min-height: 44px; padding: 4px 2px; border: 0; border-radius: 6px; background: transparent;
-        color: #999; cursor: pointer; font: 700 9px/1.1 Arial, sans-serif; text-transform: uppercase;
-        letter-spacing: .02em; text-align: center;
-      }
-      #bustr-plus-navitem .bustr-plus-navitem-link:hover,
-      #bustr-plus-navitem .bustr-plus-navitem-link:focus-visible { color: #ccc; background: rgba(255,255,255,.06); outline: none; }
-      #bustr-plus-navitem .bustr-plus-navitem-iconwrap { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; }
-      #bustr-plus-navitem .bustr-plus-navitem-iconwrap svg { display: block; fill: currentColor; }
-      #bustr-plus-navitem .bustr-plus-navitem-label { white-space: nowrap; }
       #body .users-list-title { display: flex; justify-content: start; align-items: center; }
       #body .users-list-title .title { width: 269px; }
       #body .users-list-title .time { width: 50px; }
       #body .users-list-title .level { width: 53px; }
       #body .users-list-title .reason { width: 205px; }
       #body .users-list-title .hardness { display: block; width: 79px; text-align: center; }
+      #body .users-list-title .action { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
       #body .users-list-title .bustr-plus-score-label { vertical-align: middle; }
       #body .users-list-title .bustr-plus-jail-refresh {
         display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
         min-width: 18px; margin-left: 3px; padding: 0; border: 0; background: transparent;
         color: inherit; font: 700 16px/1 Arial, sans-serif; cursor: pointer; vertical-align: middle;
       }
+      #body .users-list-title .bustr-plus-col-settings {
+        display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+        min-width: 18px; margin-left: 3px; padding: 0; border: 0; background: transparent;
+        color: #fff; cursor: pointer; vertical-align: middle; flex-shrink: 0;
+      }
+      #body .users-list-title .bustr-plus-col-settings svg {
+        display: block; width: 14px; height: 14px; fill: #fff;
+      }
       #body .users-list-title .bustr-plus-jail-refresh:hover { color: #fff; }
+      #body .users-list-title .bustr-plus-col-settings:hover { opacity: 0.85; }
       #body .users-list-title .bustr-plus-jail-refresh.is-refreshing { animation: bustr-plus-spin .65s linear infinite; }
       @keyframes bustr-plus-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       #body .user-info-list-wrap { display: flex; flex-direction: column; justify-content: start; align-items: center; }
@@ -563,7 +558,7 @@
       #body .user-info-list-wrap > li .info-wrap .hardness { display: block; width: 79px; min-width: 79px; flex: 0 0 79px; box-sizing: border-box; text-align: center; }
       #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: none; }
       .bustr-plus-score-line { display: inline-flex; align-items: center; justify-content: center; gap: 3px; width: 100%; white-space: nowrap; }
-      .bustr-plus-bail-cost { display: block; width: 100%; margin-top: 2px; text-align: center; font-size: 11px; line-height: 1.15; font-weight: 400; color: #000; white-space: nowrap; }
+      .bustr-plus-bail-cost { display: block; width: 100%; margin-top: 2px; text-align: center; font-size: 11px; line-height: 1.15; font-weight: 400; color: inherit; opacity: .85; white-space: nowrap; }
       .bustr-plus-hardness { display: inline-block; width: auto; text-align: center; font-weight: 700; color: var(--bustr-plus-hardness-color, #ddd); }
       .bustr-plus-success-chance { display: inline-block; width: auto; box-sizing: border-box; margin-left: 0; text-align: center; font-weight: 700; color: var(--bustr-plus-success-color, #aaa); }
       .bustr-plus-hard-row { opacity: .32; }
@@ -571,8 +566,6 @@
       @media screen and (max-width: 784px) {
         #body .users-list-title .hardness { display: none; }
         #body .user-info-list-wrap > li .info-wrap .hardness span.title { display: block; }
-        /* PDA: give the native Reason cell a little less width so its text wraps
-           naturally and the injected Score cell can use the far-right column. */
         #body .user-info-list-wrap > li .info-wrap .reason:not(.bustr-plus-hardness-wrap) {
           width: 148px;
           white-space: normal;
@@ -611,51 +604,8 @@
     document.head.appendChild(style);
   }
 
-  function getViewportType() {
-    return (window.visualViewport ? visualViewport.width : window.innerWidth) > 1000 ? 'desktop' : 'mobile';
-  }
-
   function isJailPage() {
     return window.location.pathname === '/jailview.php';
-  }
-
-  function buildToggleElement() {
-    const wrap = document.createElement('div');
-    wrap.id = 'bustr-plus-navitem';
-    wrap.innerHTML = `
-      <button type="button" id="bustr-plus-toggle" class="bustr-plus-navitem-link" title="Open BUSTR+ settings">
-        <span class="bustr-plus-navitem-iconwrap">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20">
-            <path d="M8,10V7a4,4,0,0,1,8,0v3h.5A1.5,1.5,0,0,1,18,11.5v7A1.5,1.5,0,0,1,16.5,20h-9A1.5,1.5,0,0,1,6,18.5v-7A1.5,1.5,0,0,1,7.5,10Zm2,0h4V7a2,2,0,0,0-4,0Zm2,4.35a1.35,1.35,0,0,1,.75,2.47V18h-1.5V16.82A1.35,1.35,0,0,1,12,14.35Z"></path>
-          </svg>
-        </span>
-        <span class="bustr-plus-navitem-label">BUSTR+</span>
-      </button>
-    `;
-    wrap.querySelector('#bustr-plus-toggle').addEventListener('click', () => renderPanel(false));
-    return wrap;
-  }
-
-  function ensureToggleButton() {
-    if (!isJailPage()) return;
-    if (isHubPresent()) {
-      removeToggleButton();
-      return;
-    }
-
-    const sidebar = document.getElementById('sidebar');
-    const sidebarVisible = !!sidebar &&
-      sidebar.offsetParent !== null &&
-      sidebar.getClientRects().length > 0;
-
-    if (!sidebarVisible) {
-      removeToggleButton();
-      return;
-    }
-
-    let wrap = document.getElementById('bustr-plus-navitem');
-    if (!wrap) wrap = buildToggleElement();
-    if (wrap.parentElement !== sidebar) sidebar.appendChild(wrap);
   }
 
   function removeToggleButton() {
@@ -668,17 +618,11 @@
   }
 
   function updateToggleVisibility() {
-    if (!isJailPage()) {
-      removeToggleButton();
+    // Remove standalone sidebar button when no Script Hub is present
+    removeToggleButton();
+    if (!isJailPage() || isHubPresent()) {
       removeSettingsPanel();
-      return;
     }
-    if (isHubPresent()) {
-      removeToggleButton();
-      removeSettingsPanel();
-      return;
-    }
-    ensureToggleButton();
   }
 
   function startPathWatcher() {
@@ -689,7 +633,6 @@
       if (window.location.pathname === lastPath) return;
       lastPath = window.location.pathname;
       updateToggleVisibility();
-      renderApiKeyGenerator();
     }, 500);
     window.addEventListener('popstate', updateToggleVisibility, { passive: true });
   }
@@ -740,6 +683,7 @@
           ${numberField('decayDivisorHours', 'Decay rate hrs', s.decayDivisorHours)}
           ${numberField('decayWindowHours', 'Decay window hrs', s.decayWindowHours)}
           ${numberField('greenLimit', 'Green at busts', s.greenLimit)}
+          ${numberField('redLimit', 'Red at busts', s.redLimit)}
           ${numberField('playerLevel', 'Your level', s.playerLevel)}
           ${numberField('otherBustSkillBonus', 'Other bust skill %', s.otherBustSkillBonus)}
         </div>
@@ -750,6 +694,8 @@
           <label><span>Faction +50%</span><input id="bustr-plus-factionBustSkill" type="checkbox" ${s.factionBustSkill ? 'checked' : ''}></label>
           <label><span>Education +65%</span><input id="bustr-plus-educationBustSkill" type="checkbox" ${s.educationBustSkill ? 'checked' : ''}></label>
           <label><span>Skip confirm</span><input id="bustr-plus-skipBustConfirm" type="checkbox" ${s.skipBustConfirm ? 'checked' : ''}></label>
+          <label><span>Bail edu %</span><input id="bustr-plus-bailEducationDiscount" type="checkbox" ${s.bailEducationDiscount ? 'checked' : ''}></label>
+          <label><span>Bail law 1★</span><input id="bustr-plus-bailLawFirmDiscount" type="checkbox" ${s.bailLawFirmDiscount ? 'checked' : ''}></label>
         </div>
         <label>
           <span>Total Busts (Manual Fallback)</span>
@@ -759,7 +705,7 @@
           <button type="button" class="danger" data-action="forget-key">Forget key</button>
           <button type="button" class="primary" data-action="save-settings">Save settings</button>
         </div>
-        <div class="hint">Hardness: level × (hours + 3). Success % is a community-derived estimate using your level, selected bust-skill bonuses and the same decay settings. The display now keeps more resolution between easy targets instead of flattening them to one value. It is not an official Torn probability.</div>
+        <div class="hint">Hardness: level × (hours + 3). Success % is a community-derived estimate using your level, selected bust-skill bonuses and the same decay settings. It is not an official Torn probability.</div>
         <div class="version">Version ${VERSION}</div>
       </div>
     `;
@@ -769,14 +715,15 @@
 
   function numberField(name, label, value) {
     const help = {
-      hardnessLimit: 'Maximum jail target score you want shown as safe. Lower is stricter. Your current 460-ish setting hides or dims people who are probably too expensive in nerve.',
-      customPenaltyThreshold: 'Optional manual cap for your bust budget score. Leave 0 to let Bustr+ estimate from your recent bust history. Set this only if you have your own tested limit.',
-      refreshSeconds: 'How often Bustr+ checks your Torn user/log for new busts. 60 seconds is calm and API-friendly; lower feels snappier but creates more requests.',
-      decayDivisorHours: 'How quickly old busts cool off in the estimate. Smaller means the script forgives old busts faster. Larger means old busts keep weighing on the counter longer.',
-      decayWindowHours: 'How far back Bustr+ looks when estimating bust fatigue. 72 hours is conservative. Shorter windows react faster; longer windows play safer.',
-      greenLimit: 'When the jail menu counter turns green. This is just a comfort color threshold, not a Torn rule.',
-      playerLevel: 'Your current Torn player level. The estimate uses level as the main bust-skill factor.',
-      otherBustSkillBonus: 'Additional busting-skill/success bonus percentage not covered by the faction and education checkboxes.',
+      hardnessLimit: 'Maximum jail target score you want shown as safe. Lower is stricter.',
+      customPenaltyThreshold: 'Optional manual cap for your bust budget score. Leave 0 to auto-estimate from history.',
+      refreshSeconds: 'How often Bustr+ checks your Torn user/log for new busts. 60 seconds is calm and API-friendly.',
+      decayDivisorHours: 'How quickly old busts cool off in the estimate. Smaller forgives faster.',
+      decayWindowHours: 'How far back Bustr+ looks when estimating bust fatigue.',
+      greenLimit: 'When the jail menu counter turns green.',
+      redLimit: 'When the jail menu counter turns red or below.',
+      playerLevel: 'Your current Torn player level.',
+      otherBustSkillBonus: 'Additional busting-skill/success bonus percentage.',
     }[name];
     const info = help
       ? `<span class="help-dot" tabindex="0" role="note" aria-label="${escapeAttr(help)}" data-tip="${escapeAttr(help)}">ⓘ</span>`
@@ -794,7 +741,6 @@
       state.settings.theme = state.settings.theme === 'light' ? 'dark' : 'light';
       saveSettings();
       renderPanel(true);
-      renderApiKeyGenerator(true);
     });
     panel.querySelector('[data-action="open-api"]').addEventListener('click', () => {
       openUrl(API_KEY_URL);
@@ -889,21 +835,25 @@
       decayDivisorHours: { min: 1 },
       decayWindowHours: { min: 1 },
       greenLimit: { min: 0 },
+      redLimit: { min: 0 },
       playerLevel: { min: 1 },
       otherBustSkillBonus: { min: 0 },
     };
     for (const [key, rule] of Object.entries(numberRules)) {
       const el = panel.querySelector(`#bustr-plus-${key}`);
+      if (!el) continue;
       const value = Math.floor(Number(el.value));
       if (Number.isFinite(value)) state.settings[key] = Math.max(rule.min, value);
     }
-    state.settings.hideHardTargets = panel.querySelector('#bustr-plus-hideHardTargets').checked;
-    state.settings.sortByHardness = panel.querySelector('#bustr-plus-sortByHardness').checked;
-    state.settings.skipBustConfirm = panel.querySelector('#bustr-plus-skipBustConfirm').checked;
-    state.settings.showSuccessChance = panel.querySelector('#bustr-plus-showSuccessChance').checked;
-    state.settings.factionBustSkill = panel.querySelector('#bustr-plus-factionBustSkill').checked;
-    state.settings.educationBustSkill = panel.querySelector('#bustr-plus-educationBustSkill').checked;
-    
+    state.settings.hideHardTargets = !!panel.querySelector('#bustr-plus-hideHardTargets')?.checked;
+    state.settings.sortByHardness = !!panel.querySelector('#bustr-plus-sortByHardness')?.checked;
+    state.settings.skipBustConfirm = !!panel.querySelector('#bustr-plus-skipBustConfirm')?.checked;
+    state.settings.showSuccessChance = !!panel.querySelector('#bustr-plus-showSuccessChance')?.checked;
+    state.settings.factionBustSkill = !!panel.querySelector('#bustr-plus-factionBustSkill')?.checked;
+    state.settings.educationBustSkill = !!panel.querySelector('#bustr-plus-educationBustSkill')?.checked;
+    state.settings.bailEducationDiscount = !!panel.querySelector('#bustr-plus-bailEducationDiscount')?.checked;
+    state.settings.bailLawFirmDiscount = !!panel.querySelector('#bustr-plus-bailLawFirmDiscount')?.checked;
+
     const manualInput = panel.querySelector('#bustr-plus-manual-total');
     if (manualInput) {
       state.settings.manualTotalBusts = manualInput.value.trim();
@@ -918,10 +868,6 @@
       }
     } catch (err) {}
     window.open(url, '_blank', 'noopener');
-  }
-
-  function renderApiKeyGenerator() {
-    document.getElementById('bustr-plus-keygen')?.remove();
   }
 
   function escapeAttr(value) {
@@ -940,14 +886,13 @@
     return `${avail} / ${total}`;
   }
 
-  /** Compact counter for small mobile/PDA jail slider. */
   function formatNavCounter() {
     return isCompactNav() ? String(formatAvailable()) : formatAvailableWithTotal();
   }
 
   function isCompactNav() {
-    // PDA / mobile sidebar and Torn PDA — total does not fit the pill
-    if (getViewportType() !== 'desktop') return true;
+    const width = window.visualViewport ? visualViewport.width : window.innerWidth;
+    if (width <= 1000) return true;
     if (typeof window.PDA_httpGet === 'function') return true;
     const ua = String(navigator.userAgent || '');
     if (/TornPDA|Android|iPhone|iPad/i.test(ua) && window.innerWidth < 1100) return true;
@@ -1186,7 +1131,6 @@
           stats.className = 'bustr-plus-nav';
           anchor.appendChild(stats);
         }
-        // Remove mobile pill if we flipped to desktop
         jailNav.querySelector('.bustr-plus-pill')?.remove();
         stats.textContent = label;
         stats.title = tip;
@@ -1197,7 +1141,6 @@
           pill.className = 'bustr-plus-pill';
           jailNav.appendChild(pill);
         }
-        // Remove desktop span on compact
         anchor.querySelector('.bustr-plus-nav')?.remove();
         pill.textContent = label;
         pill.title = tip;
@@ -1221,11 +1164,6 @@
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Community-derived success estimate. This is intentionally an estimate, not
-  // an official Torn percentage.
-  // Bustr+'s own configurable hardness and decay settings.
-  // -------------------------------------------------------------------------
   const SUCCESS_A = 266.6;
   const SUCCESS_B = 0.28;
   const PENALTY_PCT_ANCHOR = 1037;
@@ -1276,8 +1214,6 @@
     const curve = SUCCESS_DISPLAY_FLOOR
       + (SUCCESS_DISPLAY_CEILING - SUCCESS_DISPLAY_FLOOR) / (1 + Math.exp(exponent));
 
-    // Keep the calibrated-perk lift from the reference model, but apply it
-    // after the curve so it cannot re-introduce an artificial 100% reading.
     const lift = SUCCESS_LIFT_K * (calibration - SUCCESS_LIFT_PIVOT);
     return Math.max(
       SUCCESS_DISPLAY_FLOOR,
@@ -1386,8 +1322,6 @@
     return Math.floor(level * (hours + 3));
   }
 
-  // Official base bail formula: $100 per remaining jail minute per inmate level.
-  // Uses Torn's displayed jail timer, so the result is an estimate.
   function calcEstimatedBail(level, hours) {
     if (!Number.isFinite(level) || level <= 0 || !Number.isFinite(hours) || hours < 0) return null;
     let amount = 100 * level * hours * 60;
@@ -1398,43 +1332,72 @@
 
   function renderHardnessHeader() {
     const title = document.querySelector('.users-list-title');
-    if (!title || title.querySelector('.bustr-plus-hardness-col')) return;
-    const header = document.createElement('span');
-    header.className = 'hardness bustr-plus-hardness-col title-divider divider-spiky';
-    header.innerHTML = '<span class="bustr-plus-score-label">Score</span>';
-    const refresh = document.createElement('button');
-    refresh.type = 'button';
-    refresh.className = 'bustr-plus-jail-refresh';
-    refresh.textContent = '↻';
-    refresh.title = 'Refresh inmates';
-    refresh.setAttribute('aria-label', 'Refresh inmates');
-    refresh.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      refreshJailList();
-    });
-    header.appendChild(refresh);
-    const anchor = findJailColumnAnchor(title, 3);
-    if (anchor) anchor.insertAdjacentElement('afterend', header);
-    else title.appendChild(header);
+    if (!title) return;
+
+    if (!title.querySelector('.bustr-plus-hardness-col')) {
+      const header = document.createElement('span');
+      header.className = 'hardness bustr-plus-hardness-col title-divider divider-spiky';
+      header.innerHTML = '<span class="bustr-plus-score-label">Score</span>';
+
+      const refresh = document.createElement('button');
+      refresh.type = 'button';
+      refresh.className = 'bustr-plus-jail-refresh';
+      refresh.textContent = '↻';
+      refresh.title = 'Refresh inmates';
+      refresh.setAttribute('aria-label', 'Refresh inmates');
+      refresh.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        refreshJailList();
+      });
+
+      header.appendChild(refresh);
+      const anchor = findJailColumnAnchor(title, 3);
+      if (anchor) anchor.insertAdjacentElement('afterend', header);
+      else title.appendChild(header);
+    }
+
+    const actionHeader = title.querySelector('.action');
+    if (actionHeader && !actionHeader.querySelector('.bustr-plus-col-settings')) {
+      const gearBtn = document.createElement('button');
+      gearBtn.type = 'button';
+      gearBtn.className = 'bustr-plus-col-settings';
+      gearBtn.title = 'Open BUSTR+ settings';
+      gearBtn.setAttribute('aria-label', 'Open BUSTR+ settings');
+      gearBtn.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path fill="#fff" d="M24 13.616v-3.232c-1.651-.587-2.694-.752-3.219-2.019v-.001c-.527-1.271.1-2.134.847-3.707l-2.285-2.285c-1.561.742-2.433 1.375-3.707.847h-.001c-1.269-.526-1.435-1.576-2.019-3.219h-3.232c-.582 1.635-.749 2.692-2.019 3.219h-.001c-1.271.528-2.132-.098-3.707-.847l-2.285 2.285c.745 1.568 1.375 2.434.847 3.707-.527 1.271-1.584 1.438-3.219 2.02v3.232c1.632.58 2.692.749 3.219 2.019.53 1.282-.114 2.166-.847 3.707l2.285 2.286c1.562-.743 2.434-1.375 3.707-.847h.001c1.27.526 1.436 1.579 2.019 3.219h3.232c.582-1.636.75-2.69 2.027-3.222h.001c1.262-.524 2.12.101 3.698.851l2.285-2.286c-.744-1.563-1.375-2.433-.848-3.706.527-1.271 1.588-1.44 3.221-2.021zm-12 2.384c-2.209 0-4-1.791-4-4s1.791-4 4-4 4 1.791 4 4-1.791 4-4 4z"></path>
+        </svg>
+      `;
+      gearBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        renderPanel(false);
+      });
+      actionHeader.appendChild(gearBtn);
+    }
   }
 
-  function renderHardnessScore(info, score, chance = null, bailAmount = null) {
+  function ensureScoreWrap(info) {
     let wrap = info.querySelector('.bustr-plus-hardness-wrap');
     for (const extra of [...info.querySelectorAll('.bustr-plus-hardness-wrap')].slice(1)) extra.remove();
     if (!wrap) {
       wrap = document.createElement('span');
       wrap.className = 'hardness reason bustr-plus-hardness-wrap';
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
+      wrap.innerHTML = SCORE_WRAP_HTML;
       const reason = findJailColumnAnchor(info, 2);
       if (reason) reason.insertAdjacentElement('afterend', wrap);
       else info.appendChild(wrap);
     }
-    let value = wrap.querySelector('.bustr-plus-hardness');
-    if (!value) {
-      wrap.innerHTML = '<span class="title bold">SCORE</span><span class="bustr-plus-score-line"><span class="bustr-plus-hardness"></span><span class="bustr-plus-success-chance"></span></span><span class="bustr-plus-bail-cost"></span>';
-      value = wrap.querySelector('.bustr-plus-hardness');
+    if (!wrap.querySelector('.bustr-plus-hardness')) {
+      wrap.innerHTML = SCORE_WRAP_HTML;
     }
+    return wrap;
+  }
+
+  function renderHardnessScore(info, score, chance = null, bailAmount = null) {
+    const wrap = ensureScoreWrap(info);
+    const value = wrap.querySelector('.bustr-plus-hardness');
     const nextText = Number.isFinite(score) ? String(score) : '-';
     if (value.textContent !== nextText) value.textContent = nextText;
     const nextColor = !Number.isFinite(score) ? '#999' : score > state.settings.hardnessLimit ? '#e64d1a' : '#85b200';
@@ -1454,8 +1417,6 @@
       const bailText = Number.isFinite(bailAmount) ? '≈ $' + bailAmount.toLocaleString('en-US') : '';
       if (bail.textContent !== bailText) bail.textContent = bailText;
       bail.style.display = bailText ? 'block' : 'none';
-      bail.style.setProperty('color', '#000');
-      bail.style.setProperty('font-weight', '400');
       const discounts = [];
       if (state.settings.bailEducationDiscount) discounts.push('education (up to 57.25%)');
       if (state.settings.bailLawFirmDiscount) discounts.push('Law Firm 1-star (50%)');
@@ -1525,7 +1486,6 @@
       state.lastBustActionHref = bustHref;
       sessionStorage.setItem('bustrReturnToJailUntil', String(Date.now() + 8000));
       sessionStorage.setItem('bustrReturnToJailArmedAt', String(Date.now()));
-      sessionStorage.setItem('bustrLastQuickBustHref', bustHref);
       armReturnToJailWatcher();
     }, true);
   }
@@ -1583,11 +1543,8 @@
     if (Date.now() - state.lastLocalBustMs < 750 && state.lastLocalBustSignature) return false;
     state.lastLocalBustMs = Date.now();
     state.lastLocalBustSignature = signature;
-    state.penaltyScore += state.settings.freshBustScore;
-    state.availableBusts = state.penaltyThreshold > 0
-      ? Math.floor((state.penaltyThreshold - state.penaltyScore) / state.settings.freshBustScore)
-      : null;
-    // Optimistic total bump (API personalstats can lag until next day for some views)
+    state.timestamps.unshift(Math.floor(Date.now() / 1000));
+    recalcStats();
     if (Number.isFinite(state.totalBusts)) {
       state.totalBusts += 1;
       if (!state.settings.manualTotalBusts) saveTotalBusts(state.totalBusts);
@@ -1604,35 +1561,27 @@
   }
 
   function startObservers() {
-    if (!state.observerStarted) {
-      state.observerStarted = true;
-      const target = document.querySelector('#mainContainer') || document.body;
-      new MutationObserver((mutations) => {
-        if (window.location.pathname !== '/jailview.php') return;
-        for (const mutation of mutations) {
-          if (recordLocalBustSuccess(mutation.target?.textContent || '')) return;
-        }
-      }).observe(target, { childList: true, subtree: true });
-    }
-
-    if (!state.hardnessObserverStarted) {
-      state.hardnessObserverStarted = true;
-      const target = document.querySelector('#mainContainer') || document.body;
-      new MutationObserver((mutations) => {
-        if (mutations.every((mutation) => {
-          const targetEl = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
-          return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel, #bustr-plus-navitem');
-        })) return;
-        scheduleHardnessRender();
-      }).observe(target, { childList: true, subtree: true });
-    }
+    if (state.observerStarted) return;
+    state.observerStarted = true;
+    state.hardnessObserverStarted = true;
+    const target = document.querySelector('#mainContainer') || document.body;
+    new MutationObserver((mutations) => {
+      if (window.location.pathname !== '/jailview.php') return;
+      for (const mutation of mutations) {
+        if (recordLocalBustSuccess(mutation.target?.textContent || '')) return;
+      }
+      if (mutations.every((mutation) => {
+        const targetEl = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
+        return targetEl?.closest?.('.bustr-plus-hardness-wrap, #bustr-plus-panel');
+      })) return;
+      scheduleHardnessRender();
+    }).observe(target, { childList: true, subtree: true });
   }
 
   function startRefreshTimer() {
     if (state.refreshTimerId) clearInterval(state.refreshTimerId);
     state.refreshTimerId = setInterval(async () => {
       await loadBustData(false);
-      // Total busts change slowly; refresh cache when expired
       await refreshTotalBusts(false);
       renderAll();
     }, Math.max(15, state.settings.refreshSeconds) * 1000);
@@ -1644,36 +1593,34 @@
   async function init() {
     loadState();
     registerWithHub();
-    
+
     armReturnToJailWatcher();
     if (returnToJailAfterQuickBustRedirect()) return;
-    
+
     injectStyles();
     updateToggleVisibility();
-    renderApiKeyGenerator();
-    
+
     if (!state.settings.enabled) {
       cleanupModifications();
       return;
     }
-    
+
     await refreshTotalBusts(false);
     await loadBustData(false);
     renderAll();
     scanExistingBustSuccesses();
-    
+
     if (!state.apiKey && isJailPage() && window.location.hash.includes('bustrPlus=openSettings') && !isHubPresent()) {
       renderPanel(true);
     }
-    
+
     startBustConfirmSkipper();
     startObservers();
     startRefreshTimer();
     startPathWatcher();
-    
+
     window.addEventListener('resize', renderAll, { passive: true });
     window.addEventListener('hashchange', () => {
-      renderApiKeyGenerator();
       updateToggleVisibility();
     }, { passive: true });
     window.addEventListener('pageshow', () => {
@@ -1681,7 +1628,6 @@
       returnToJailAfterQuickBustRedirect();
     }, { passive: true });
 
-    // Hub lifecycle listeners
     document.addEventListener('torn-script-hub:ready', () => {
       state.hubPresent = isHubPresent();
       registerWithHub();
