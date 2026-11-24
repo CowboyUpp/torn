@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Script Hub
 // @namespace    https://greasyfork.org/en/users/1608691-cowboyup
-// @version      4.5.9
+// @version      4.5.10
 // @description  The central command center for your Torn scripts. Desktop: native sidebar item. Mobile/PDA: native Swiper slide. Dashboard for launch, prefs, library, and lightweight diagnostics. Now with a Watching section to track third-party scripts by GreasyFork ID, with auto version-checking.
 // @author       cowboyup
 // @match        https://www.torn.com/*
@@ -19,7 +19,7 @@
 (function () {
     'use strict';
 
-    const HUB_VERSION = '4.5.9';
+    const HUB_VERSION = '4.5.10';
     const EVENTS = Object.freeze({
         REGISTER:   'torn-script-hub:register',
         UNREGISTER: 'torn-script-hub:unregister',
@@ -383,7 +383,9 @@
                 fields: Array.isArray(detail.prefs.fields) ? detail.prefs.fields : [],
                 onSave: typeof detail.prefs.onSave === 'function' ? detail.prefs.onSave : null,
                 values: detail.prefs.values || {},
-                sections: Array.isArray(detail.prefs.sections) ? detail.prefs.sections : null
+                sections: Array.isArray(detail.prefs.sections) ? detail.prefs.sections : null,
+                // Optional: a script may draw its own settings UI instead of the field/section table.
+                render: typeof detail.prefs.render === 'function' ? detail.prefs.render : null
             };
             entry.prefs.fields.forEach(f => {
                 if (!(f.key in entry.prefs.values)) {
@@ -1059,7 +1061,26 @@
         const fieldByKey = new Map(fields.map(f => [f.key, f]));
         const sections = Array.isArray(script.prefs.sections) ? script.prefs.sections : null;
 
-        if (sections && sections.length) {
+        let customRendered = false;
+        if (typeof script.prefs.render === 'function') {
+            try {
+                script.prefs.render(body, {
+                    values: script.prefs.values,
+                    save: () => {
+                        if (script.prefs.onSave) script.prefs.onSave(script.prefs.values);
+                        refreshStatus();
+                    }
+                });
+                customRendered = true;
+            } catch (e) {
+                console.error('[TSH] custom settings renderer failed, using the table', e);
+                body.innerHTML = '';
+            }
+        }
+
+        if (customRendered) {
+            // the script drew its own settings UI
+        } else if (sections && sections.length) {
             // Sectioned layout: each section is a titled row of its fields (in order).
             // Fields not listed in any section fall back to legacy type groups below.
             const usedKeys = new Set();
