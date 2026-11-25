@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crime Chain Tracker
 // @namespace    https://greasyfork.org/users/cowboyup
-// @version      4.15.1
-// @description  Tracks your Crime 2.0 chain and local crime-profit statistics, including $/nerve efficiency and opt-in cross-device sync.
+// @version      4.16.1
+// @description  Tracks your Crime 2.0 chain, local crime-profit statistics (including $/nerve), and ammo found in crimes. Opt-in cross-device sync.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @run-at       document-idle
@@ -13,6 +13,7 @@
 // @connect      cct-sync.selbaer.workers.dev
 // @connect      login.microsoftonline.com
 // @connect      graph.microsoft.com
+// @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NDAgNTEyIj48cGF0aCBkPSJNMzIwIDY0YzE0LjQgMCAyMi4zLTcgMzAuOC0xNC40QzM2MC40IDQxLjEgMzcwLjcgMzIgMzkyIDMyYzQ5LjMgMCA4NC40IDE1Mi4yIDk3LjkgMjIxLjlDNDk0Ny44IDI3Mi4xIDM5MC45IDI4OCAzMjAgMjg4cy0xMjcuOC0xNS45LTE2OS45LTM0LjFDMTY2LjYgMTg0LjIgMTk4LjcgMzIgMjQ4IDMyYzIxLjMgMCAzMS42IDkuMSA0MS4yIDE3LjZDMjk3LjcgNTcgMzA1LjYgNjQgMzIwIDY0ek0xMTEuMSAyNzAuN2M0Ny4yIDI0LjUgMTE3LjUgNDkuMyAyMDkgNDkuM3MxNjEuOC0yNC44IDIwOC45LTQ5LjNjMjQuOC0xMi45IDQ5LjgtMjguMyA3MC4xLTQ3LjdjNy45LTcuOSAyMC4yLTkuMiAyOS42LTMuM2M5LjUgNS45IDEzLjUgMTcuOSA5LjkgMjguNS0xMy41IDM3LjctMzguNCA3Mi4zLTY2LjEgMTAwLjZDNTIzLjcgMzk4LjkgNDQzLjYgNDQ4IDMyMCA0NDhzLTIwMy42LTQ5LjEtMjUyLjUtOTkuMkMzOS44IDMyMC40IDE0LjkgMjg1LjggMS40IDI0OC4xYy0zLjYtMTAuNiAuNC0yMi42IDkuOS0yOC41YzkuNS01LjkgMjEuNy00LjUgMjkuNiAzLjNjMjAuNCAxOS40IDQ1LjMgMzQuOCA3MC4xIDQ3Ljd6Ii8+PC9zdmc+
 // @downloadURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.user.js
 // @updateURL https://update.greasyfork.org/scripts/581948/Crime%20Chain%20Tracker.meta.js
 // ==/UserScript==
@@ -20,7 +21,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '4.15.1';
+    const VERSION = '4.16.1';
     const SYNC_WORKER_URL = 'https://cct-sync.selbaer.workers.dev';
     installCrimeAttemptInterceptor();
     const STORAGE_KEY_CHAIN = 'cct_chain_v4';
@@ -47,6 +48,11 @@
     const OUTCOME_DEDUPE_MS = 3500;
     const MAX_REASONABLE_COUNTER_DELTA = 10;
     const ITEM_PRICE_CACHE_MS = 24 * 60 * 60 * 1000;
+
+    // Known ammo base names + special variants (from Torn wiki)
+    const AMMO_BASE_RE = /\b(9mm Parabellum|5\.56mm Rifle|7\.62mm Rifle|12 Gauge Cartridge|\.45 ACP|\.44 Special|5\.7mm High Vel|5\.45mm Rifle|\.380 ACP|\.25 ACP|Warhead|RPG|40mm Grenade|Stone|Bolt|Dart|Flare|Liter of Fuel|Egg|Taser Cartridge|Snow Ball)\b/i;
+    const AMMO_SPECIAL_RE = /\b(Hollow Point|Piercing|Tracer|Incendiary)\b/i;
+
     const SYNC_PUSH_INTERVAL_MS = 10 * 60 * 1000;
     const SYNC_PULL_INTERVAL_MS = 150 * 1000;
     const SYNC_PUSH_BATCH_MAX = 300;
@@ -58,7 +64,12 @@
     const LOG_IDS_ALL = [LOG_ID_SUCCESS, LOG_ID_FAIL, ...LOG_IDS_CRITICAL];
 
     let chain = clampChain(parseInt(safeGet(STORAGE_KEY_CHAIN, '0'), 10) || 0);
-    let isDark = safeGet(STORAGE_KEY_THEME, 'dark') !== 'light';
+    // Auto-detect Torn theme (body.dark-mode); fall back to stored preference
+    function detectTornTheme() {
+        return document.body && document.body.classList.contains('dark-mode');
+    }
+    let isDark = detectTornTheme() || safeGet(STORAGE_KEY_THEME, 'dark') !== 'light';
+    let themeObserver = null;
     let observer = null;
     let appWatchObserver = null;
     let appWatchInterval = null;
@@ -190,6 +201,7 @@
     const GEAR_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
     const CHART_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>';
     const BUG_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M19 7l-3 2M5 7l3 2M19 19l-3-2M5 19l3-2M20 13h-4M4 13h4M10 2l1 2M14 2l-1 2"/></svg>';
+    const CROSSHAIR_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/><circle cx="12" cy="12" r="3"/></svg>';
 
     function clampChain(value) {
         const n = Number(value);
@@ -229,6 +241,25 @@
 
     function saveTheme() {
         safeSet(STORAGE_KEY_THEME, isDark ? 'dark' : 'light');
+    }
+
+    function startThemeObserver() {
+        if (themeObserver) return;
+        themeObserver = new MutationObserver(() => {
+            const detected = detectTornTheme();
+            if (detected !== isDark) {
+                isDark = detected;
+                saveTheme();
+                applyTheme();
+            }
+        });
+        if (document.body) {
+            themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+        } else {
+            document.addEventListener('DOMContentLoaded', () => {
+                themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+            });
+        }
     }
 
     function saveLastEvent(event) {
@@ -1155,7 +1186,13 @@
             console.log(`[CCT v${VERSION}] captured a zero-reward success (e.g. Cracking brute-force step) — nerve counted, $0 payout.`);
         }
         const id = `profit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const record = { id, ts: new Date().toISOString(), cash, itemValue: 0, total: 0, items, nerve };
+        const ammo = [];
+        for (const item of items) {
+            if (AMMO_BASE_RE.test(item.name) || AMMO_SPECIAL_RE.test(item.name)) {
+                ammo.push({ id: item.id, name: item.name, quantity: item.quantity });
+            }
+        }
+        const record = { id, ts: new Date().toISOString(), cash, itemValue: 0, total: 0, items, ammo, nerve };
         recomputeRecordTotals(record);
         profitRecords.unshift(record);
         saveProfitData();
@@ -1469,6 +1506,138 @@
         const resetBtn = popover.querySelector('#cct-profit-reset');
         if (resetBtn) resetBtn.disabled = profitRecords.length === 0;
         applyProfitPopoverTheme();
+        const ammoPop = document.querySelector('#cct-ammo-popover');
+        if (ammoPop) { const th = t(); ammoPop.style.background = th.popoverBg; ammoPop.style.border = `1px solid ${th.popoverBorder}`; ammoPop.style.color = th.popoverColor; }
+    }
+
+    function ammoRows(period) {
+        const grouped = new Map();
+        for (const record of profitRecords) {
+            if (!record.ammo || !record.ammo.length) continue;
+            const key = profitPeriodKey(record.ts, period);
+            if (!grouped.has(key)) grouped.set(key, { key, ammo: {}, totalRounds: 0 });
+            const g = grouped.get(key);
+            for (const a of record.ammo) {
+                g.ammo[a.name] = (g.ammo[a.name] || 0) + a.quantity;
+                g.totalRounds += a.quantity;
+            }
+        }
+        return Array.from(grouped.values()).sort((a, b) => b.key.localeCompare(a.key));
+    }
+
+    function renderAmmoPopover() {
+        const popover = document.querySelector('#cct-ammo-popover');
+        if (!popover) return;
+        const period = popover.dataset.period || 'day';
+        const rows = ammoRows(period);
+        const isGraphView = popover.dataset.view === 'graph';
+
+        const totals = rows.reduce((sum, r) => {
+            sum.totalRounds += r.totalRounds;
+            for (const [name, qty] of Object.entries(r.ammo)) {
+                sum.byType[name] = (sum.byType[name] || 0) + qty;
+            }
+            return sum;
+        }, { totalRounds: 0, byType: {} });
+
+        const summaryEl = popover.querySelector('#cct-ammo-summary');
+        const topTypes = Object.entries(totals.byType).sort((a,b) => b[1]-a[1]).slice(0, 4);
+        summaryEl.innerHTML = `<div><small>Total rounds</small><strong>${totals.totalRounds.toLocaleString('en-US')}</strong></div>` +
+            topTypes.map(([n,q]) => `<div><small>${escapeHTML(n.split(' ').slice(0,2).join(' '))}</small><strong>${q.toLocaleString('en-US')}</strong></div>`).join('');
+
+        const tableEl = popover.querySelector('#cct-ammo-rows');
+        const graphEl = popover.querySelector('#cct-ammo-graph');
+        const scrollArea = popover.querySelector('#cct-ammo-scroll-area');
+        const toggleBtn = popover.querySelector('#cct-ammo-view-toggle');
+
+        if (isGraphView) {
+            tableEl.style.display = 'none';
+            graphEl.classList.add('cct-open');
+            scrollArea.classList.add('cct-hide-scrollbar');
+            toggleBtn.style.opacity = '1';
+        } else {
+            tableEl.style.display = 'grid';
+            graphEl.classList.remove('cct-open');
+            scrollArea.classList.remove('cct-hide-scrollbar');
+            toggleBtn.style.opacity = '0.6';
+        }
+
+        if (rows.length) {
+            const allTypes = [...new Set(rows.flatMap(r => Object.keys(r.ammo)))].sort();
+            tableEl.innerHTML = `<div class="cct-profit-row cct-profit-row-header"><span class="cct-profit-col-date">Period</span><span class="cct-profit-col-val">Total</span>${allTypes.map(t => `<span class="cct-profit-col-val" title="${escapeHTML(t)}">${escapeHTML(t.split(' ')[0])}</span>`).join('')}</div>` +
+                rows.map(r => `<div class="cct-profit-row"><span class="cct-profit-col-date">${escapeHTML(r.key)}</span><span class="cct-profit-col-val">${r.totalRounds.toLocaleString('en-US')}</span>${allTypes.map(t => `<span class="cct-profit-col-val">${(r.ammo[t]||0).toLocaleString('en-US')}</span>`).join('')}</div>`).join('');
+        } else {
+            tableEl.innerHTML = '<div class="cct-profit-empty">No ammo found in crimes yet.</div>';
+        }
+
+        if (isGraphView && rows.length > 1) {
+            graphEl.innerHTML = buildAmmoGraphSVG(rows);
+        } else if (isGraphView) {
+            graphEl.innerHTML = '<div class="cct-profit-empty" style="text-align:center;">Not enough data to graph yet.</div>';
+        }
+
+        popover.querySelectorAll('[data-ammo-period]').forEach((button) => button.classList.toggle('cct-profit-active', button.dataset.ammoPeriod === period));
+        const resetBtn = popover.querySelector('#cct-ammo-reset');
+        if (resetBtn) resetBtn.disabled = !profitRecords.some(r => r.ammo && r.ammo.length);
+    }
+
+    function buildAmmoGraphSVG(rows) {
+        // Simple multi-line for top types; reuse style from profit graph
+        const width = 360, height = 180, padding = { top: 20, right: 10, bottom: 30, left: 40 };
+        const allTypes = [...new Set(rows.flatMap(r => Object.keys(r.ammo)))];
+        const top = allTypes.map(t => [t, rows.reduce((s,r) => s + (r.ammo[t]||0), 0)]).sort((a,b)=>b[1]-a[1]).slice(0,5).map(x=>x[0]);
+        const maxY = Math.max(1, ...rows.map(r => r.totalRounds));
+        const getX = i => padding.left + (i / Math.max(1, rows.length-1)) * (width - padding.left - padding.right);
+        const getY = v => height - padding.bottom - (v / maxY) * (height - padding.top - padding.bottom);
+        const colors = ['#ff6b6b','#4ecdc4','#ffe66d','#a8e6cf','#ff8b94'];
+        let paths = '';
+        top.forEach((type, idx) => {
+            const d = rows.map((r,i) => `${i?'L':'M'}${getX(i)},${getY(r.ammo[type]||0)}`).join(' ');
+            paths += `<path d="${d}" stroke="${colors[idx%colors.length]}" fill="none" stroke-width="2" class="cct-graph-line"/>`;
+        });
+        const labels = rows.map((r,i) => `<text x="${getX(i)}" y="${height-5}" text-anchor="middle" class="cct-graph-label" font-size="9">${escapeHTML(r.key)}</text>`).join('');
+        return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${paths}${labels}</svg><div class="cct-graph-legend">${top.map((t,i)=>`<span><span class="dot" style="background:${colors[i%colors.length]}"></span>${escapeHTML(t.split(' ')[0])}</span>`).join('')}</div>`;
+    }
+
+    function wireAmmoPopover(el) {
+        const toggle = el.querySelector('#cct-ammo-toggle');
+        const popover = el.querySelector('#cct-ammo-popover');
+        if (!toggle || !popover) return;
+        toggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            el.querySelector('#cct-settings-popover')?.classList.remove('cct-open');
+            el.querySelector('#cct-profit-popover')?.classList.remove('cct-open');
+            popover.classList.toggle('cct-open');
+            if (popover.classList.contains('cct-open')) {
+                renderAmmoPopover();
+                clampPopoverToViewport(popover, el);
+            }
+        });
+        popover.querySelectorAll('[data-ammo-period]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                popover.dataset.period = btn.dataset.ammoPeriod;
+                renderAmmoPopover();
+            });
+        });
+        const viewToggle = popover.querySelector('#cct-ammo-view-toggle');
+        if (viewToggle) {
+            viewToggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                popover.dataset.view = popover.dataset.view === 'graph' ? 'table' : 'graph';
+                renderAmmoPopover();
+            });
+        }
+        const resetBtn = popover.querySelector('#cct-ammo-reset');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (!window.confirm('Reset ammo history? This clears ammo data from all crime records (profit $ history is kept).')) return;
+                for (const r of profitRecords) delete r.ammo;
+                saveProfitData();
+                renderAmmoPopover();
+            });
+        }
     }
 
     function hashText(text) {
@@ -2371,6 +2540,44 @@
                 text-align: right;
                 margin-top: 4px;
             }
+
+            #cct-ammo-popover {
+                display: none;
+                position: absolute;
+                top: calc(100% + 6px);
+                right: 0;
+                z-index: 9999;
+                width: 420px;
+                max-width: calc(100vw - 16px);
+                box-sizing: border-box;
+                max-height: min(68vh, 620px);
+                overflow: hidden;
+                padding: 10px 12px;
+                border-radius: 8px;
+                box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+                font-size: 12px;
+                flex-direction: column;
+            }
+            #cct-ammo-popover.cct-open { display: flex; }
+            #cct-ammo-scroll-area {
+                overflow-y: auto;
+                overflow-x: hidden;
+                flex: 1;
+                min-height: 0;
+            }
+            #cct-ammo-title { font-size: 13px; font-weight: 700; }
+            #cct-ammo-periods { display: flex; gap: 4px; margin: 6px 0; align-items: center; }
+            #cct-ammo-summary { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+            #cct-ammo-summary > div { display: flex; flex-direction: column; }
+            #cct-ammo-summary small { font-size: 9px; opacity: 0.55; text-transform: uppercase; }
+            #cct-ammo-reset-row { margin-top: 8px; }
+            #cct-ammo-reset {
+                padding: 4px 9px; font-size: 11px; border-radius: 5px; cursor: pointer;
+                opacity: 0.75; transition: opacity 0.15s;
+            }
+            #cct-ammo-reset:hover { opacity: 1; }
+            #cct-ammo-reset:disabled { opacity: 0.25; cursor: default; }
+
             #cct-profit-popover {
                 display: none;
                 position: absolute;
@@ -2520,6 +2727,8 @@
         }
 
         applyProfitPopoverTheme();
+        const ammoPop = document.querySelector('#cct-ammo-popover');
+        if (ammoPop) { const th = t(); ammoPop.style.background = th.popoverBg; ammoPop.style.border = `1px solid ${th.popoverBorder}`; ammoPop.style.color = th.popoverColor; }
 
         document.querySelectorAll('#cct-chain-input,#cct-log-key-input,#cct-sync-token-input').forEach((input) => {
             input.style.background = th.inputBg;
@@ -2579,6 +2788,7 @@
                 </div>
             </div>
             <button id="cct-theme-toggle" class="cct-icon-btn" type="button" title="Toggle light/dark mode">${isDark ? SUN_ICON : MOON_ICON}</button>
+            <button id="cct-ammo-toggle" class="cct-icon-btn" type="button" title="Ammo found in crimes">${CROSSHAIR_ICON}</button>
             <button id="cct-profit-toggle" class="cct-icon-btn" type="button" title="Crime Profit">$</button>
             <button id="cct-gear" class="cct-icon-btn" type="button" title="Settings">${GEAR_ICON}</button>
             <div id="cct-settings-popover">
@@ -2605,6 +2815,26 @@
                     <ul id="cct-log-list"></ul>
                     <button id="cct-log-clear" type="button">Clear log</button>
                 </details>
+                <div class="cct-version-footer">Version ${VERSION}</div>
+            </div>
+
+            <div id="cct-ammo-popover" data-period="day" data-view="table">
+                <div id="cct-ammo-title">Ammo Found <span style="font-size: 9px; opacity: 0.5; font-weight: normal; margin-left: 4px;">v${VERSION}</span></div>
+                <div id="cct-ammo-periods">
+                    <button class="cct-profit-period" data-ammo-period="day" type="button">Day</button>
+                    <button class="cct-profit-period" data-ammo-period="week" type="button">Week</button>
+                    <button class="cct-profit-period" data-ammo-period="month" type="button">Month</button>
+                    <button class="cct-profit-period" data-ammo-period="year" type="button">Year</button>
+                    <button id="cct-ammo-view-toggle" class="cct-icon-btn" type="button" title="Toggle Graph View" style="margin-left: auto; opacity: 0.6;">${CHART_ICON}</button>
+                </div>
+                <div id="cct-ammo-scroll-area">
+                    <div id="cct-ammo-summary"></div>
+                    <div id="cct-ammo-rows"></div>
+                    <div id="cct-ammo-graph"></div>
+                </div>
+                <div id="cct-ammo-reset-row">
+                    <button id="cct-ammo-reset" type="button">Reset ammo history</button>
+                </div>
                 <div class="cct-version-footer">Version ${VERSION}</div>
             </div>
             <div id="cct-profit-popover" data-period="day" data-view="table">
@@ -2685,6 +2915,7 @@
 
         wireSettings(el);
         wireProfitPopover(el);
+        wireAmmoPopover(el);
         applyTheme();
         renderCorrectionLog();
         renderProfitPopover();
@@ -2756,10 +2987,12 @@
             const root = document.querySelector('#cct-root');
             const popover = document.querySelector('#cct-settings-popover');
             const profitPopover = document.querySelector('#cct-profit-popover');
+            const ammoPopover = document.querySelector('#cct-ammo-popover');
             if (!root) return;
             if (!root.contains(e.target)) {
                 if (popover) popover.classList.remove('cct-open');
                 if (profitPopover) profitPopover.classList.remove('cct-open');
+                if (ammoPopover) ammoPopover.classList.remove('cct-open');
             }
         });
     }
@@ -2770,6 +3003,7 @@
         toggle.addEventListener('click', (e) => {
             e.stopPropagation();
             el.querySelector('#cct-settings-popover').classList.remove('cct-open');
+            el.querySelector('#cct-ammo-popover')?.classList.remove('cct-open');
             popover.classList.toggle('cct-open');
             if (popover.classList.contains('cct-open')) {
                 renderProfitPopover();
@@ -2882,6 +3116,7 @@
         gear.addEventListener('click', (e) => {
             e.stopPropagation();
             el.querySelector('#cct-profit-popover').classList.remove('cct-open');
+            el.querySelector('#cct-ammo-popover')?.classList.remove('cct-open');
             popover.classList.toggle('cct-open');
             if (popover.classList.contains('cct-open')) {
                 renderCorrectionLog();
@@ -3110,6 +3345,7 @@
             route: location.pathname + location.search,
         });
         console.log(`[CCT v${VERSION}] Crimes interface detected (${source}); initializing tracker.`);
+        startThemeObserver();
         runSyncLoop();
         pollNerve('init');
         setInterval(() => pollNerve('interval'), 1500);
