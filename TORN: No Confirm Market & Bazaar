@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         TORN: No Confirm Market & Bazaar
-// @namespace    greasyfork.org/en/users/1608691-cowboyup
+// @namespace    cowboyup.torn.userscripts
 // @version      1.2.0
 // @description  One-click purchases on Torn Item Market and Bazaars, plus native seller row above TornW3B bazaar listings. Hub-aware.
 // @author       cowboyup
