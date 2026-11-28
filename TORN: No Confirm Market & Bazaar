@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         TORN: No Confirm Market & Bazaar
-// @namespace    cowboyup.torn.userscripts
-// @version      1.1.1
-// @description  Enables one-click purchases in the Torn Item Market and individual Bazaars only. Does not run on Auction House, missions, jobs, or other pages. Hub-aware.
+// @namespace    greasyfork.org/en/users/1608691-cowboyup
+// @version      1.2.0
+// @description  One-click purchases on Torn Item Market and Bazaars, plus native seller row above TornW3B bazaar listings. Hub-aware.
 // @author       cowboyup
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://*.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/bazaar.php*
 // @match        https://*.torn.com/bazaar.php*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
+// @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NDAgNTEyIj48cGF0aCBkPSJNMzIwIDY0YzE0LjQgMCAyMi4zLTcgMzAuOC0xNC40QzM2MC40IDQxLjEgMzcwLjcgMzIgMzkyIDMyYzQ5LjMgMCA4NC40IDE1Mi4yIDk3LjkgMjIxLjlDNDk0Ny44IDI3Mi4xIDM5MC45IDI4OCAzMjAgMjg4cy0xMjcuOC0xNS45LTE2OS45LTM0LjFDMTY2LjYgMTg0LjIgMTk4LjcgMzIgMjQ4IDMyYzIxLjMgMCAzMS42IDkuMSA0MS4yIDE3LjZDMjk3LjcgNTcgMzA1LjYgNjQgMzIwIDY0ek0xMTEuMSAyNzAuN2M0Ny4yIDI0LjUgMTE3LjUgNDkuMyAyMDkgNDkuM3MxNjEuOC0yNC44IDIwOC45LTQ5LjNjMjQuOC0xMi45IDQ5LjgtMjguMyA3MC4xLTQ3LjdjNy45LTcuOSAyMC4yLTkuMiAyOS42LTMuM2M5LjUgNS45IDEzLjUgMTcuOSA5LjkgMjguNS0xMy41IDM3LjctMzguNCA3Mi4zLTY2LjEgMTAwLjZDNTIzLjcgMzk4LjkgNDQzLjYgNDQ4IDMyMCA0NDhzLTIwMy42LTQ5LjEtMjUyLjUtOTkuMkMzOS44IDMyMC40IDE0LjkgMjg1LjggMS40IDI0OC4xYy0zLjYtMTAuNiAuNC0yMi42IDkuOS0yOC41YzkuNS01LjkgMjEuNy00LjUgMjkuNiAzLjNjMjAuNCAxOS40IDQ1LjMgMzQuOCA3MC4xIDQ3Ljd6Ii8+PC9zdmc+
 // @run-at       document-idle
 // @grant        none
 // @license      MIT
@@ -21,7 +21,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.1';
+  const VERSION = '1.2.0';
   const HUB_ID = 'no-confirm-market';
   const STORAGE_KEY = 'torn-no-confirm-market-settings-v1';
 
@@ -75,10 +75,10 @@
       if (sid === 'missions' || path.includes('missions')) return false;
       if (path.includes('companies.php') || sid.includes('company')) return false;
 
-      // Item Market
-      if (sid === 'itemmarket' || sid.startsWith('itemmarket')) return true;
+      // Item Market (Torn's page.php route only)
+      if (path === '/page.php' && (sid === 'itemmarket' || sid.startsWith('itemmarket'))) return true;
       // Personal / view bazaars
-      if (path.includes('bazaar.php')) return true;
+      if (path === '/bazaar.php') return true;
 
       return false;
     } catch (_) {
@@ -162,8 +162,9 @@
   function dialogLooksLikePurchase(container) {
     if (!container) return false;
     const text = normalize(container.textContent);
-    // Require buy/purchase language near the Yes/No pair so mission/job confirms are ignored
-    return /\b(buy|purchase|bazaar|market|\$|€|£)\b/.test(text);
+    // Require explicit buy/purchase wording in the dialog itself. Avoid broad
+    // market/bazaar matches that could come from the page behind a modal.
+    return /\b(?:buy|purchase)\b/.test(text);
   }
 
   function findYesControl() {
@@ -250,6 +251,101 @@
 
   loadConfig();
   console.info('[No Confirm]', VERSION, '— Item Market & Bazaars only');
+  startQuickBuyLayoutObserver();
+
+
+  // --- Quick Buy layout: keep native Torn seller row above TornW3B bazaar listings ---
+  // This section deliberately does NOT touch .yes-buy, BUY buttons, cart buttons,
+  // or any native Torn seller controls. No Confirm remains responsible for
+  // the purchase confirmation itself.
+
+  const BAZAAR_CONTAINER_SELECTOR = '.bazaar-info-container';
+  const SELLER_LIST_SELECTOR =
+    '[class^="sellerList___"], [class*=" sellerList___"]';
+
+  function fixBazaarOrder(bazaar) {
+    if (!(bazaar instanceof HTMLElement)) return;
+
+    const parent = bazaar.parentElement;
+    if (!parent) return;
+
+    // TornW3B places its container in the same parent as Torn's seller list.
+    const nativeSellerList = Array.from(parent.children).find(
+      (element) => element instanceof HTMLElement &&
+        element.matches(SELLER_LIST_SELECTOR)
+    );
+
+    if (!nativeSellerList) return;
+
+    // Desired order:
+    //   native Torn seller row/list
+    //   TornW3B bazaar listings
+    if (nativeSellerList.nextElementSibling === bazaar) return;
+
+    // Move only the TornW3B container. Native Torn controls remain untouched.
+    nativeSellerList.insertAdjacentElement('afterend', bazaar);
+  }
+
+  function processQuickBuyLayout() {
+    if (!isAllowedPage()) return;
+
+    const url = new URL(location.href);
+
+    // The layout change is only for the Item Market.
+    if (
+      url.pathname.toLowerCase() !== '/page.php' ||
+      !url.searchParams.get('sid')?.toLowerCase().startsWith('itemmarket')
+    ) {
+      return;
+    }
+
+    document
+      .querySelectorAll(BAZAAR_CONTAINER_SELECTOR)
+      .forEach(fixBazaarOrder);
+  }
+
+  let quickBuyTimer = null;
+
+  function scheduleQuickBuyLayout(delay = 150) {
+    if (quickBuyTimer !== null) {
+      clearTimeout(quickBuyTimer);
+    }
+
+    quickBuyTimer = setTimeout(() => {
+      quickBuyTimer = null;
+      processQuickBuyLayout();
+    }, delay);
+  }
+
+  function startQuickBuyLayoutObserver() {
+    if (!document.documentElement) return;
+
+    const url = new URL(location.href);
+    if (
+      url.pathname.toLowerCase() !== '/page.php' ||
+      !url.searchParams.get('sid')?.toLowerCase().startsWith('itemmarket')
+    ) return;
+
+    const observer = new MutationObserver((mutations) => {
+      if (!isAllowedPage()) return;
+
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length || mutation.removedNodes.length) {
+          scheduleQuickBuyLayout();
+          return;
+        }
+      }
+    });
+
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+
+    // Handle the current page immediately, then allow TornW3B time to build
+    // its bazaar container.
+    scheduleQuickBuyLayout(250);
+  }
 
   // --- Hub Integration ---
   function showToast(msg) {
